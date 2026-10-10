@@ -257,8 +257,10 @@ static inline Mega megaLift(float2 p, float lagoon, uint seed) {
         float2 c = (float2(cell) + 0.25 + 0.5 * float2(hashf(pcg(hc)), hashf(pcg(hc + 1u)))) * CELL;
         float R = 900.0 + 600.0 * hashf(pcg(hc + 2u));
         float dd = length(p - c);
-        if (dd < R + 900.0) {
-            float d = dd + 320.0 * fbm2(p / 1100.0, 3, seed + 241u) + 50.0 * perlin2(p / 140.0, seed + 242u);
+        if (dd < R + 1300.0) {
+            // Lobes and buttresses, so the rim reads as eroded rock, not a drum.
+            float d = dd + 520.0 * fbm2(p / 1100.0, 3, seed + 241u) + 140.0 * perlin2(p / 330.0, seed + 244u)
+                    + 50.0 * perlin2(p / 140.0, seed + 242u);
             float Hl = 1500.0 + 350.0 * hashf(pcg(hc + 3u));
             float t = 0.22 * smoothstep(R + 420.0, R + 10.0, d) + 0.78 * smoothstep(R + 10.0, R - 6.0, d);
             float top = 30.0 * fbm2(p / 350.0, 2, seed + 243u) * smoothstep(R, R - 80.0, d);
@@ -403,6 +405,18 @@ kernel void cleanupColumns(texture2d<float, access::read> src [[texture(0)]],
 // from its trunk, so a column only needs the trees of its own and the 8 neighbouring cells.
 constant int TREE_CELL = 5;
 
+// Snow above this height: cold country as ever, while warm provinces lift it far up their ranges (hot ones never
+// snow), so massifs are rock and forest under a cap rather than white sheets.
+static inline float snowlineAt(float temp) {
+    return mix(160.0, 92.0, smoothstep(0.42, 0.18, temp)) + 1400.0 * smoothstep(0.42, 0.75, temp);
+}
+
+// Forest gives out well under a high snowline, leaving a band of bare rock.
+static inline float treelineAt(float snowline) { return snowline - 150.0 * smoothstep(200.0, 700.0, snowline); }
+
+// Air cools up a range: deciduous, then conifer, then bare rock and snow.
+static inline float altitudeTemp(float temp, float H) { return temp - 0.22 * smoothstep(150.0, 1400.0, H); }
+
 static inline float coniferAmount(Climate c) { return smoothstep(0.50, 0.32, c.temp) * (1.0 - 0.8 * autumnAmount(c)); }
 
 // Whole groves of birch within the autumn woods.
@@ -420,7 +434,7 @@ static inline float groveDensity(float2 w, float g, uint seed) {
     float open = (1.0 - smoothstep(0.2, 0.5, desertAmount(c))) * (1.0 - smoothstep(0.1, 0.4, painted))
                * (1.0 - smoothstep(0.15, 0.5, saltAmount(c)));
     float wet = smoothstep(0.25, 0.6, c.moist) * open;
-    float snowline = mix(160.0, 92.0, smoothstep(0.42, 0.18, c.temp));
+    float snowline = treelineAt(snowlineAt(c.temp));
     // Lagoon islets are only a few voxels high, so their groves start right above the sand.
     float lagoon = lagoonAmount(c);
     float band = smoothstep(mix(SEA + 2.0, SEA + 1.0, lagoon), mix(SEA + 6.0, SEA + 2.5, lagoon), g) * smoothstep(snowline - 4.0, snowline - 30.0, g);
@@ -452,6 +466,7 @@ static Tree treeInCell(texture2d<float, access::read> src, int2 cell, int2 origi
     if (hashf(pcg(h)) > groveDensity(w, t.g, seed)) return t;
     uint r = pcg(h + 5u);
     Climate c = climate(w, seed);
+    c.temp = altitudeTemp(c.temp, t.g);
     // 0 shrub, 1 small round, 2 round, 3 conifer, 4 birch.
     float dense = groveDensity(w, t.g, seed);
     if (paintedAmount(c) > 0.3) t.kind = 0;
@@ -744,7 +759,7 @@ static Lie survey(texture2d<float, access::read> hm, int2 c, int2 cw, uint seed)
     Climate cl = climate(w, seed);
     L.desert = desertAmount(cl); L.painted = paintedAmount(cl); L.lagoon = lagoonAmount(cl); L.salt = saltAmount(cl);
     L.cold = smoothstep(0.42, 0.18, cl.temp);
-    L.snowline = mix(160.0, 92.0, L.cold);
+    L.snowline = snowlineAt(cl.temp);
     float settled = fbm2(p / 1500.0, 2, seed + 140u) + 0.5;
     float ancient = fbm2(p / 1800.0 + 77.0, 2, seed + 141u) + 0.5;
     float lo5, hi5, lo9, hi9;
@@ -767,10 +782,15 @@ static Lie survey(texture2d<float, access::read> hm, int2 c, int2 cw, uint seed)
             if (ri >= 2) { ring += hq; ringN += 1; }
             if (ri == 1 && hq < SEA) wet16 += 1.0 / 16.0;
         }
+    float min6 = 1e9;
     for (int k = 0; k < 8; k++) {
         float a = float(k) * 0.785398;
-        max6 = max(max6, colH(hm, c + int2(round(float2(cos(a), sin(a)) * 6.0))));
+        float h6 = colH(hm, c + int2(round(float2(cos(a), sin(a)) * 6.0)));
+        max6 = max(max6, h6);
+        min6 = min(min6, h6);
     }
+    // Nothing is built within 6 of a sheer drop of more than 40 (a pillar top's or an escarpment's edge).
+    if (g - min6 > 40.0) return L;
     L.prom = g - ring / ringN;
     // A tread with a riser close by: a terrace.
     float riser = 0;
@@ -1824,13 +1844,28 @@ static inline float3 autumnLeaf(float2 w, float birch, uint seed) {
 // Sedimentary bedding by world height: broad formations, beds of uneven tone and fine laminae. Beds dip gently
 // with a slow horizontal warp, so a layer runs continuously across neighbouring columns and around canyon walls.
 // Bed edges widen and fine terms fade with the pixel footprint fp (voxels per pixel).
-static inline float3 strataTone(float y, float2 w, uint seed, float desertAmt, float fp) {
+// `wall` (0..1) marks the great walls of mega relief, whose rock reads as formations from foot to rim.
+static inline float3 strataTone(float y, float2 w, uint seed, float desertAmt, float fp, float wall = 0.0) {
     float yd = y + 1.2 * perlin2(w / 140.0, seed + 24u) + 0.3 * perlin2(w / 30.0, seed + 25u);
     float k = 0.5 + 0.5 * sin(yd * 0.38 + 2.2 * perlin2(w * 0.01, seed + 22u) + 1.3 * perlin2(w * 0.003, seed + 23u));
     k = smoothstep(0.25, 0.75, k);
+    // On the great walls the regular 16-voxel bands would read as a zebra stripe; the formations carry the tone there.
+    float fz = max(smoothstep(120.0, 300.0, y), wall);
+    k = mix(k, 0.5, 0.9 * fz);
     float3 grey = mix(float3(0.22, 0.23, 0.25), float3(0.35, 0.34, 0.33), k);
     float3 sand = mix(float3(0.56, 0.36, 0.24), float3(0.70, 0.52, 0.37), k);
     float3 base = mix(grey, sand, desertAmt);
+    // Formations: on the great walls, broad units ~90 tall of pale cap rock, red or grey wall rock, shale and buff, so
+    // an 800-voxel face reads as geology rather than one repeated stripe. Absent from the lowland.
+    if (fz > 0.0) {
+        float f = saturate(perlin2(float2(yd / 170.0 + 0.6 * perlin2(w / 2600.0, seed + 29u), 0.13), seed + 30u) * 0.8 + 0.5) * 3.0;
+        float fi = min(floor(f), 2.0), ff = smoothstep(0.35, 0.65, f - fi);
+        const float3 warm[4] = { float3(0.62, 0.56, 0.47), float3(0.55, 0.31, 0.21), float3(0.34, 0.31, 0.30), float3(0.60, 0.47, 0.33) };
+        const float3 cool[4] = { float3(0.46, 0.46, 0.45), float3(0.30, 0.30, 0.32), float3(0.40, 0.37, 0.33), float3(0.22, 0.23, 0.25) };
+        float wm = saturate(desertAmt + 0.5);
+        float3 fa = mix(cool[int(fi)], warm[int(fi)], wm), fb = mix(cool[int(fi) + 1], warm[int(fi) + 1], wm);
+        base = mix(base, mix(fa, fb, ff), 0.7 * fz);
+    }
 
     float yb = yd / 2.4;
     float bi = floor(yb), bf = yb - bi;
@@ -1838,7 +1873,7 @@ static inline float3 strataTone(float y, float2 w, uint seed, float desertAmt, f
     uint sb = seed + 26u;
     float t0 = hashf(hash2i(int2(int(bi), 0), sb)), t1 = hashf(hash2i(int2(int(bi) + 1, 0), sb));
     float bed = mix(t0, t1, smoothstep(1.0 - e, 1.0, bf)) - 0.5;
-    float bedFade = 1.0 - smoothstep(0.6, 1.8, fp);
+    float bedFade = (1.0 - smoothstep(0.6, 1.8, fp)) * (1.0 - 0.5 * wall);
     float lam = fp < 0.05 ? sin(yd * 21.0 + 3.0 * perlin2(w / 11.0, seed + 27u)) * (1.0 - smoothstep(0.015, 0.05, fp)) : 0.0;
     float parting = (1.0 - smoothstep(0.0, 0.03, min(bf, 1.0 - bf))) * (1.0 - smoothstep(0.02, 0.06, fp));
     // Desert beds swing between rust and pale cream; grey rock between warm umber and cool slate.
@@ -1927,7 +1962,11 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     s.riser = n.y == 0 ? H - nb : 0.0;
     Climate c = climateL(tr, k, (float2(v.xz) + 0.5) * cs);
     float desert = desertAmount(c);
-    float painted = smoothstep(0.0, 0.6, paintedAmount(c));
+    // Painted-hill beds belong to low mounds; on the great walls their 11-voxel bands would read as stripes.
+    float painted = smoothstep(0.0, 0.6, paintedAmount(c)) * (1.0 - smoothstep(150.0, 350.0, H));
+    float snowline = snowlineAt(c.temp) + 5.0 * perlin2(w / 160.0, seed + 21u)
+                   + 60.0 * perlin2(w / 700.0, seed + 28u) * smoothstep(150.0, 400.0, H);
+    c.temp = altitudeTemp(c.temp, H);
     float cold = smoothstep(0.42, 0.18, c.temp);
     float autumn = autumnAmount(c);
     s.autumn = autumn;
@@ -1942,12 +1981,11 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     float salt = saltAmount(c);
     float rimW = smoothstep(0.05, 0.4, salt);
 
-    float snowline = mix(160.0, 92.0, cold) + 5.0 * perlin2(w / 160.0, seed + 21u);
     // Beaches and beds take sand or crust, faces included, so they need none of the ground and rock tones.
     bool beach = H <= SEA + 1.2;
     // Rock tone shows on side and under faces, and on high treads; a low tread never reads it.
     bool needStone = !beach && (!(n.y > 0 && !underGap) || H - SEA > 0.55 * 110.0);
-    float3 stone = needStone ? strataTone(wy, wq, seed, max(desert, rimW), fpA) : float3(0);
+    float3 stone = needStone ? strataTone(wy, wq, seed, max(desert, rimW), fpA, smoothstep(150.0, 350.0, H)) : float3(0);
 
     float lagoon = smoothstep(0.0, 0.35, lagoonAmount(c));
     // Pale ground (sand, salt, snow) sits well below the clouds, and drifts in tone so open flats never read as one sheet.
@@ -2051,7 +2089,8 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         s.pale = beach || snowy ? 1.0 : 0.0;
         if (beach) s.albedo = tread * 0.85;
         else if (slope < 4.0 && !snowy) s.albedo = mix(mix(tread, stone, 0.5) * 0.9, stone * 0.95, painted);
-        else s.albedo = snowy ? mix(stone, snow, 0.45) : stone;
+        // Snow lies on the treads; a tall wall stays rock under it.
+        else s.albedo = snowy ? mix(stone, snow, 0.45 * (1.0 - smoothstep(6.0, 30.0, slope))) : stone;
     } else {
         s.albedo = stone * 0.9;
     }
