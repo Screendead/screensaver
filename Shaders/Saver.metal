@@ -901,6 +901,8 @@ static Surface surfaceAt(texture2d<float> hm, texture2d<float> clim, int size, i
     s.tread = tread;
     bool snowy = float(int(H)) > snowline;
     if (snowy) s.riser = 0.0;
+    // Snow risers prefilter to snow; eased across the snowline, which far off is one straight contour.
+    s.tread = mix(tread, snow, smoothstep(snowline - 6.0, snowline + 6.0, H));
 
     if (n.y > 0 && !underGap) {
         if (float(v.y + 1) > snowline) s.albedo = snow;
