@@ -114,7 +114,7 @@ static inline Climate climate(float2 w, uint seed) {
     Climate c;
     c.temp = saturate(fbm2(p / 900.0, 2, seed + 11) * 1.6 + 0.5);
     c.moist = saturate(fbm2(p / 800.0 + 91.0, 2, seed + 12) * 1.6 + 0.5);
-    c.fall = saturate(fbm2(p / 1000.0 + 213.0, 2, seed + 15) * 1.6 + 0.5);
+    c.fall = saturate(perlin2(p / 1000.0 + 213.0, seed + 15) * 2.0 + 0.5);
     return c;
 }
 
@@ -210,11 +210,6 @@ constant int TREE_CELL = 5;
 
 static inline float coniferAmount(Climate c) { return smoothstep(0.50, 0.32, c.temp) * (1.0 - 0.8 * autumnAmount(c)); }
 
-static inline float groveField(float2 w, uint seed) {
-    float2 p = w + seedOffset(seed);
-    return fbm2(p / 300.0, 3, seed + 90u) + 0.3 * perlin2(p / 70.0, seed + 91u);
-}
-
 // Whole groves of birch within the autumn woods.
 static inline float birchAmount(float2 w, uint seed) {
     return smoothstep(0.22, 0.38, perlin2((w + seedOffset(seed)) / 110.0, seed + 95u));
@@ -222,8 +217,9 @@ static inline float birchAmount(float2 w, uint seed) {
 
 // Grove density: a low-frequency Perlin field gated by climate; zero on sand, snow, desert and water.
 static inline float groveDensity(float2 w, float g, uint seed) {
+    float2 p = w + seedOffset(seed);
     Climate c = climate(w, seed);
-    float grove = groveField(w, seed);
+    float grove = fbm2(p / 300.0, 3, seed + 90u) + 0.3 * perlin2(p / 70.0, seed + 91u);
     float autumn = autumnAmount(c);
     float open = 1.0 - smoothstep(0.2, 0.5, desertAmount(c));
     float wet = smoothstep(0.25, 0.6, c.moist) * open;
@@ -613,8 +609,8 @@ struct Surface {
 static inline float3 autumnLeaf(float2 w, float birch, uint seed) {
     float k = saturate(perlin2(w / 75.0, seed + 96u) * 1.1 + 0.55 + 0.12 * perlin2(w / 19.0, seed + 97u));
     k = mix(k, 0.28, 0.75 * birch);
-    float3 green = float3(0.055, 0.075, 0.03), gold = float3(0.22, 0.15, 0.035), orange = float3(0.22, 0.085, 0.025);
-    float3 scarlet = float3(0.19, 0.035, 0.016), crimson = float3(0.12, 0.018, 0.018);
+    float3 green = float3(0.055, 0.075, 0.03), gold = float3(0.22, 0.15, 0.035), orange = float3(0.21, 0.09, 0.035);
+    float3 scarlet = float3(0.18, 0.04, 0.025), crimson = float3(0.12, 0.018, 0.018);
     if (k < 0.2) return mix(green, gold, smoothstep(0.0, 0.2, k));
     if (k < 0.45) return mix(gold, orange, smoothstep(0.2, 0.45, k));
     if (k < 0.7) return mix(orange, scarlet, smoothstep(0.45, 0.7, k));
@@ -699,7 +695,12 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
     float cold = smoothstep(0.42, 0.18, c.temp);
     float autumn = autumnAmount(c);
     s.autumn = autumn;
-    float birch = autumn > 0.0 ? birchAmount(w, seed) : 0.0;
+    float birch = 0.0;
+    float3 fallLeaf = 0.0;
+    if (autumn > 0.0) {
+        birch = birchAmount(w, seed);
+        fallLeaf = autumnLeaf(w, birch, seed);
+    }
     bool underGap = !tree && col.z > col.y && float(v.y) < col.z;
 
     float snowline = mix(160.0, 92.0, cold) + 5.0 * perlin2(w / 160.0, seed + 21u);
@@ -709,8 +710,8 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
     float3 grass = mix(mix(grassDry, grassWet, smoothstep(0.3, 0.7, c.moist)), grassCold, cold);
     // Autumn ground: tawny grass, with fallen leaves drifting out from the groves in the canopy's own hues.
     if (autumn > 0.0) {
-        float litter = smoothstep(0.12, 0.40, groveField(w, seed));
-        float3 fallen = mix(autumnLeaf(w, birch, seed) * 1.5, float3(0.30, 0.15, 0.07), 0.45);
+        float litter = smoothstep(0.08, 0.36, perlin2((w + seedOffset(seed)) / 300.0, seed + 90u));
+        float3 fallen = mix(fallLeaf * 1.5, float3(0.30, 0.15, 0.07), 0.45);
         grass = mix(grass, mix(float3(0.22, 0.18, 0.09), fallen, litter), autumn * 0.8);
     }
     float3 sand = float3(0.47, 0.41, 0.29);
@@ -759,7 +760,7 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
         float k = saturate(perlin2(w / 23.0, seed + 93u) * 0.9 + 0.5);
         float3 leaf = mix(float3(0.035, 0.07, 0.035), float3(0.065, 0.09, 0.04), k);
         leaf = mix(leaf, float3(0.025, 0.055, 0.045), conifer);
-        leaf = mix(leaf, autumnLeaf(w, birch, seed), autumn * (1.0 - conifer * 0.5));
+        leaf = mix(leaf, fallLeaf, autumn * (1.0 - conifer * 0.5));
         // A 16x16 leaf texture: two-tone texels, faded out once a texel nears a pixel.
         int2 tx = int2(floor(uv * 16.0));
         int3 tk = n.y != 0 ? int3(v.x * 16 + tx.x, v.y * 2 + max(n.y, 0), v.z * 16 + tx.y)
