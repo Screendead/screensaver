@@ -1103,7 +1103,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         if Renderer.profile == "nobake" && shadowValid { f.shadow.x = 1; return }
         guard casts, levels > 0, let enc = cb.makeComputeCommandEncoder() else { shadowValid = false; f.shadow.x = 0; return }
         let cam = SIMD2(camera.position.x, camera.position.z)
-        let jumped = shadowFrom.map { simd_length($0.cam - cam) > 300 || simd_dot($0.key, key) < 0.9998 } ?? true
+        let jumped = shadowFrom.map { simd_length($0.cam - cam) > 300 || simd_dot($0.key, key) < 0.995 } ?? true
         if !shadowValid || jumped { shadowFrom = (cam, key); shadowBand = [0, 0] }
         let full = !shadowValid || jumped
         let cosE = simd_length(SIMD2(key.x, key.z))
@@ -1303,7 +1303,7 @@ enum Snapshot {
                 cb.commit()
                 cb.waitUntilCompleted()
                 times.append((cb.gpuEndTime - cb.gpuStartTime) * 1000)
-                if Renderer.logTiming { print(String(format: "frame %d gpu %.2f ms%@", i, times.last!, r.clipmap.idle ? "" : " (coarse job pending)")) }
+                if Renderer.logTiming { print(String(format: "frame %d gpu %.2f ms cam (%.1f, %.1f, %.1f)%@", i, times.last!, r.camera.position.x, r.camera.position.y, r.camera.position.z, r.clipmap.idle ? "" : " (coarse job pending)")) }
                 if i >= frames - dump {
                     tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
                     write(bytes: bytes, width: w, height: h, to: out.replacingOccurrences(of: ".png", with: "_f\(i - frames + dump).png"))
