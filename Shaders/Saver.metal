@@ -427,6 +427,8 @@ kernel void reduceMax(texture2d<float, access::read> src [[texture(0)]],
 // Coarse level k (1...4) has columns s = 2^k voxels wide, built from the same terrainColumn field: the mean of
 // four point samples, one per child column, so no coarse level carries trees or arches.
 constant int COARSE_N = 2048;
+// Seen at a grazing angle, trees standing several voxels tall hide far more ground than their footprint covers.
+constant float COVER_GAIN = 2.5;
 
 static inline float coarseHeight(int2 cw, int k, uint seed) {
     int s = 1 << k, off = s >> 2, hs = s >> 1;
@@ -1086,6 +1088,18 @@ static Surface surfaceAt(thread const Terrain& tr, int k, int3 v, int3 n, float2
         // walls and corners, every pool would be outlined.
         s.level = crustW;
     }
+    // Coarse levels carry no trees: the share of a column under canopy tints its ground with their leaves.
+    if (k > 0) {
+        float cov = saturate(coverL(tr, k, v.xz) * COVER_GAIN);
+        if (cov > 0.0) {
+            float conifer = smoothstep(0.50, 0.32, c.temp);
+            float3 leaf = mix(float3(0.05, 0.08, 0.0375), float3(0.025, 0.055, 0.045), conifer);
+            leaf = mix(leaf, float3(0.11, 0.125, 0.09), painted);
+            leaf = mix(leaf, fallLeaf, autumn * (1.0 - conifer * 0.5)) * 0.92;
+            tread = mix(tread, leaf, cov);
+            s.canopy = mix(1.0, 0.7, cov);
+        }
+    }
     s.tread = tread;
     bool snowy = float(int(H)) > snowline;
     if (snowy) s.riser = 0.0;
@@ -1422,6 +1436,22 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     return col;
 }
 
+// In a morph band the shading also slides to the next level's, reaching it where the geometry does, so the switch
+// at the handoff circle is seamless in colour and light as well as in shape.
+static float3 shadeL(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows) {
+    float3 col = shade(x, o, d, h, shadows);
+    float3 p = o + d * h.t;
+    float w = morphAt(x.tr, h.level, p.xz);
+    if (w > 0.0) {
+        Hit h2 = h;
+        h2.level = h.level + 1;
+        int2 c = int2(floor((p.xz - float2(h.normal.xz) * 0.01) / x.tr.lod[h2.level].w));
+        h2.voxel = int3(c.x, h.voxel.y, c.y);
+        col = mix(col, shade(x, o, d, h2, shadows), w);
+    }
+    return col;
+}
+
 // Converges on the actual sky colour as fog thickens (T -> 0), so fogged land meets the sky with no seam.
 static inline float3 fogColor(thread const Ctx& x, float3 d, float T) {
     // At night the sky's horizon gradient is mirrored below it, so far land and sea dim smoothly downward.
@@ -1642,7 +1672,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         if (x.quality > 0.5) {
             Hit rh = trace(x.tr, wp + float3(0, 0.02, 0), r, x.tr.rmax, 260, wl);
             // Shadowed: unshadowed, a sun-facing wall in the shade of the far rim mirrors as a pale streak.
-            refl = rh.hit ? applyFog(x, shade(x, wp, r, rh, true), wp, r, rh.t)
+            refl = rh.hit ? applyFog(x, shadeL(x, wp, r, rh, true), wp, r, rh.t)
                            : softCloudSky(x, wp, r);
         } else {
             refl = softCloudSky(x, wp, r);
@@ -1666,7 +1696,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             float ky = max(x.L.key.y, 0.0);
             xr.L.key = normalize(mix(x.L.key, kr, lagoon));
             xr.L.keyCol *= mix(1.0, ky / kr.y * (0.98 - 0.98 * pow(1.0 - ky, 5.0)), lagoon);
-            float3 lit = bedShows > 0.003 ? shade(xr, o, d, h, false) : float3(0);
+            float3 lit = bedShows > 0.003 ? shadeL(xr, o, d, h, false) : float3(0);
             under = mix(deep, lit * mix(float3(0.55, 0.8, 0.85), float3(0.9, 0.95, 0.97), salt), exp(-path * mix(0.35, 0.08, salt)));
             if (lagoon > 0.0) {
                 // Clear water over sand: red is absorbed first, so the bed turns aquamarine, then teal, then blue.
@@ -1711,7 +1741,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         }
         tSurf = tw;
     } else if (h.hit) {
-        col = shade(x, o, d, h, true);
+        col = shadeL(x, o, d, h, true);
         tSurf = h.t;
         // Debug: levels tinted, morph bands striped toward the next level's tint.
         if (f.misc2.z == 8) {
