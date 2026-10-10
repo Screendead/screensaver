@@ -470,7 +470,7 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
     float snowline = mix(160.0, 92.0, cold) + 5.0 * perlin2(w / 160.0, seed + 21u);
     float3 stone = strataTone(float(v.y), w, seed, desert);
 
-    float3 grassWet = float3(0.15, 0.19, 0.11), grassDry = float3(0.34, 0.32, 0.19), grassCold = float3(0.20, 0.23, 0.17);
+    float3 grassWet = float3(0.12, 0.20, 0.13), grassDry = float3(0.40, 0.34, 0.16), grassCold = float3(0.20, 0.23, 0.17);
     float3 grass = mix(mix(grassDry, grassWet, smoothstep(0.3, 0.7, c.moist)), grassCold, cold);
     float3 sand = float3(0.47, 0.41, 0.29);
     float3 desertTop = float3(0.54, 0.34, 0.19);
@@ -651,7 +651,7 @@ static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t) 
     float3 ep = o + d * t;
     float edgeDist = min(min(ep.x, float(x.size) - ep.x), min(ep.z, float(x.size) - ep.z));
     // Clear air under a high sun; haze belongs to the low light.
-    float clear = mix(1.0, 0.3, smoothstep(0.3, 0.6, x.L.sun.y));
+    float clear = mix(1.0, 0.15, smoothstep(0.3, 0.6, x.L.sun.y));
     return exp(-((heightTerm + b * t + c2 * t * t + mist) * clear + 5.0 * smoothstep(110.0, 10.0, edgeDist)));
 }
 
@@ -698,6 +698,8 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float sof
     // cutting a dark shape out of the halo.
     lit += float3(0.10, 0.13, 0.22) * pow(max(dot(d, x.L.moon), 0.0), 24.0) * 1.2 * x.L.night;
     a *= mix(1.0, 0.6, x.L.night);
+    // Noon clouds a touch less paper-white, so the sky reads as blue air with cloud in it.
+    lit *= mix(1.0, 0.88, smoothstep(0.3, 0.5, x.L.sun.y));
     c.col = lit;
     c.a = a * exp(-t / 2600.0) * smoothstep(7000.0, 2500.0, t);
     c.t = t;
