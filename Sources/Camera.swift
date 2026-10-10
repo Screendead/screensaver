@@ -93,7 +93,8 @@ final class FlightCamera {
 
     // Elevation angle of the highest terrain 1-8k along a heading: a range or a tepui standing in the upper middle
     // of the frame is a vista; a wall close by is not.
-    private func vista(_ heading: Double) -> Double {
+    // (reward, wall penalty)
+    private func vista(_ heading: Double) -> (Double, Double) {
         let dir = SIMD2(sin(heading), cos(heading))
         var best = -1.0, near = -1.0
         for dist in [60.0, 120.0, 200.0] + Array(stride(from: 300.0, through: 7500.0, by: 300.0)) {
@@ -107,7 +108,7 @@ final class FlightCamera {
         }
         let deg = best * 180 / .pi, nearDeg = near * 180 / .pi
         let reward = deg < 2 ? max(0, deg / 2) : deg < 12 ? 1 : max(0, 1 - (deg - 12) / 8)
-        return 0.6 * reward - 1.2 * min(max((nearDeg - 15) / 10, 0), 1)
+        return (0.6 * reward, 1.2 * min(max((nearDeg - 15) / 10, 0), 1))
     }
 
     private func footprintMax(_ x: Double, _ z: Double, radius: Double) -> Double {
@@ -211,7 +212,7 @@ final class FlightCamera {
         let water = wf < 0.1 ? 0 : (wf < 0.45 ? pool : pool - 2.0 * (wf - 0.45))
         let light = lightW * max(0, cos(heading - lightYaw)) * 0.8
         let turn = -0.25 * abs(FlightCamera.angleDiff(heading, yaw))
-        return relief + water + light + turn + wall + fill + open + siteInterest(heading, night: night).0 + vista(heading) * (1 - night)
+        return relief + water + light + turn + wall + fill + open + siteInterest(heading, night: night).0 + { let v = vista(heading); return v.0 * (1 - night) - v.1 }()
     }
 
     func placeAtStart() {
@@ -309,10 +310,29 @@ final class FlightCamera {
                 routeYaw = nil
             }
         }
-        let urgency = min(blockedAhead / 40, 1)
+        // Walls close beside or ahead push the heading away, so the flight keeps a frame's width off a massif's face
+        // (close up, a steep face is a lattice of single steps).
+        var push = SIMD2<Double>.zero
+        for k in 0..<12 {
+            let a = Double(k) * .pi / 6
+            let dv = SIMD2(sin(a), cos(a))
+            for r in [25.0, 50.0, 100.0, 170.0] {
+                let q = p + dv * r
+                let over = h(q.x, q.y) - (position.y - 10)
+                if over > 0 { push -= dv * min(over / 60, 1) * (50 / r) }
+            }
+        }
+        let pushLen = simd_length(push)
+        var steerAway = 0.0
+        let crowd = min(max((pushLen - 0.3) / 1.5, 0), 1)
+        if crowd > 0 {
+            let awayYaw = atan2(push.x, push.y)
+            steerAway = sin(FlightCamera.angleDiff(awayYaw, yaw)) * 0.15 * crowd
+        }
+        let urgency = max(min(blockedAhead / 40, 1), 0.7 * crowd)
         avoidRate = routeYaw.map { sin(FlightCamera.angleDiff($0, yaw)) * 0.15 * urgency } ?? 0
         let cap = 0.09 + 0.06 * urgency
-        let targetRate = max(-cap, min(cap, (drift + steerShot + steerKey + steerMoon) * (1 - urgency) + avoidRate))
+        let targetRate = max(-cap, min(cap, (drift + steerShot + steerKey + steerMoon) * (1 - urgency) + avoidRate + steerAway))
         // Critically damped spring on yaw rate: turns take tens of seconds.
         let k = 0.25
         yawAccel += (k * k * (targetRate - yawRate) - 2 * k * yawAccel) * dt

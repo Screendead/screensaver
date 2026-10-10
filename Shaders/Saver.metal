@@ -334,7 +334,9 @@ static inline float3 terrainColumn(int2 w, uint seed) {
         float hm = h + U;
         float tdm = mix(td, 14.0, smoothstep(40.0, 400.0, U));
         float hn3 = hm / tdm, lv3 = floor(hn3);
-        h = mix(hm, (lv3 + smoothstep(0.6, 1.0, hn3 - lv3)) * tdm, smoothstep(0.5, 30.0, U) * (1.0 - mg.wK));
+        // Tall relief gets short risers between wide treads: a long ramp of single steps reads as a stair lattice.
+        float e3 = mix(0.6, 0.85, smoothstep(100.0, 400.0, U));
+        h = mix(hm, (lv3 + smoothstep(e3, 1.0, hn3 - lv3)) * tdm, smoothstep(0.5, 30.0, U) * (1.0 - mg.wK));
         h = min(h, TERRAIN_CEIL);
     }
     // A pan's rim would otherwise chop a massif flat.
