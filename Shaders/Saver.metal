@@ -580,9 +580,7 @@ static float3 skyColor(float3 d, Light L, bool withDiscs, uint seed, float time)
 struct Surface {
     float3 albedo;
     float3 tread;   // the column's top colour, used to prefilter risers at distance
-    float glint;    // step-lip highlight weight
     float4 nh;      // neighbour heights: -x, +x, -z, +z
-    float2 lipDir;  // outward direction of the edge that glints
     float H;
     int mat;        // 0 terrain, 1 leaf, 2 wood
     float canopy;   // ambient left under a canopy overhead
@@ -645,9 +643,7 @@ static inline float3 sandRipples(int2 v, float2 uv, float2 w, float fp, float ti
 
 static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 uv, float fp, float fpA, int2 mapOrigin, uint seed, float time) {
     Surface s;
-    s.glint = 0;
     s.slope = 0;
-    s.lipDir = float2(float(n.x), float(n.z));
     s.mat = 0;
     float4 col4 = hm.read(uint2(clamp(v.xz, int2(0), int2(size - 1))), 0);
     float3 col = col4.rgb;
@@ -668,7 +664,6 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
     Climate c = climate(w, seed);
     float desert = desertAmount(c);
     float cold = smoothstep(0.42, 0.18, c.temp);
-    int depth = int(H) - 1 - v.y;
     bool underGap = !tree && col.z > col.y && float(v.y) < col.z;
 
     float snowline = mix(160.0, 92.0, cold) + 5.0 * perlin2(w / 160.0, seed + 21u);
@@ -709,18 +704,10 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
             s.albedo *= 1.0 + rp.x;
             s.slope = rp.yz;
         }
-        // Step-lip glint along edges that drop away, at least a pixel wide at any distance.
-        float edge = 9.0;
-        if (hx0 < H && uv.x < edge) { edge = uv.x; s.lipDir = float2(-1, 0); }
-        if (hx1 < H && 1.0 - uv.x < edge) { edge = 1.0 - uv.x; s.lipDir = float2(1, 0); }
-        if (hz0 < H && uv.y < edge) { edge = uv.y; s.lipDir = float2(0, -1); }
-        if (hz1 < H && 1.0 - uv.y < edge) { edge = 1.0 - uv.y; s.lipDir = float2(0, 1); }
-        s.glint = edge > 8.0 ? 0.0 : 1.0 - smoothstep(0.0, min(max(1.0 / 16.0, 1.5 * fp), 0.4), edge);
     } else if (n.y == 0 && !underGap) {
         if (beach) s.albedo = sand * 0.85;
         else if (slope < 4.0 && !snowy) s.albedo = mix(tread, stone, 0.5) * 0.9;
         else s.albedo = snowy ? mix(stone, float3(0.63, 0.66, 0.71), 0.45) : stone;
-        if (depth == 0) s.glint = 0.5 * (1.0 - smoothstep(0.0, min(max(1.0 / 16.0, 1.5 * fp), 0.4), 1.0 - uv.y));
     } else {
         s.albedo = stone * 0.9;
     }
@@ -742,15 +729,13 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
         leaf *= mix(0.85, 1.15, saturate((float(v.y) - col4.a) / max(col.x - col4.a - 1.0, 1.0)));
         s.albedo = leaf;
         s.tread = leaf;
-        s.glint = 0;
-        s.H = col.x;
+            s.H = col.x;
         s.mat = 1;
         s.canopy = 1.0;
     } else if (tree && float(v.y) >= col.y) {
         s.albedo = float3(0.06, 0.058, 0.052);
         s.tread = s.albedo;
-        s.glint = 0;
-        s.mat = 2;
+            s.mat = 2;
         s.canopy = 1.0;
     }
     return s;
@@ -826,7 +811,7 @@ struct Ctx {
     float dither; // per-pixel, per-frame in [0, 1); TAA resolves it
 };
 
-static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows, bool lips = true) {
+static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows) {
     float3 p = o + d * h.t;
     float3 n = float3(h.normal);
     float2 uv = faceUV(p, h.normal);
@@ -887,20 +872,9 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
         float graze = 1.0 - abs(dot(n, d));
         col += alb * float3(0.9, 1.3, 0.3) * x.L.keyCol * back * (1.0 - ndl) * (1.0 - abs(n.y)) * graze * graze * sh;
     }
-    // Lips of steps catch low light and moonlight; these rise into EDR headroom.
-    float low = max(1.0 - smoothstep(0.05, 0.4, x.L.key.y), 0.8 * x.L.night);
-    // Lips facing toward or away from the light glint; lips running along it stay quiet (lost-and-found edges).
-    float face = abs(dot(s.lipDir, normalize(x.L.key.xz + 1e-5)));
-    float lipLight = mix(0.15, 1.0, smoothstep(0.15, 0.75, face));
     // Under a high moon, land sits cool and below the sky so night reads as night (won night A/B);
     // under a low moon it is already dark and keeps its contours (darkening lost the dusk A/B).
     col *= mix(float3(1.0), float3(0.5, 0.56, 0.72), x.L.night * smoothstep(0.32, 0.45, x.L.moon.y));
-    // Moonlit lips stay silver: they are added after the cool tint.
-    float3 lipTint = mix(mix(alb, float3(1.0), mix(0.5, 0.15, hiSun)), float3(0.85, 0.92, 1.1), x.L.night);
-    // Moonlit lips carry further than the prefilter allows by day: they are the night's contour lines,
-    // at least a pixel wide, so they hold steady under TAA.
-    float lipFade = mix(1.0 - wf, 1.0 - smoothstep(0.08, 0.25, fp), x.L.night);
-    if (lips) col += s.glint * lipLight * lipFade * x.L.keyCol * sh * (mix(0.3, 0.22, hiSun) + 1.25 * low) * lipTint;
     return col;
 }
 
@@ -1082,7 +1056,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         float3 refl;
         if (x.quality > 0.5) {
             Hit rh = trace(hm, wp + float3(0, 0.02, 0), r, 1500.0, 220, x.globalMax, x.size);
-            refl = rh.hit ? applyFog(x, shade(x, wp, r, rh, false, false), wp, r, rh.t)
+            refl = rh.hit ? applyFog(x, shade(x, wp, r, rh, false), wp, r, rh.t)
                            : softCloudSky(x, wp, r);
         } else {
             refl = softCloudSky(x, wp, r);
@@ -1091,7 +1065,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         float3 under = deep;
         if (h.hit) {
             float path = h.t - tw;
-            float3 lit = shade(x, o, d, h, false, false);
+            float3 lit = shade(x, o, d, h, false);
             under = mix(deep, lit * float3(0.55, 0.8, 0.85), exp(-path * 0.35));
         }
         under *= 1.0 - 0.4 * x.L.night;
@@ -1216,7 +1190,7 @@ fragment float4 postFragment(VOut in [[stage_in]], texture2d<float> scene [[text
     float headroom = f.misc2.w;
     if (headroom <= 1.0) return float4(enc, 1);
     // EDR: identical to SDR below scene value 1; energy above it rolls per channel into the headroom.
-    // EDR: a hue-preserving luminance knee above diffuse white, so only lips, glitter, sun, moon and
+    // EDR: a hue-preserving luminance knee above diffuse white, so only glitter, sun, moon and
     // bright stars rise into the headroom.
     float3 lin = srgbToLinear(saturate(enc));
     float Y = dot(x, float3(0.2126, 0.7152, 0.0722));
