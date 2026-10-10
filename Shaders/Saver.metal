@@ -2898,7 +2898,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     // Birds in front of land, water and sky. Their pixels carry negative depth, which tells the temporal resolve
     // that they move.
     if (nFlocks > 0) {
-        float tFront = water ? tw : (h.hit ? h.t : 6000.0);
+        // A trace out of steps has not shown the way clear: a bird past where it stopped could be behind a hill.
+        float tFront = !h.hit && h.iters >= primaryIters ? 0.0 : water ? tw : (h.hit ? h.t : 6000.0);
         BirdHit bh = traceBirds(birds, nFlocks, o, d, tFront, x.pixelAngle, 0.0);
         if (bh.t < tFront) {
             float3 bc = shadeBird(x, o + d * bh.t, bh);
@@ -2938,7 +2939,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             refl = rh.hit ? applyFog(x, shadeL(x, wp, r, rh, true), wp, r, rh.t)
                            : softCloudSky(x, wp, r);
             if (nFlocks > 0) {
-                float tB = rh.hit ? rh.t : 3000.0;
+                float tB = rh.hit ? rh.t : (rh.iters >= 260 ? 0.0 : 3000.0);
                 BirdHit bh = traceBirds(birds, nFlocks, wp, r, tB, x.pixelAngle, tw);
                 if (bh.t < tB) { refl = applyFog(x, shadeBird(x, wp + r * bh.t, bh), wp, r, bh.t); birdRefl = true; }
             }

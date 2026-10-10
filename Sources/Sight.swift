@@ -12,8 +12,12 @@ struct Sight {
     // Angle one scene cell subtends; birds are never drawn thinner than half of it.
     var pixelAngle: Double
     var sunY: Double
-    var mapOrigin: SIMD2<Double>
-    var mapSize: Double
+    // The world's edge: a circle this far around the camera, hazed from 0.7 of it (the largest it can grow to, so
+    // the edge haze is never thicker here than drawn).
+    var worldEdge: Double
+    // The 1-voxel map, which the floor heights describe, is drawn unmorphed this far around the camera; past it the
+    // coarse levels' mean heights can dip below the floor.
+    var floorReach: Double
     var floorAt: (Double, Double) -> Double?
     // > 0 for decisions that must hold however the bird moves in the next instant (spawning, retiring): occlusion
     // needs the sightline this far inside the ground, water anywhere within a few voxels counts, fog must be thicker.
@@ -64,18 +68,19 @@ struct Sight {
 
     // Port of fogTransmittance in Shaders/Saver.metal without the mist term (mist only lowers it).
     func transmittance(from o: SIMD3<Double>, dir d: SIMD3<Double>, t: Double) -> Double {
-        let hf = 30.0, a = 0.0009, c2 = 1.3e-6
+        let hf = 30.0, a = 0.0009, c2 = 1.3e-6, K = 1.6, lambda = 6e-5
         let k = exp(-(o.y - Sight.sea) / hf)
-        let dy = abs(d.y) < 1e-4 ? (d.y < 0 ? -1e-4 : 1e-4) : d.y
+        // As the shader: a downward ray flattens to +1e-4.
+        let dy = abs(d.y) < 1e-4 ? 1e-4 : d.y
         let heightTerm = a * hf * k * (1 - exp(-dy * t / hf)) / dy
+        let ep = o + d * t
+        let r = simd_length(SIMD2(ep.x - pos.x, ep.z - pos.z))
+        if r >= worldEdge { return 0 }
         let night = Sight.smoothstep(-0.04, -0.20, sunY)
         var clear = 1 + (0.15 - 1) * Sight.smoothstep(0.2, 0.45, sunY)
         clear *= 1 + (0.35 - 1) * night
-        let ep = o + d * t
-        let lx = ep.x - mapOrigin.x, lz = ep.z - mapOrigin.y
-        let edgeDist = min(min(lx, mapSize - lx), min(lz, mapSize - lz))
-        let edge = 5 * Sight.smoothstep(110 + 70 * night, 10, edgeDist)
-        return exp(-((heightTerm + c2 * t * t) * clear + edge))
+        let air = K * (1 - exp(-c2 * t * t / K)) + lambda * t * t / (t + 1500)
+        return exp(-((heightTerm + air) * clear + 6 * Sight.smoothstep(0.7 * worldEdge, worldEdge, r)))
     }
 
     // True only when the segment provably passes through solid ground.
@@ -86,7 +91,7 @@ struct Sight {
         let n = Int(len / step)
         for i in 1..<n {
             let q = a + v * (Double(i) / Double(n))
-            if let f = floorAt(q.x, q.z), q.y < f - 0.5 - slack { return true }
+            if simd_length(SIMD2(q.x - pos.x, q.z - pos.z)) < floorReach, let f = floorAt(q.x, q.z), q.y < f - 0.5 - slack { return true }
         }
         return false
     }
@@ -117,26 +122,29 @@ struct Sight {
     }
 
     // The water mirrors the bird about the sea plane; ripples tilt the mirror by a few hundredths of a radian, which
-    // the extra margin covers.
+    // the extra margin covers, and shift where the mirrored ray meets the water and which way it leaves it.
     func reflected(_ p: SIMD3<Double>, size: Double, margin: Double = 0) -> Bool {
-        guard p.y > Sight.sea, pos.y > Sight.sea else { return false }
+        guard pos.y > Sight.sea else { return false }
         let m = SIMD3(p.x, 2 * Sight.sea - p.y, p.z)
         guard inFrame(m, size: size, margin: margin + 0.04) else { return false }
+        // At or under the surface the mirror geometry below breaks down: count it seen.
+        if p.y < Sight.sea + 0.5 { return true }
         let v = m - pos, t = simd_length(v)
         // Where the camera ray meets the water.
         let s = (pos.y - Sight.sea) / (pos.y - m.y)
         let w = pos + v * s
-        let near = slack > 0 ? [SIMD2(0.0, 0), SIMD2(4, 0), SIMD2(-4, 0), SIMD2(0, 4), SIMD2(0, -4)] : [SIMD2(0.0, 0)]
+        let near = [SIMD2(0.0, 0), SIMD2(4, 0), SIMD2(-4, 0), SIMD2(0, 4), SIMD2(0, -4)]
         if near.allSatisfy({ floorAt(w.x + $0.x, w.z + $0.y).map { $0 > Sight.sea + 0.5 } ?? false }) { return false }
         let d = v / t
         let t1 = t * s
-        if t > 1, transmittance(from: pos, dir: d, t: t1) * transmittance(from: w, dir: simd_normalize(p - w), t: t - t1)
-            < Sight.fogHidden * (slack > 0 ? 0.8 : 1) {
-            return false
-        }
+        let up = SIMD3(0.0, 1, 0) * reach(size: size, at: t)
+        let clear = [p, p + up, p - up].map { q in
+            transmittance(from: pos, dir: d, t: t1) * transmittance(from: w, dir: simd_normalize(q - w), t: simd_length(q - w))
+        }.max()!
+        if t > 1, clear < Sight.fogHidden * (slack > 0 ? 0.8 : 1) { return false }
         let r = reach(size: size, at: t)
-        if hiddenBehindGround(from: pos, w, extent: 0) { return false }
-        return !hiddenBehindGround(from: w + SIMD3(0, 0.05, 0), p, extent: r)
+        if hiddenBehindGround(from: pos, w, extent: 0.04 * t1) { return false }
+        return !hiddenBehindGround(from: w + SIMD3(0, 0.05, 0), p, extent: r + 0.04 * (t - t1))
     }
 
     static func smoothstep(_ a: Double, _ b: Double, _ x: Double) -> Double {

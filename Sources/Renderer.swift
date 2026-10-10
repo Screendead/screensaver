@@ -788,10 +788,12 @@ final class Renderer: NSObject, MTKViewDelegate {
     func sight() -> Sight {
         let b = camera.basis
         let tanV = tan(25.0 * .pi / 180)
-        let o = world.origin
+        // As makeFrame's level-0 ring: its morph band starts 140 inside the handoff, less a cell for the floor's 4x4 grain.
+        let p = camera.position - SIMD3(Double(world.origin.x), 0, Double(world.origin.y)), half = Double(World.size / 2)
+        let edge = half - 8 - max(abs(p.x - half), abs(p.z - half)) - abs(Double(Renderer.lodShift))
         return Sight(pos: camera.position, fwd: b.fwd, right: b.right, up: b.up, tanV: tanV, aspect: Double(aspect),
                      pixelAngle: 2 * tanV / Double(max(sceneSize.height, 1)), sunY: clock.sunDirection.y,
-                     mapOrigin: SIMD2(Double(o.x), Double(o.y)), mapSize: Double(World.size),
+                     worldEdge: Clipmap.handoff(Clipmap.levels), floorReach: min(880, edge) - 140 - 6 - abs(Double(Renderer.lodShift)),
                      floorAt: { [unowned world] x, z in world.solidFloor(x: x, z: z) })
     }
 
