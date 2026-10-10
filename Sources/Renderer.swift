@@ -44,7 +44,7 @@ struct SkyClock {
         let y = sin(2 * .pi * phase) * 0.56 + 0.08
         let s = min(max((abs(y) - 0.22) / 0.35, 0), 1)
         // Linger in golden and blue hour, hurry through midday and deep night.
-        let warp = y < -0.25 ? 3.5 : 0.5 + 1.5 * s * s * (3 - 2 * s)
+        let warp = y < -0.25 ? 5.0 : 0.5 + 1.5 * s * s * (3 - 2 * s)
         phase += dt / SkyClock.dayLength * warp * 1.05
         if phase > 1 { phase -= 1 }
     }
