@@ -1056,10 +1056,10 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     // Below ~2 pixels per voxel step shadows and sky visibility alias into a hatch that crawls under motion;
     // shade the continuous slope under the stairs instead.
     float wf2 = s.mat == 0 ? smoothstep(0.2, 0.5, fp) : 0.0;
-    // A face a few pixels wide keeps its exact normal: a column's central difference tilts only the tops at a
-    // ledge, so they would shade unlike the rest of their plane. Toward 2 pixels per voxel the slope under the
-    // stairs takes over, smooth across ledges.
-    float wn = smoothstep(0.33, 0.6, fp);
+    // A face at least ~3 pixels across its narrow side keeps its exact normal: a column's central difference
+    // tilts only the tops at a ledge, so they would shade unlike the rest of their plane. Toward 2 pixels the
+    // slope under the stairs takes over, smooth across ledges.
+    float wn = smoothstep(0.33, 0.6, fpA);
     if (s.mat == 0 && wn > 0.0) {
         float R = max(2.0, 1.5 * fp);
         float2 grad = float2(groundSmooth(x.hm, p.xz + float2(R, 0), x.size) - groundSmooth(x.hm, p.xz - float2(R, 0), x.size),
