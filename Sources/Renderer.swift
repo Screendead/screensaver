@@ -58,18 +58,35 @@ struct SkyClock {
     }
 }
 
+// A structure site as the camera and the smoke and halo lists see it, in world coordinates.
+struct SiteInfo {
+    enum Kind: Int { case none = 0, henge, cairn, ruins, hamlet, jetty, camp }
+    struct Lamp { var pos: SIMD3<Double>; var kind: Int; var rise: Double; var index: Int }
+    var index: Int
+    var id: UInt32
+    var kind: Kind
+    var pos: SIMD2<Double>
+    var radius: Double
+    var lamps: [Lamp]
+}
+
 final class World {
     static let size = 2048
     static let cpuLevel = 2
+    // Must match SITE_GRID, MAX_LAMPS and MAX_PARTS (the Site struct) in Shaders/Saver.metal.
+    static let siteGrid = 18, siteCell = 128, maxLamps = 8, maxParts = 16
+    static let siteStride = 32 + 16 * maxLamps + 16 * maxParts
 
     // One generated map: the column texture with its max-mip chain, and the CPU copy the camera steers by.
     private final class Buffer {
         let tex: MTLTexture
         let levels: [MTLTexture]
         let climate: MTLTexture
+        let sites: MTLBuffer
         var origin = SIMD2<Int32>(Int32.min, Int32.min)
         var globalMax: Float = 255
         var cpuHeights: [Float] = []
+        var siteList: [SiteInfo] = []
 
         init?(device: MTLDevice) {
             let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: World.size, height: World.size, mipmapped: true)
@@ -78,9 +95,11 @@ final class World {
             let cd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: World.size, height: World.size, mipmapped: false)
             cd.usage = [.shaderRead, .shaderWrite]
             cd.storageMode = .private
-            guard let t = device.makeTexture(descriptor: td), let c = device.makeTexture(descriptor: cd) else { return nil }
+            guard let t = device.makeTexture(descriptor: td), let c = device.makeTexture(descriptor: cd),
+                  let sb = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.siteStride, options: .storageModeShared) else { return nil }
             tex = t
             climate = c
+            sites = sb
             levels = (0..<t.mipmapLevelCount).map {
                 t.makeTextureView(pixelFormat: .rgba16Float, textureType: .type2D, levels: $0..<($0 + 1), slices: 0..<1)!
             }
@@ -96,6 +115,7 @@ final class World {
     private let cleanupPipeline: MTLComputePipelineState
     private let plantPipeline: MTLComputePipelineState
     private let climatePipeline: MTLComputePipelineState
+    private let sitePipeline: MTLComputePipelineState
     private let scratch: [MTLTexture]
     private var buffers: [Buffer]
     private var active = 0
@@ -106,6 +126,8 @@ final class World {
     var climateTex: MTLTexture { buffers[active].climate }
     var origin: SIMD2<Int32> { buffers[active].origin }
     var globalMax: Float { buffers[active].globalMax }
+    var siteBuffer: MTLBuffer { buffers[active].sites }
+    var sites: [SiteInfo] { buffers[active].siteList }
 
     init?(device: MTLDevice, library: MTLLibrary, seed: UInt32) {
         func pipeline(_ name: String) -> MTLComputePipelineState? {
@@ -115,7 +137,7 @@ final class World {
         sd.usage = [.shaderRead, .shaderWrite]
         sd.storageMode = .private
         guard let gen = pipeline("generateHeight"), let red = pipeline("reduceMax"), let clean = pipeline("cleanupColumns"),
-              let plant = pipeline("plantTrees"), let clim = pipeline("bakeClimate"),
+              let plant = pipeline("plantTrees"), let clim = pipeline("bakeClimate"), let place = pipeline("placeSites"),
               let s0 = device.makeTexture(descriptor: sd), let s1 = device.makeTexture(descriptor: sd), let q = device.makeCommandQueue(),
               let a = Buffer(device: device), let b = Buffer(device: device) else { return nil }
         self.device = device
@@ -126,6 +148,7 @@ final class World {
         cleanupPipeline = clean
         plantPipeline = plant
         climatePipeline = clim
+        sitePipeline = place
         scratch = [s0, s1]
         buffers = [a, b]
     }
@@ -160,6 +183,12 @@ final class World {
         enc.setTexture(scratch[0], index: 0)
         enc.setTexture(scratch[1], index: 1)
         enc.dispatchThreads(full, threadsPerThreadgroup: tg)
+        enc.setComputePipelineState(sitePipeline)
+        enc.setTexture(scratch[1], index: 0)
+        enc.setBuffer(buf.sites, offset: 0, index: 0)
+        enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 1)
+        enc.dispatchThreads(MTLSize(width: World.siteGrid, height: World.siteGrid, depth: 1), threadsPerThreadgroup: MTLSize(width: 6, height: 6, depth: 1))
+        enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
         enc.setComputePipelineState(plantPipeline)
         enc.setTexture(scratch[1], index: 0)
         enc.setTexture(buf.levels[0], index: 1)
@@ -182,6 +211,15 @@ final class World {
             buf.origin = o
             buf.cpuHeights = heights
             buf.globalMax = top + 1
+            buf.siteList = World.readSites(buf.sites)
+            if World.logSites {
+                var counts = [Int](repeating: 0, count: 7)
+                for site in buf.siteList { counts[site.kind.rawValue] += 1 }
+                if ProcessInfo.processInfo.environment["VR_SITES"] == "3" {
+                    for site in buf.siteList { print("  site \(site.kind) \(Int(site.pos.x)),\(Int(site.pos.y)) r\(Int(site.radius)) lamps \(site.lamps.count)") }
+                }
+                print("sites at (\(o.x),\(o.y)): henge \(counts[1]) cairn \(counts[2]) ruins \(counts[3]) hamlet \(counts[4]) jetty \(counts[5]) camp \(counts[6]) total \(buf.siteList.count)")
+            }
             self.active = index
             self.pending = false
             if Renderer.logTiming { print(String(format: "world regen %.1f ms (%@)", (CACurrentMediaTime() - t0) * 1000, wait ? "sync" : "async")) }
@@ -199,6 +237,28 @@ final class World {
             }
             cb.commit()
         }
+    }
+
+    static let logSites = ProcessInfo.processInfo.environment["VR_SITES"] != nil
+
+    private static func readSites(_ buf: MTLBuffer) -> [SiteInfo] {
+        let raw = buf.contents()
+        var list: [SiteInfo] = []
+        for i in 0..<(World.siteGrid * World.siteGrid) {
+            let base = raw + i * World.siteStride
+            let head = base.load(as: SIMD4<Int32>.self)
+            guard let kind = SiteInfo.Kind(rawValue: Int(head.z)), kind != .none else { continue }
+            let info = (base + 16).load(as: SIMD4<Float>.self)
+            let c = SIMD2(Double(head.x), Double(head.y))
+            var lamps: [SiteInfo.Lamp] = []
+            for l in 0..<Int(info.w) {
+                let v = (base + 32 + 16 * l).load(as: SIMD4<Float>.self)
+                let k = Int(v.w) % 16
+                lamps.append(.init(pos: SIMD3(c.x + Double(v.x), Double(v.y), c.y + Double(v.z)), kind: k, rise: Double(Int(v.w) / 16), index: i * World.maxLamps + l))
+            }
+            list.append(SiteInfo(index: i, id: UInt32(bitPattern: head.w), kind: kind, pos: c + 0.5, radius: Double(info.x), lamps: lamps))
+        }
+        return list
     }
 
     private static func readBack(_ tex: MTLTexture) -> ([Float], Float) {
@@ -250,6 +310,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var frameIndex: Float = 0
     private var gpuTimes: [Double] = []
     private var sceneSize = (width: 0, height: 0)
+    private(set) var aspect: Float = 16.0 / 10.0
     static let logTiming = ProcessInfo.processInfo.environment["VR_TIMING"] != nil
     fileprivate var exposure: Double = 1.5
     // Holds the time of day fixed for snapshots, so exposure and the shot director see the rendered sun.
@@ -392,6 +453,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         guard let sceneTex else { return }
         sceneSize = (w, h)
+        aspect = Float(w) / Float(h)
         var f = makeFrame(size: CGSize(width: w, height: h))
         frameIndex = (frameIndex + 1).truncatingRemainder(dividingBy: 4096)
         bakeClouds(into: cb, frame: &f)
@@ -410,6 +472,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentTexture(world.heightTex, index: 0)
             enc.setFragmentTexture(cloudTex, index: 1)
             enc.setFragmentTexture(world.climateTex, index: 2)
+            enc.setFragmentBuffer(world.siteBuffer, offset: 0, index: 1)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
         }
@@ -515,13 +578,40 @@ enum Snapshot {
         td.storageMode = .shared
         let tex = device.makeTexture(descriptor: td)!
         r.pinnedPhase = settings.phase
+        r.headroom = settings.headroom ?? 0
+        let env = ProcessInfo.processInfo.environment
+        // VR_SHOW=kind,distance,height,bearing[,rank]: hold the camera on the rank-th nearest site of a kind
+        // (1 henge .. 6 camp), `distance` from it along `bearing` degrees, `height` above the ground there.
+        if let spec = env["VR_SHOW"] {
+            let v = spec.split(separator: ",").compactMap { Double($0) }
+            if v.count >= 4 {
+                let here = SIMD2(r.camera.position.x, r.camera.position.z)
+                let pick = r.world.sites.filter { $0.kind.rawValue == Int(v[0]) }
+                    .sorted { simd_length($0.pos - here) < simd_length($1.pos - here) }
+                let rank = v.count > 4 ? Int(v[4]) : 0
+                if rank < pick.count {
+                    let site = pick[rank]
+                    let b = v[3] * .pi / 180
+                    let cam = site.pos + SIMD2(sin(b), cos(b)) * v[1]
+                    let g = r.world.height(x: cam.x, z: cam.y) ?? 20
+                    let sg = r.world.height(x: site.pos.x, z: site.pos.y) ?? 20
+                    let y = max(g, 19.85) + v[2]
+                    let yaw = atan2(site.pos.x - cam.x, site.pos.y - cam.y)
+                    let pitch = atan2(sg + 2 - y, v[1]) + (settings.pitch ?? 0)
+                    r.camera.freeze(position: SIMD3(cam.x, y, cam.y), yaw: yaw, pitch: pitch)
+                    r.camera.pitchOverride = nil
+                    print(String(format: "showing %@ site %u at (%.0f, %.0f), %d of %d", "\(site.kind)", site.id, site.pos.x, site.pos.y, rank + 1, pick.count))
+                } else {
+                    print("no site of kind \(Int(v[0])) rank \(rank) (\(pick.count) on this map)")
+                }
+            }
+        }
         var simulated = 0.0
         for t in settings.screenshotTimes.sorted() {
             r.simulate(t - simulated)
             if let phase = settings.phase { r.clock.phase = phase }
             simulated = t
             var times: [Double] = []
-            let env = ProcessInfo.processInfo.environment
             let frames = env["VR_MOTION"] != nil ? 48 : 12
             // VR_FRAMES=n also writes each of the last n frames, for measuring frame-to-frame crawl.
             let dump = min(Int(env["VR_FRAMES"] ?? "") ?? 0, frames)
@@ -541,9 +631,28 @@ enum Snapshot {
             }
             tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
             write(bytes: bytes, width: w, height: h, to: out)
-            print(String(format: "t=%.0f phase=%.3f sunY=%.2f exposure=%.2f cam=(%.0f,%.0f,%.0f) gpu=%.1fms -> %@", t, r.clock.phase,
-                         r.clock.sunDirection.y, r.exposure, r.camera.position.x, r.camera.position.y, r.camera.position.z, times.min()!, out))
+            print(String(format: "t=%.0f phase=%.3f sunY=%.2f exposure=%.2f cam=(%.0f,%.0f,%.0f) gpu=%.1fms %@ -> %@", t, r.clock.phase,
+                         r.clock.sunDirection.y, r.exposure, r.camera.position.x, r.camera.position.y, r.camera.position.z, times.min()!,
+                         Snapshot.sitesInView(r), out))
         }
+    }
+
+    // Sites within 700 voxels whose centre falls inside the frame (not tested for occlusion).
+    static func sitesInView(_ r: Renderer) -> String {
+        let b = r.camera.basis
+        let o = r.camera.position
+        let tanV = tan(25.0 * .pi / 180), tanH = tanV * Double(r.aspect)
+        var seen: [String] = []
+        for site in r.world.sites {
+            let g = r.world.height(x: site.pos.x, z: site.pos.y) ?? 20
+            let v = SIMD3(site.pos.x, g + 1, site.pos.y) - o
+            let z = simd_dot(v, b.fwd), dist = simd_length(v)
+            guard z > 0, dist < 700 else { continue }
+            if abs(simd_dot(v, b.right)) / z < tanH && abs(simd_dot(v, b.up)) / z < tanV {
+                seen.append("\(site.kind)@\(Int(dist))")
+            }
+        }
+        return "sites=\(seen.count)[\(seen.joined(separator: " "))]"
     }
 
     static func write(bytes: [UInt8], width: Int, height: Int, to path: String) {

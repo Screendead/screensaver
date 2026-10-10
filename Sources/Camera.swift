@@ -18,6 +18,16 @@ final class FlightCamera {
     private var rimLift: Double = 0
     var sun = SIMD3<Double>(0, 1, 0)
     var pitchOverride: Double?
+    // A fixed pose for showcase snapshots; step() leaves it alone.
+    private(set) var frozen = false
+
+    func freeze(position p: SIMD3<Double>, yaw y: Double, pitch pt: Double) {
+        position = p
+        yaw = y
+        pitch = pt
+        roll = 0
+        frozen = true
+    }
 
     // Height lookup in world coords; returns nil outside the loaded map.
     var heightAt: (Double, Double) -> Double? = { _, _ in nil }
@@ -112,6 +122,7 @@ final class FlightCamera {
     }
 
     func step(dt: Double) {
+        if frozen { return }
         time += dt
         let fwdFlat = SIMD2(sin(yaw), cos(yaw))
         let left = SIMD2(-fwdFlat.y, fwdFlat.x) * -1

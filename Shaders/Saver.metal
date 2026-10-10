@@ -420,6 +420,435 @@ kernel void reduceMax(texture2d<float, access::read> src [[texture(0)]],
     dst.write(float4(m, 0, 0, 0), gid);
 }
 
+// MARK: - Structures
+
+// Sites: one candidate per 128-voxel world cell, so the same places recur when the map recentres. Every part
+// and lamp of a site lies within 128 of its centre, so a column only needs its own and the 8 neighbouring cells.
+constant int SITE_CELL = 128;
+constant int SITE_GRID = 18;
+constant int MAX_PARTS = 16;
+constant int MAX_LAMPS = 8;
+
+// Must match the layout read in Sources/Renderer.swift (World.SiteLayout).
+struct Site {
+    int4 head;               // xy world centre, z type, w hash
+    float4 info;             // x bounding radius, y age, z part count, w lamp count
+    float4 lamps[MAX_LAMPS]; // xyz offset from the centre (y absolute), w kind + 16 * smoke rise
+    int4 parts[MAX_PARTS];
+};
+
+constant int T_HENGE = 1, T_CAIRN = 2, T_RUINS = 3, T_HAMLET = 4, T_JETTY = 5, T_CAMP = 6;
+constant int P_BOX = 1, P_HOUSE = 2, P_DECK = 3, P_BOAT = 4, P_HENGE = 5, P_WALL = 6, P_RING = 7, P_FIRE = 8;
+// Part flags; bits 8-11 hold a lamp index + 1, bits 12-13 the house variant (0 thatch, 1 adobe, 2 slate, 3 stilt).
+constant int F_REL = 1, F_AXISZ = 2, F_FLAT = 4, F_STILT = 8, F_TENT = 16, F_CHIMNEY = 32, F_WATER = 64;
+constant int M_STONE = 4, M_TIMBER = 5, M_ROOF = 6, M_PLASTER = 7, M_PLANK = 8, M_CLOTH = 9, M_FIRE = 10;
+constant int L_FIRE = 1, L_HEARTH = 2, L_WINDOW = 3, L_LANTERN = 4, L_BEACON = 5, L_RITUAL = 6;
+
+struct Part { int2 o; int2 sz; int kind; int mat; int y0; int y1; int y2; int flags; };
+
+static inline int4 packPart(Part p) {
+    return int4((p.o.x & 0xffff) | (p.o.y << 16),
+                (p.sz.x & 0xff) | ((p.sz.y & 0xff) << 8) | ((p.kind & 0xff) << 16) | ((p.mat & 0xff) << 24),
+                (p.y0 & 0xffff) | (p.y1 << 16), (p.y2 & 0xffff) | (p.flags << 16));
+}
+
+static inline Part unpackPart(int4 v) {
+    Part p;
+    p.o = int2((v.x << 16) >> 16, v.x >> 16);
+    p.sz = int2(v.y & 0xff, (v.y >> 8) & 0xff);
+    p.kind = (v.y >> 16) & 0xff;
+    p.mat = (v.y >> 24) & 0xff;
+    p.y0 = (v.z << 16) >> 16;
+    p.y1 = v.z >> 16;
+    p.y2 = (v.w << 16) >> 16;
+    p.flags = (v.w >> 16) & 0xffff;
+    return p;
+}
+
+static inline Part makePart(int kind, int mat, int2 o, int2 sz, int y0, int y1, int y2, int flags) {
+    Part p;
+    p.o = o; p.sz = sz; p.kind = kind; p.mat = mat; p.y0 = y0; p.y1 = y1; p.y2 = y2; p.flags = flags;
+    return p;
+}
+
+// World cell of site-grid index 0 for a map whose texel 0 sits at world `origin`.
+static inline int2 siteCell0(int2 origin) { return int2(floor(float2(origin) / float(SITE_CELL))); }
+
+static inline float colH(texture2d<float, access::read> hm, int2 q) {
+    int n = int(hm.get_width());
+    return hm.read(uint2(clamp(q, int2(0), int2(n - 1)))).r;
+}
+
+static inline bool colArch(texture2d<float, access::read> hm, int2 q) {
+    int n = int(hm.get_width());
+    float4 c = hm.read(uint2(clamp(q, int2(0), int2(n - 1))));
+    return c.b > c.g;
+}
+
+struct SiteGen { Site s; int np; int nl; float r; };
+
+static inline void addPart(thread SiteGen& G, Part p, float reach) {
+    if (G.np >= MAX_PARTS) return;
+    G.s.parts[G.np++] = packPart(p);
+    G.r = max(G.r, reach);
+}
+
+static inline int partReach(Part p) {
+    return int(ceil(length(float2(max(abs(p.o), abs(p.o + p.sz))))));
+}
+
+static inline int addLamp(thread SiteGen& G, float3 off, int kind, float rise) {
+    if (G.nl >= MAX_LAMPS) return -1;
+    G.s.lamps[G.nl] = float4(off, float(kind) + 16.0 * floor(max(rise, 0.0)));
+    G.r = max(G.r, length(off.xz) + 2.0);
+    return G.nl++;
+}
+
+static inline bool flatPatch(texture2d<float, access::read> hm, int2 q, int rad, float tol, thread float& lo, thread float& hi) {
+    lo = 1e9; hi = -1e9;
+    for (int j = -rad; j <= rad; j++)
+        for (int i = -rad; i <= rad; i++) {
+            if (colArch(hm, q + int2(i, j))) return false;
+            float h = colH(hm, q + int2(i, j));
+            lo = min(lo, h); hi = max(hi, h);
+        }
+    return hi - lo <= tol;
+}
+
+// A jetty from the shore along `dir` (a unit grid step) into the water, with a lantern post and moored boats.
+static bool buildJetty(texture2d<float, access::read> hm, thread SiteGen& G, int2 c, uint h, int2 dir, int maxReach) {
+    int k = 0;
+    for (; k < maxReach; k++) if (colH(hm, c + dir * k) < SEA) break;
+    if (k == maxReach || k == 0) return false;
+    int2 shore = c + dir * (k - 1);
+    if (colH(hm, shore) > SEA + 3.0 || colArch(hm, shore)) return false;
+    int run = 0;
+    for (int m = 1; m <= 16; m++) {
+        int2 q = shore + dir * m;
+        if (colH(hm, q) >= SEA || colArch(hm, q)) break;
+        run++;
+    }
+    if (run < 5 || G.nl >= MAX_LAMPS || G.np > MAX_PARTS - 3) return false;
+    int len = min(run - 1, 6 + int(h % 9u));
+    int2 perp = int2(abs(dir.y), abs(dir.x));
+    int w = (h >> 5 & 3u) == 0u ? 2 : 1;
+    int2 head = shore + dir * len;
+    int2 r0 = min(shore, head), r1 = max(shore, head) + 1 + perp * (w - 1);
+    int axis = dir.y != 0 ? F_AXISZ : 0;
+    int lamp = addLamp(G, float3(float(head.x - c.x) + 0.5, 22.6, float(head.y - c.y) + 0.5), L_LANTERN, 0);
+    Part post = makePart(P_BOX, M_TIMBER, head - c, int2(1), 22, 0, 0, F_WATER | ((lamp + 1) << 8));
+    addPart(G, post, float(partReach(post)));
+    Part deck = makePart(P_DECK, M_PLANK, r0 - c, r1 - r0, 21, 0, int(h & 0x7fffu), axis | F_WATER);
+    addPart(G, deck, float(partReach(deck)));
+    int boats = int((h >> 9) % 3u);
+    for (int b = 0; b < boats && G.np < MAX_PARTS; b++) {
+        int side = ((h >> (12 + b)) & 1u) != 0u ? -2 : 1 + w;
+        int2 bs = shore + dir * (2 + 3 * b) + perp * side;
+        int2 be = bs + dir * 2;
+        bool wet = true;
+        for (int m = 0; m < 3; m++) wet = wet && colH(hm, bs + dir * m) < SEA - 0.5 && !colArch(hm, bs + dir * m);
+        if (!wet) continue;
+        int2 b0 = min(bs, be);
+        Part boat = makePart(P_BOAT, M_TIMBER, b0 - c, max(bs, be) + 1 - b0, 0, 0, 0, axis | F_WATER);
+        addPart(G, boat, float(partReach(boat)));
+    }
+    return true;
+}
+
+// Low houses on flat treads around a central hearth, in the local style.
+static bool buildHamlet(texture2d<float, access::read> hm, thread SiteGen& G, int2 c, uint h, int variant) {
+    int n = int(hm.get_width());
+    int4 rects[8];
+    int nr = 0;
+    rects[nr++] = int4(c - 2, c + 3);
+    int houses = 0, want = 3 + int(h % 3u);
+    float a0 = hashf(pcg(h + 1u)) * 6.2831853;
+    bool flat = variant == 1, stilt = variant == 3;
+    for (int k = 0; k < 56 && houses < want && G.np < MAX_PARTS - 4 && G.nl < MAX_LAMPS - 3; k++) {
+        float r = (stilt ? 4.0 : 7.0) + 24.0 * sqrt(float(k) / 56.0);
+        float a = a0 + float(k) * 2.39996;
+        int2 pos = c + int2(round(r * float2(cos(a), sin(a))));
+        uint hh = pcg(h + 17u * uint(k) + 3u);
+        bool axisZ = (hh & 1u) != 0u;
+        int L = 4 + int((hh >> 1) & 1u);
+        int D = 3 + int((hh >> 2) & 1u);
+        int Dt = flat ? D : D + 2;
+        int2 sz = axisZ ? int2(Dt, L) : int2(L, Dt);
+        int2 r0 = pos - sz / 2;
+        if (any(r0 < 2) || any(r0 + sz >= n - 2)) continue;
+        bool ok = true;
+        for (int m = 0; m < nr; m++)
+            if (all(r0 < rects[m].zw + 2) && all(r0 + sz + 2 > rects[m].xy)) ok = false;
+        if (!ok) continue;
+        float lo = 1e9, hi = -1e9;
+        int wet = 0;
+        for (int j = 0; j < sz.y && ok; j++)
+            for (int i = 0; i < sz.x; i++) {
+                float4 col = hm.read(uint2(r0 + int2(i, j)));
+                if (col.b > col.g) { ok = false; break; }
+                lo = min(lo, col.r); hi = max(hi, col.r);
+                if (col.r < SEA) wet++;
+            }
+        if (!ok) continue;
+        if (stilt) { if (hi > SEA + 1.2 || lo < SEA - 6.0 || wet * 3 < sz.x * sz.y) continue; }
+        else if (hi - lo > 1.0 || lo < SEA + 2.2) continue;
+        int floorY = stilt ? 22 : int(hi);
+        int eave = floorY + (variant == 2 ? 3 : 2);
+        int ridge = flat ? floorY + 3 : eave + (Dt - 1) / 2 + 1;
+        bool chim = !flat && ((hh >> 3) & 1u) != 0u;
+        int lamp = addLamp(G, float3(float(pos.x - c.x) + 0.5, float(floorY) + 1.2, float(pos.y - c.y) + 0.5), L_WINDOW,
+                           chim || flat ? float(ridge) + 1.0 - (float(floorY) + 1.2) : 0.0);
+        int flags = (axisZ ? F_AXISZ : 0) | (flat ? F_FLAT : 0) | (stilt ? F_STILT | F_WATER : 0) | (chim ? F_CHIMNEY : 0)
+                  | ((lamp + 1) << 8) | (variant << 12);
+        int wall = variant == 2 ? M_STONE : flat ? M_PLASTER : ((hh >> 4) & 3u) == 0u ? M_TIMBER : M_PLASTER;
+        if (stilt) wall = M_TIMBER;
+        Part hp = makePart(P_HOUSE, wall, r0 - c, sz, floorY, flat ? ridge : eave, int(hh & 0x7fffu), flags);
+        addPart(G, hp, float(partReach(hp)));
+        rects[nr++] = int4(r0, r0 + sz);
+        houses++;
+    }
+    return houses >= 3;
+}
+
+// The lie of the land at a candidate site centre, and how well each type suits it.
+struct Lie {
+    float g, desert, painted, lagoon, salt, cold, snowline, waterR, prom;
+    int2 waterDir;
+    bool flat5;
+    float score[7];
+};
+
+static Lie survey(texture2d<float, access::read> hm, int2 c, int2 cw, uint seed) {
+    Lie L;
+    for (int t = 0; t < 7; t++) L.score[t] = 0;
+    L.g = colH(hm, c);
+    float g = L.g;
+    float2 w = float2(cw);
+    float2 p = w + seedOffset(seed);
+    Climate cl = climate(w, seed);
+    L.desert = desertAmount(cl); L.painted = paintedAmount(cl); L.lagoon = lagoonAmount(cl); L.salt = saltAmount(cl);
+    L.cold = smoothstep(0.42, 0.18, cl.temp);
+    L.snowline = mix(160.0, 92.0, L.cold);
+    float settled = fbm2(p / 1500.0, 2, seed + 140u) + 0.5;
+    float ancient = fbm2(p / 1800.0 + 77.0, 2, seed + 141u) + 0.5;
+    float lo5, hi5, lo9, hi9;
+    L.flat5 = flatPatch(hm, c, 2, 1.0, lo5, hi5);
+    bool flat9 = flatPatch(hm, c, 4, 3.0, lo9, hi9);
+    // Ring scan: nearest water and its bearing, prominence over the surroundings, how much of a bay this is.
+    L.waterR = 1e9;
+    L.waterDir = int2(0);
+    float ring = 0, ringN = 0, wet16 = 0, max6 = -1e9;
+    const float rads[4] = { 8.0, 16.0, 24.0, 40.0 };
+    for (int ri = 0; ri < 4; ri++)
+        for (int k = 0; k < 16; k++) {
+            float a = float(k) * 0.3926991;
+            float2 dv = float2(cos(a), sin(a));
+            float hq = colH(hm, c + int2(round(dv * rads[ri])));
+            if (hq < SEA && rads[ri] < L.waterR) {
+                L.waterR = rads[ri];
+                L.waterDir = abs(dv.x) > abs(dv.y) ? int2(dv.x > 0 ? 1 : -1, 0) : int2(0, dv.y > 0 ? 1 : -1);
+            }
+            if (ri >= 2) { ring += hq; ringN += 1; }
+            if (ri == 1 && hq < SEA) wet16 += 1.0 / 16.0;
+        }
+    for (int k = 0; k < 8; k++) {
+        float a = float(k) * 0.785398;
+        max6 = max(max6, colH(hm, c + int2(round(float2(cos(a), sin(a)) * 6.0))));
+    }
+    L.prom = g - ring / ringN;
+    // A tread with a riser close by: a terrace.
+    float riser = 0;
+    for (int k = 0; k < 8; k++) {
+        float a = float(k) * 0.785398;
+        for (int r = 3; r <= 9; r += 3) riser = max(riser, colH(hm, c + int2(round(float2(cos(a), sin(a)) * float(r)))) - g);
+    }
+    float land = step(SEA + 2.0, g);
+    float notDry = (1.0 - smoothstep(0.3, 0.5, L.desert)) * (1.0 - smoothstep(0.2, 0.4, L.salt)) * (1.0 - smoothstep(0.3, 0.5, L.lagoon));
+    float anc = smoothstep(0.35, 0.6, ancient), set = smoothstep(0.35, 0.6, settled);
+    float prom = L.prom, salt = L.salt;
+    L.score[T_HENGE] = anc * smoothstep(1.0, 5.0, prom) * smoothstep(45.0, 30.0, prom) * float(flat9) * notDry
+                     * step(g, L.snowline + 10.0) * land;
+    L.score[T_CAIRN] = anc * step(max6, g) * max(smoothstep(3.0, 9.0, prom), smoothstep(0.3, 0.6, salt)) * land * 0.85;
+    L.score[T_RUINS] = anc * float(L.flat5) * land * max(smoothstep(3.0, 6.0, riser) * (1.0 - smoothstep(0.3, 0.5, salt)),
+                                                         smoothstep(0.35, 0.6, L.desert) * smoothstep(3.0, 8.0, prom));
+    L.score[T_HAMLET] = set * step(L.waterR, 40.0) * float(L.flat5) * step(SEA + 2.0, g) * step(g, SEA + 30.0)
+                      * (1.0 - smoothstep(0.2, 0.4, salt)) * step(g, L.snowline - 10.0);
+    L.score[T_JETTY] = set * step(L.waterR, 16.0) * smoothstep(0.1, 0.25, wet16) * smoothstep(0.75, 0.55, wet16)
+                     * step(g, SEA + 6.0) * (1.0 - smoothstep(0.2, 0.4, salt)) * 0.9;
+    float grove = groveDensity(w, g, seed);
+    L.score[T_CAMP] = (0.4 + 0.6 * set) * float(L.flat5) * land * step(g, L.snowline - 5.0)
+                    * max(max(smoothstep(0.08, 0.2, grove), smoothstep(0.15, 0.3, salt) * smoothstep(0.7, 0.45, salt)),
+                          smoothstep(0.3, 0.6, L.painted)) * 0.8;
+    return L;
+}
+
+// Site at one world cell: a type chosen by two broad Perlin fields (where people live now, and where an older
+// culture built) and by the lie of the land at the best of nine candidate centres, then its parts.
+kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
+                       device Site* sites [[buffer(0)]],
+                       constant int4& info [[buffer(1)]],
+                       uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= uint(SITE_GRID) || gid.y >= uint(SITE_GRID)) return;
+    int n = info.z;
+    uint seed = uint(info.w);
+    int2 cell = siteCell0(info.xy) + int2(gid);
+    uint h = hash2i(cell, seed + 200u);
+    SiteGen G;
+    G.np = 0; G.nl = 0; G.r = 0;
+    G.s.head = int4(cell * SITE_CELL + 64, 0, int(h));
+    G.s.info = float4(0);
+    for (int i = 0; i < MAX_LAMPS; i++) G.s.lamps[i] = float4(0);
+    for (int i = 0; i < MAX_PARTS; i++) G.s.parts[i] = int4(0);
+    uint idx = gid.y * uint(SITE_GRID) + gid.x;
+
+    const float thresh[7] = { 1, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3 };
+    // Chance a type is built where it is the best fit; these set the density of each type.
+    const float accept[7] = { 0, 0.35, 1.0, 0.8, 0.22, 0.18, 0.16 };
+    float best[7] = { 0, 0, 0, 0, 0, 0, 0 };
+    int2 at[7];
+    // Only cells whose every candidate, survey and part (64 out) reads lie inside the map, so a cell decides the
+    // same way on every map that holds it.
+    int2 cl = cell * SITE_CELL - info.xy;
+    if (any(cl < 48) || any(cl > n - 176)) { sites[idx] = G.s; return; }
+    for (int k = 0; k < 9; k++) {
+        uint hk = pcg(h + uint(k) * 7919u);
+        int2 ck = cell * SITE_CELL + 16 + int2(k % 3, k / 3) * 32 + int2(int(hk % 32u), int((hk >> 5) % 32u));
+        int2 lc = ck - info.xy;
+        if (colArch(hm, lc)) continue;
+        Lie L = survey(hm, lc, ck, seed);
+        for (int t = 1; t <= 6; t++)
+            if (L.score[t] >= thresh[t] && L.score[t] > best[t]) { best[t] = L.score[t]; at[t] = ck; }
+    }
+    // Types in order of fit, each with its own chance.
+    int type = 0;
+    int2 cw = int2(0);
+    for (int pass = 0; pass < 6 && type == 0; pass++) {
+        int bt = 0;
+        for (int t = 1; t <= 6; t++) if (best[t] > 0.0 && (bt == 0 || best[t] > best[bt])) bt = t;
+        if (bt == 0) break;
+        if (hashf(pcg(h + 99u + uint(bt) * 13u)) < accept[bt]) { type = bt; cw = at[bt]; }
+        best[bt] = 0;
+    }
+    if (type == 0) { sites[idx] = G.s; return; }
+    int2 c = cw - info.xy;
+    G.s.head.xy = cw;
+    Lie L = survey(hm, c, cw, seed);
+    float g = L.g, desert = L.desert, painted = L.painted, lagoon = L.lagoon, cold = L.cold, snowline = L.snowline, waterR = L.waterR;
+    int2 waterDir = L.waterDir;
+    bool flat5 = L.flat5;
+
+    uint hb = pcg(h + 7u);
+    bool ok = false;
+    float age = 0.5;
+    if (type == T_HENGE) {
+        int R = 5 + int(hb % 4u);
+        int N = min(7 + int((hb >> 4) % 7u), int(float(R) * 1.6));
+        Part hp = makePart(P_HENGE, M_STONE, int2(0), int2(0), R * 4, N, int(hb & 0x7fffu), 0);
+        if (((hb >> 12) & 7u) < 3u) {
+            int lamp = addLamp(G, float3(0.5, g + 1.5, 0.5), L_RITUAL, 1.0);
+            addPart(G, makePart(P_FIRE, M_FIRE, int2(0), int2(1), 0, 0, 0, F_REL | ((lamp + 1) << 8)), 2.0);
+        }
+        addPart(G, hp, float(R) + 3.0);
+        // A heel stone outside the ring.
+        if (((hb >> 16) & 1u) != 0u) {
+            float a = hashf(pcg(hb)) * 6.2831853;
+            int2 o = int2(round(float2(cos(a), sin(a)) * float(R + 7)));
+            if (!colArch(hm, c + o) && colH(hm, c + o) > SEA + 2.0)
+                addPart(G, makePart(P_BOX, M_STONE, o, int2(1), 4, 0, 0, F_REL), float(R + 9));
+        }
+        age = 0.85 + 0.15 * hashf(hb >> 3);
+        ok = true;
+    } else if (type == T_CAIRN) {
+        addPart(G, makePart(P_BOX, M_STONE, int2(0), int2(1), 2, 0, 0, F_REL), 2.0);
+        addPart(G, makePart(P_BOX, M_STONE, int2(-1), int2(3), 1, 0, 0, F_REL), 3.0);
+        age = 0.8 + 0.2 * hashf(hb >> 3);
+        ok = true;
+    } else if (type == T_RUINS) {
+        float2 gr = float2(colH(hm, c + int2(6, 0)) - colH(hm, c - int2(6, 0)), colH(hm, c + int2(0, 6)) - colH(hm, c - int2(0, 6)));
+        float ga = length(gr) > 0.5 ? atan2(gr.y, gr.x) : hashf(hb) * 6.2831853;
+        float2 up = float2(cos(ga), sin(ga)), along = float2(-up.y, up.x);
+        int runs = 2 + int(hb % 3u);
+        for (int i = 0; i < runs; i++) {
+            uint rh = pcg(hb + uint(i) * 31u);
+            float off = (float(i) - float(runs - 1) * 0.5) * 5.0 + (hashf(rh) - 0.5) * 3.0;
+            float len = 6.0 + hashf(rh >> 4) * 10.0;
+            float shift = (hashf(rh >> 9) - 0.5) * 8.0;
+            int2 a = int2(round(up * off + along * (shift - len * 0.5)));
+            int2 b = int2(round(up * off + along * (shift + len * 0.5)));
+            addPart(G, makePart(P_WALL, M_STONE, a, int2(0), b.x, b.y, 3, int(rh & 0xfu) << 12), length(float2(max(abs(a), abs(b)))) + 2.0);
+        }
+        if (((hb >> 8) & 1u) != 0u) {
+            int2 tc = int2(round(along * (12.0 + hashf(hb >> 10) * 6.0) * (((hb >> 9) & 1u) != 0u ? 1.0 : -1.0)));
+            float tl, th;
+            if (flatPatch(hm, c + tc, 3, 3.0, tl, th) && tl > SEA + 2.0) {
+                addPart(G, makePart(P_RING, M_STONE, tc, int2(2, 3), 0, int(hb >> 14 & 0x7fffu), 6, 0), length(float2(tc)) + 5.0);
+                int2 rb = tc + int2(round(-up * 4.0));
+                int2 re = tc + int2(round(-up * (8.0 + hashf(hb >> 20) * 4.0)));
+                addPart(G, makePart(P_WALL, M_STONE, rb, int2(0), re.x, re.y, 1, 0), length(float2(max(abs(rb), abs(re)))) + 2.0);
+            }
+        }
+        age = 0.6 + 0.3 * hashf(hb >> 3);
+        ok = true;
+    } else if (type == T_HAMLET) {
+        int variant = lagoon > 0.4 ? 3 : (desert > 0.3 || painted > 0.35) ? 1 : (cold > 0.5 || g > snowline - 30.0) ? 2 : 0;
+        ok = buildHamlet(hm, G, c, hb, variant);
+        if (ok && float(flat5) > 0.0 && g < snowline) {
+            int lamp = addLamp(G, float3(0.5, g + 1.5, 0.5), L_HEARTH, 1.0);
+            addPart(G, makePart(P_FIRE, M_FIRE, int2(0), int2(1), 0, 0, 0, F_REL | ((lamp + 1) << 8)), 2.0);
+        }
+        if (ok && waterR <= 40.0 && variant != 3) buildJetty(hm, G, c, pcg(hb + 5u), waterDir, 48);
+        if (ok && ((hb >> 20) & 3u) == 0u && G.nl < MAX_LAMPS) {
+            // A beacon on the highest flat ground nearby.
+            float bestH = g + 8.0;
+            int2 bo = int2(0);
+            for (int ri = 1; ri <= 3; ri++)
+                for (int k = 0; k < 16; k++) {
+                    float a = float(k) * 0.3926991;
+                    int2 o = int2(round(float2(cos(a), sin(a)) * float(ri * 18)));
+                    float bl, bh;
+                    float hq = colH(hm, c + o);
+                    if (hq > bestH && flatPatch(hm, c + o, 1, 0.0, bl, bh)) { bestH = hq; bo = o; }
+                }
+            if (any(bo != 0)) {
+                int lamp = addLamp(G, float3(float(bo.x) + 0.5, bestH + 3.5, float(bo.y) + 0.5), L_BEACON, 1.0);
+                addPart(G, makePart(P_FIRE, M_FIRE, bo, int2(1), 2, 0, 0, F_REL | ((lamp + 1) << 8)), length(float2(bo)) + 2.0);
+                addPart(G, makePart(P_BOX, M_STONE, bo - 1, int2(3), 1, 0, 0, F_REL), length(float2(bo)) + 3.0);
+            }
+        }
+        age = 0.2 + 0.3 * hashf(hb >> 3);
+    } else if (type == T_JETTY) {
+        ok = buildJetty(hm, G, c, hb, waterDir, 24);
+        age = 0.3;
+    } else if (type == T_CAMP) {
+        int lamp = addLamp(G, float3(0.5, g + 1.5, 0.5), L_FIRE, 1.0);
+        addPart(G, makePart(P_FIRE, M_FIRE, int2(0), int2(1), 0, 0, 0, F_REL | ((lamp + 1) << 8)), 2.0);
+        int tents = 1 + int(hb % 2u);
+        float a0 = hashf(hb >> 4) * 6.2831853;
+        for (int i = 0; i < tents; i++) {
+            float a = a0 + float(i) * 2.3;
+            int2 tc = int2(round(float2(cos(a), sin(a)) * 4.5));
+            float tl, th;
+            if (!flatPatch(hm, c + tc, 1, 0.0, tl, th) || tl < SEA + 2.0) continue;
+            int axis = ((hb >> (8 + i)) & 1u) != 0u ? F_AXISZ : 0;
+            addPart(G, makePart(P_HOUSE, M_CLOTH, tc - 1, int2(3), int(tl), int(tl), int(pcg(hb + uint(i)) & 0x7fffu), F_TENT | axis),
+                    length(float2(tc)) + 3.0);
+        }
+        age = 0.1;
+        ok = true;
+    }
+    if (!ok || G.np == 0) {
+        G.s.head.z = 0;
+        G.s.info = float4(0);
+        for (int i = 0; i < MAX_PARTS; i++) G.s.parts[i] = int4(0);
+        for (int i = 0; i < MAX_LAMPS; i++) G.s.lamps[i] = float4(0);
+        sites[idx] = G.s;
+        return;
+    }
+    G.s.head.z = type;
+    G.s.info = float4(min(G.r, 125.0), age, float(G.np), float(G.nl));
+    sites[idx] = G.s;
+}
+
 // MARK: - Traversal
 
 struct Hit {
@@ -1400,7 +1829,7 @@ static float3 softCloudSky(thread const Ctx& x, float3 o, float3 r) {
 
 fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0)]],
                               texture2d<float> hm [[texture(0)]], texture2d<float> cloudTex [[texture(1)]],
-                              texture2d<float> clim [[texture(2)]]) {
+                              texture2d<float> clim [[texture(2)]], device const Site* sites [[buffer(1)]]) {
     float2 ndc = in.uv * 2.0 - 1.0;
     ndc.y = -ndc.y;
     ndc += f.jitter.xy;
@@ -1513,6 +1942,23 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         tSurf = h.t;
     } else {
         return skyWithClouds(x, o, d);
+    }
+    if (f.misc2.z == 8) {
+        // Site footprints tinted by type.
+        float3 sp = o + d * tSurf;
+        int2 q = int2(floor(sp.xz));
+        int2 home = int2(floor(float2(q + x.origin) / float(SITE_CELL))) - siteCell0(x.origin);
+        const float3 tint[7] = { float3(0), float3(1, 0.2, 1), float3(0.6, 0.6, 0.6), float3(1, 0.5, 0), float3(1, 1, 0.2),
+                                 float3(0.2, 0.6, 1), float3(1, 0.2, 0.2) };
+        for (int j = -1; j <= 1; j++)
+            for (int i = -1; i <= 1; i++) {
+                int2 gi = home + int2(i, j);
+                if (any(gi < 0) || any(gi >= SITE_GRID)) continue;
+                Site st = sites[gi.y * SITE_GRID + gi.x];
+                if (st.head.z == 0) continue;
+                float dd = length(float2(q + x.origin - st.head.xy));
+                if (dd < max(st.info.x, 6.0)) col = mix(col, tint[st.head.z] * 0.6, dd < 3.0 ? 0.9 : 0.45);
+            }
     }
     if (f.misc2.z == 3) return float4(float3(fogTransmittance(x, o, d, tSurf)), 1);
     // The sea runs on past the map, so by night it reflects the sky out to the horizon.

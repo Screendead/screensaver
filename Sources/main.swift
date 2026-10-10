@@ -57,6 +57,7 @@ struct Settings {
     var phase: Double?
     var timeScale: Double = 1
     var pitch: Double?
+    var headroom: Float?
 
     static func parse(_ args: [String]) -> Settings {
         var s = Settings()
@@ -79,6 +80,7 @@ struct Settings {
             case "--phase": s.phase = Double(next())
             case "--speed": s.timeScale = Double(next()) ?? 1
             case "--pitch": s.pitch = Double(next())
+            case "--headroom": s.headroom = Float(next())
             default: break
             }
             i += 1
