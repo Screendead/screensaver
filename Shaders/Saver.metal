@@ -548,7 +548,7 @@ static inline float cloudDensity(float2 q, uint seed, float time, float cover) {
 static inline float cloudShadow(float3 p, float3 L, int2 mapOrigin, uint seed, float time, float cover) {
     if (L.y <= 0.02) return 1.0;
     float2 q = p.xz + L.xz / L.y * (CLOUD_Y - p.y) + float2(mapOrigin);
-    return mix(1.0, mix(0.6, 0.42, smoothstep(0.3, 0.6, L.y)), smoothstep(0.0, 0.14, cloudDensity(q, seed, time, cover)));
+    return mix(1.0, mix(0.6, 0.32, smoothstep(0.3, 0.5, L.y)), smoothstep(0.0, 0.14, cloudDensity(q, seed, time, cover)));
 }
 
 struct Ctx {
