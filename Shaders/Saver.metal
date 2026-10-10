@@ -662,11 +662,58 @@ static float3 applyFog(thread const Ctx& x, float3 col, float3 o, float3 d, floa
     return mix(f, col, T);
 }
 
-// Clouds: a sheet above the peaks whose density is drawn as stepped isobands, so the sky repeats the
-// terrain's contour lines. Returns premultiplied-style (colour, coverage, distance).
 struct CloudSample { float3 col; float a; float t; };
 
+// Clouds: a volumetric slab above the peaks, marched in a few steps. The same noise field sets the
+// coverage; tops tower where it is dense, and each sample is self-shadowed toward the sun, so clouds have
+// lit crowns and shaded bases instead of reading as flat cut-outs.
 static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float soft) {
+    CloudSample c;
+    c.col = 0; c.a = 0; c.t = 6e4;
+    if (d.y < 0.01) return c;
+    float y0 = CLOUD_Y - 10.0, y1 = CLOUD_Y + 34.0;
+    float ta = (y0 - o.y) / d.y, tb = (y1 - o.y) / d.y;
+    float t0 = max(min(ta, tb), 0.0), t1 = max(ta, tb);
+    if (t0 > 7000.0) return c;
+    int steps = x.quality > 0.5 ? 14 : 8;
+    float dt = (t1 - t0) / float(steps);
+    float lowSun = 1.0 - smoothstep(0.02, 0.28, abs(x.L.sun.y));
+    float2 dh = normalize(d.xz + 1e-5), sh2 = normalize(x.L.sun.xz + 1e-5);
+    float toSun = 0.5 + 0.5 * dot(dh, sh2);
+    float2 sunStep = x.L.key.xz / max(x.L.key.y, 0.2) * 14.0;
+    float3 ambient = x.L.zenith * 1.0 + x.L.horizon * 0.35;
+    float glowAmt = lowSun * smoothstep(-0.14, -0.02, x.L.sun.y);
+    float T = 1.0;
+    float3 acc = 0;
+    for (int i = 0; i < steps; i++) {
+        float t = t0 + (float(i) + 0.5) * dt;
+        float3 p = o + d * t;
+        float2 q = p.xz + float2(x.origin);
+        float base = cloudDensity(q, x.seed, x.time, x.cover);
+        float h01 = (p.y - y0) / (y1 - y0);
+        float top = 0.35 + 0.65 * saturate(base * 2.5);
+        float dens = saturate((base - 0.04) * 3.0) * smoothstep(0.0, 0.2, h01) * (1.0 - smoothstep(top * 0.7, top, h01));
+        if (dens < 0.01) continue;
+        float toward = cloudDensity(q + sunStep, x.seed, x.time, x.cover);
+        float shadow = exp(-saturate((toward - 0.04) * 3.0) * 2.2) * (0.55 + 0.45 * h01);
+        float3 lit = x.L.keyCol * (0.15 + 0.85 * shadow) * mix(1.0, 0.35, x.L.night) * (0.6 + 0.4 * toSun) + ambient * (0.6 + 0.4 * h01);
+        lit += float3(1.6, 0.55, 0.20) * glowAmt * toSun * (1.0 - h01) * 0.9;
+        lit += float3(0.10, 0.13, 0.22) * pow(max(dot(d, x.L.moon), 0.0), 24.0) * 1.2 * x.L.night;
+        float a = 1.0 - exp(-dens * dt * 0.05);
+        acc += T * a * lit;
+        T *= 1.0 - a;
+        if (c.t > 5e4 && T < 0.6) c.t = t;
+        if (T < 0.03) break;
+    }
+    float cover = 1.0 - T;
+    c.col = acc / max(cover, 1e-3);
+    c.col *= mix(1.0, 0.9, smoothstep(0.3, 0.5, x.L.sun.y));
+    c.a = cover * mix(1.0, 0.7, x.L.night) * exp(-t0 / 3000.0) * smoothstep(7000.0, 2500.0, t0) * smoothstep(0.02, 0.1, d.y);
+    return c;
+}
+
+// The original contour-banded sheet: judged best at night (a woodblock-print echo of the terraces).
+static CloudSample cloudBands(thread const Ctx& x, float3 o, float3 d, float soft) {
     CloudSample c;
     c.col = 0; c.a = 0; c.t = 6e4;
     if (d.y < 0.01) return c;
@@ -706,13 +753,26 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float sof
     return c;
 }
 
+// Volumetric clouds won the blind A/B at dawn and noon, banded ones at night; crossfade with the sun.
+static CloudSample clouds(thread const Ctx& x, float3 o, float3 d) {
+    float w = smoothstep(-0.12, 0.02, x.L.sun.y);
+    if (w >= 0.999) return cloudSheet(x, o, d, 0.0);
+    if (w <= 0.001) return cloudBands(x, o, d, 0.0);
+    CloudSample v = cloudSheet(x, o, d, 0.0), bnd = cloudBands(x, o, d, 0.0);
+    CloudSample c;
+    c.a = mix(bnd.a, v.a, w);
+    c.col = (mix(bnd.col * bnd.a, v.col * v.a, w)) / max(c.a, 1e-3);
+    c.t = min(v.t, bnd.t);
+    return c;
+}
+
 static float4 skyWithClouds(thread const Ctx& x, float3 o, float3 d) {
     float3 raw = skyColor(d, x.L, false, x.seed, x.time);
     float3 bare = raw;
     // Forward-scatter glow near the horizon, matching what applyFog adds to fogged land.
     bare += x.L.keyCol * min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night) * smoothstep(0.1, 0.0, d.y);
     float3 discs = skyColor(d, x.L, true, x.seed, x.time) - raw;
-    CloudSample c = cloudSheet(x, o, d, 0.0);
+    CloudSample c = clouds(x, o, d);
     // Clouds hide the stars, moon and sun behind them.
     float3 sky = bare + discs * (1.0 - saturate(c.a * 3.0));
     return float4(mix(sky, c.col, c.a), c.a > 0.5 ? c.t : 6e4);
@@ -724,11 +784,8 @@ static float3 softCloudSky(thread const Ctx& x, float3 o, float3 r) {
     if (r.y < 0.02) return sky;
     float t = (CLOUD_Y - o.y) / r.y;
     float2 q = o.xz + r.xz * t + float2(x.origin);
-    // Same isobands as the sky, blurred as if by ripples.
-    float lv = (cloudDensity(q, x.seed, x.time, x.cover) - 0.05) / 0.07;
-    float fl = floor(lv), fr = lv - fl, aa = 0.8;
-    float tier = lv < 0.0 ? 0.0 : fl + smoothstep(1.0 - aa, 1.0, fr);
-    float dens = saturate(0.4 * smoothstep(-aa, 0.0, lv) + tier / 2.0);
+    // Soft coverage, blurred as if by ripples, matching the volumetric sky.
+    float dens = smoothstep(0.0, 0.3, cloudDensity(q, x.seed, x.time, x.cover));
     float3 lit = x.L.keyCol * 0.4 * mix(1.0, 0.35, x.L.night) + x.L.zenith * 1.2 + x.L.horizon * 0.4;
     return mix(sky, lit, dens * 0.4 * exp(-t / 2600.0));
 }
