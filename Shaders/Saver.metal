@@ -645,14 +645,14 @@ static inline float3 strataTone(float y, float2 w, uint seed, float desertAmt, f
 
 // Painted-hill beds: 1D Perlin noise in a gently dipping height picks each voxel's place on a ramp of
 // charcoal, rust, ochre, cream and lavender-grey; bed edges soften with the pixel footprint fp.
-// `lat` is the column's (dip offset, lateral facies shift) from paintedLateral.
 static inline float2 paintedLateral(float2 w, uint seed) {
     return float2(14.0 * perlin2(w / 520.0, seed + 114u) + 1.5 * perlin2(w / 90.0, seed + 115u), 0.35 * perlin2(w / 900.0, seed + 118u));
 }
 
+// `lat` is the column's (dip offset, lateral facies shift) from paintedLateral.
 static inline float3 paintedTone(float y, float2 lat, uint seed, float fp) {
     float yd = y + lat.x;
-    float v = perlin2(float2(yd / 11.0, 0.37), seed + 116u) + 0.3 * perlin2(float2(yd / 4.0, 0.71), seed + 117u) + lat.y;
+    float v = perlin2(float2(yd / 11.0, 0.37), seed + 116u) + 0.3 * perlin2(float2(yd / 4.0, 0.71), seed + 117u) * (1.0 - smoothstep(0.6, 1.8, fp)) + lat.y;
     float t = saturate(v * 0.75 + 0.5) * 4.0;
     float i = min(floor(t), 3.0), f = t - i;
     const float3 pal[5] = { float3(0.21, 0.19, 0.18), float3(0.43, 0.24, 0.17), float3(0.53, 0.41, 0.26),
@@ -755,7 +755,7 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
         else if (drops >= 2) s.albedo = stone;
         else s.albedo = tread;
         float sandy = float(v.y + 1) > snowline || (drops >= 2 && !beach) ? 0.0 : beach ? 1.0 : smoothstep(0.35, 0.7, desert);
-        if (painted > 0.0 && !beach) s.albedo = mix(s.albedo, tread, painted);
+        if (painted > 0.0 && !beach && !snowy) s.albedo = mix(s.albedo, tread, painted);
         if (sandy > 0.0) {
             float3 rp = sandRipples(v.xz + mapOrigin, uv, w, fpA, time, seed) * sandy;
             s.albedo *= 1.0 + rp.x;
@@ -763,8 +763,7 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
         }
     } else if (n.y == 0 && !underGap) {
         if (beach) s.albedo = sand * 0.85;
-        else if (painted > 0.5) s.albedo = stone * 0.95;
-        else if (slope < 4.0 && !snowy) s.albedo = mix(tread, stone, 0.5) * 0.9;
+        else if (slope < 4.0 && !snowy) s.albedo = mix(mix(tread, stone, 0.5) * 0.9, stone * 0.95, painted);
         else s.albedo = snowy ? mix(stone, float3(0.63, 0.66, 0.71), 0.45) : stone;
     } else {
         s.albedo = stone * 0.9;
