@@ -132,13 +132,13 @@ static inline float3 terrainColumn(int2 w, uint seed) {
     float r = mix(rough, ridge, hi);
     float h = mix(16.0, 62.0, c) + mix(26.0, 115.0, hi) * r;
     // Crenellated ridgelines instead of soft domes.
-    h += (ridged2((p + warp * 0.4) / 110.0, 3, seed + 14) - 0.45) * mix(0.0, 18.0, smoothstep(0.3, 0.7, hi));
+    h += (ridged2((p + warp * 0.4) / 110.0, 3, seed + 14) - 0.45) * mix(0.0, 8.0, smoothstep(0.3, 0.7, hi));
     // Soft terracing everywhere: risers cluster into short cliff bands between wide treads,
     // so slopes read as contour lines instead of a 1:1 stair lattice.
-    float td = mix(2.0, 6.0, saturate(perlin2(p / 900.0, seed + 13) * 0.8 + 0.5));
+    float td = mix(4.0, 8.0, saturate(perlin2(p / 900.0, seed + 13) * 0.8 + 0.5));
     float hn2 = h / td;
     float lv = floor(hn2);
-    h = mix(h, (lv + smoothstep(mix(0.55, 0.9, hi), 1.0, hn2 - lv)) * td, 0.9);
+    h = (lv + smoothstep(mix(0.55, 0.9, hi), 1.0, hn2 - lv)) * td;
 
     // Canyon country: in hot, dry regions the land steps into flat-topped mesas with sheer risers.
     float canyon = smoothstep(0.35, 0.7, desertAmount(climate(float2(w), seed)));
@@ -188,6 +188,8 @@ kernel void cleanupColumns(texture2d<float, access::read> src [[texture(0)]],
     float h0 = src.read(a).r, h1 = src.read(b).r, h2 = src.read(e).r, h3 = src.read(f).r;
     c.r = clamp(c.r, min(min(h0, h1), min(h2, h3)), max(max(h0, h1), max(h2, h3)));
     if (c.b > c.r - 3.0) { c.g = 0; c.b = 0; }
+    // A roof needs walls: keep a gap only where every neighbour reaches above it.
+    if (min(min(h0, h1), min(h2, h3)) < c.b + 1.0) { c.g = 0; c.b = 0; }
     dst.write(c, gid);
 }
 
@@ -430,10 +432,10 @@ struct Surface {
 
 // Two low-chroma tones per rock family, ramped smoothly by voxel row so strata read as gentle folds.
 static inline float3 strataTone(float y, float2 w, uint seed, float desertAmt) {
-    float k = 0.5 + 0.5 * sin(y * 0.9 + 2.2 * perlin2(w * 0.01, seed + 22u) + 1.3 * perlin2(w * 0.003, seed + 23u));
+    float k = 0.5 + 0.5 * sin(y * 0.38 + 2.2 * perlin2(w * 0.01, seed + 22u) + 1.3 * perlin2(w * 0.003, seed + 23u));
     k = smoothstep(0.25, 0.75, k);
     float3 grey = mix(float3(0.22, 0.23, 0.25), float3(0.35, 0.34, 0.33), k);
-    float3 sand = mix(float3(0.50, 0.29, 0.18), float3(0.74, 0.56, 0.39), k);
+    float3 sand = mix(float3(0.56, 0.36, 0.24), float3(0.70, 0.52, 0.37), k);
     return mix(grey, sand, desertAmt);
 }
 
@@ -546,7 +548,7 @@ struct Ctx {
     Light L;
 };
 
-static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows) {
+static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows, bool lips = true) {
     float3 p = o + d * h.t;
     float3 n = float3(h.normal);
     float2 uv = faceUV(p, h.normal);
@@ -554,7 +556,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     Surface s = surfaceAt(x.hm, x.size, h.voxel, h.normal, uv, fp, x.origin, x.seed);
     // Prefilter: from ~1/10 voxel per pixel, blend toward the smooth heightfield normal, relax AO and
     // shadows, and give risers their tread colour, so distant stairs read as contour bands, not moire.
-    float wf = smoothstep(0.08, 0.45, fp);
+    float wf = smoothstep(0.04, 0.30, fp);
     float3 nS = normalize(float3(s.nh.x - s.nh.y, 2.0, s.nh.z - s.nh.w));
     float3 nl = normalize(mix(n, nS, wf));
     float ao = mix(cornerAO(x.hm, x.size, h.voxel, h.normal, uv), 0.85, wf);
@@ -569,7 +571,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
         so.xz = clamp(so.xz, float2(h.voxel.xz) + 0.002, float2(h.voxel.xz) + 0.998);
         Hit sHit = trace(x.hm, so, x.L.key, 700.0, x.quality > 0.5 ? 120 : 48, x.globalMax, x.size);
         // Contact shadows from single-voxel steps draw sawtooth noise; keep them faint, cliffs full.
-        sh = sHit.hit ? 0.5 * (1.0 - smoothstep(1.0, 4.0, sHit.t)) : 1.0;
+        sh = sHit.hit ? 0.35 * (1.0 - smoothstep(2.0, 8.0, sHit.t)) : 1.0;
         sh = mix(sh, 0.5 + 0.5 * sh, wf);
         sh = mix(sh, 1.0, 0.55 * x.L.night);
     }
@@ -579,10 +581,14 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     float zw = mix(0.25, 0.65, 1.0 - smoothstep(0.1, 0.45, x.L.key.y));
     float3 skyFill = mix(x.L.horizon, x.L.zenith, zw + 0.3 * nl.y) * 0.9 * lowFill;
     float3 bounce = (1.0 - saturate(nl.y)) * 0.35 * alb * x.L.keyCol * max(x.L.key.y, 0.0);
-    float3 col = alb * (x.L.keyCol * ndl * sh * mix(1.0, 0.45, x.L.night) + (skyFill * ao + bounce));
+    // High sun: risers sit in cooler shade so terraces keep their modelling at noon.
+    float riserShade = mix(1.0, 0.65, (1.0 - saturate(nl.y)) * smoothstep(0.3, 0.6, x.L.key.y));
+    float3 col = alb * (x.L.keyCol * ndl * sh * mix(1.0, 0.45, x.L.night) + (skyFill * ao * riserShade + bounce));
     // Lips of steps catch low light and moonlight; these rise into EDR headroom.
-    float low = max(1.0 - smoothstep(0.05, 0.4, x.L.key.y), 0.9 * x.L.night);
-    col += s.glint * (1.0 - wf) * x.L.keyCol * sh * (0.15 + 1.4 * low) * mix(alb, float3(1.0), 0.5);
+    float low = max(1.0 - smoothstep(0.05, 0.4, x.L.key.y), 0.35 * x.L.night);
+    // At night only the nearest terraces catch the moon.
+    float nightFade = mix(1.0, 1.0 - smoothstep(0.03, 0.15, fp), x.L.night);
+    if (lips) col += s.glint * (1.0 - wf) * nightFade * x.L.keyCol * sh * (0.3 + 1.25 * low) * mix(alb, float3(1.0), 0.5);
     return col;
 }
 
@@ -637,16 +643,16 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float sof
     float2 q = o.xz + d.xz * t + float2(x.origin);
     float dens = cloudDensity(q, x.seed, x.time, x.cover);
     float lv = (dens - 0.05) / 0.07;
-    float aa = clamp(t * x.pixelAngle / 40.0, 0.03, 0.5) + soft;
+    float aa = clamp(t * x.pixelAngle / 40.0, 0.10, 0.5) + soft;
     float fl = floor(lv), fr = lv - fl;
     // Coverage steps up one band at a time; each step has an anti-aliased edge.
     float tier = lv < 0.0 ? 0.0 : fl + smoothstep(1.0 - aa, 1.0, fr);
-    float a = saturate(0.35 * smoothstep(-aa, 0.0, lv) + tier / 2.5) * 0.92;
+    float a = saturate(0.4 * smoothstep(-aa, 0.0, lv) + tier / 2.0) * 0.95;
     float lowSun = 1.0 - smoothstep(0.02, 0.28, abs(x.L.sun.y));
     float2 dh = normalize(d.xz + 1e-5), sh2 = normalize(x.L.sun.xz + 1e-5);
     float toSun = 0.5 + 0.5 * dot(dh, sh2);
     float3 lit = x.L.keyCol * (0.25 + 0.35 * toSun) * mix(1.0, 0.35, x.L.night) + x.L.zenith * 1.2 + x.L.horizon * 0.4;
-    lit *= 0.78 + 0.08 * min(max(fl, 0.0), 3.0);
+    lit *= (0.78 + 0.08 * min(max(fl, 0.0), 3.0)) * (0.88 + 0.12 * saturate(fr));
     // Band edges facing the sun catch a thin rim, like the terrain's lips.
     float rim = (lv >= 0.0 ? 1.0 - smoothstep(0.0, aa * 2.0, fr) : 0.0) * pow(max(dot(d, x.L.sun), 0.0), 4.0) * x.L.sunAmt;
     lit += x.L.keyCol * rim * 0.5;
@@ -660,10 +666,14 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float sof
 }
 
 static float4 skyWithClouds(thread const Ctx& x, float3 o, float3 d) {
-    float3 sky = skyColor(d, x.L, true, x.seed, x.time);
+    float3 raw = skyColor(d, x.L, false, x.seed, x.time);
+    float3 bare = raw;
     // Forward-scatter glow near the horizon, matching what applyFog adds to fogged land.
-    sky += x.L.keyCol * min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night) * smoothstep(0.1, 0.0, d.y);
+    bare += x.L.keyCol * min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night) * smoothstep(0.1, 0.0, d.y);
+    float3 discs = skyColor(d, x.L, true, x.seed, x.time) - raw;
     CloudSample c = cloudSheet(x, o, d, 0.0);
+    // Clouds hide the stars, moon and sun behind them.
+    float3 sky = bare + discs * (1.0 - saturate(c.a * 3.0));
     return float4(mix(sky, c.col, c.a), c.a > 0.5 ? c.t : 6e4);
 }
 
@@ -712,7 +722,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         float3 refl;
         if (x.quality > 0.5) {
             Hit rh = trace(hm, wp + float3(0, 0.02, 0), r, 1500.0, 220, x.globalMax, x.size);
-            refl = rh.hit ? applyFog(x, shade(x, wp, r, rh, false), wp, r, rh.t)
+            refl = rh.hit ? applyFog(x, shade(x, wp, r, rh, false, false), wp, r, rh.t)
                            : softCloudSky(x, wp, r);
         } else {
             refl = softCloudSky(x, wp, r);
@@ -721,8 +731,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         float3 under = deep;
         if (h.hit) {
             float path = h.t - tw;
-            float3 lit = shade(x, o, d, h, false);
-            under = mix(deep, lit * float3(0.55, 0.8, 0.85), exp(-path * 0.22));
+            float3 lit = shade(x, o, d, h, false, false);
+            under = mix(deep, lit * float3(0.55, 0.8, 0.85), exp(-path * 0.35));
         }
         under *= 1.0 - 0.4 * x.L.night;
         float cosi = saturate(-dot(d, n));

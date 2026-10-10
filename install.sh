@@ -8,6 +8,8 @@ DEST="$HOME/Applications/VoxelReverie.app"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 mkdir -p "$HOME/Applications" "$HOME/Library/LaunchAgents"
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+# bootout returns before launchd has torn the job down; wait so bootstrap doesn't race it.
+for _ in {1..50}; do launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || break; sleep 0.1; done
 [[ -e "$DEST" ]] && trash "$DEST"
 cp -R build/VoxelReverie.app "$DEST"
 cat > "$PLIST" <<PLIST

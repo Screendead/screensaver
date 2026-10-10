@@ -130,7 +130,7 @@ final class World {
 
     private func generate(into index: Int, origin o: SIMD2<Int32>, wait: Bool) {
         let buf = buffers[index]
-        guard let cb = genQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return }
+        guard let cb = genQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { pending = false; return }
         var info = SIMD4<Int32>(o.x, o.y, Int32(World.size), Int32(bitPattern: seed))
         let full = MTLSize(width: World.size, height: World.size, depth: 1), tg = MTLSize(width: 16, height: 16, depth: 1)
         enc.setComputePipelineState(genPipeline)
@@ -166,7 +166,8 @@ final class World {
             let r = World.readBack(buf.tex)
             finish(r.0, r.1)
         } else {
-            cb.addCompletedHandler { _ in
+            cb.addCompletedHandler { [weak self] cb in
+                guard cb.status == .completed else { DispatchQueue.main.async { self?.pending = false }; return }
                 let r = World.readBack(buf.tex)
                 DispatchQueue.main.async { finish(r.0, r.1) }
             }
@@ -206,7 +207,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     let world: World
     let camera: FlightCamera
     var clock = SkyClock()
-    let battery: Bool
+    private(set) var battery: Bool
     var timeScale: Double = 1
     var debugMode: Float = 0
     var headroom: Float = 0
@@ -279,6 +280,12 @@ final class Renderer: NSObject, MTKViewDelegate {
         view.delegate = self
     }
 
+    func setBattery(_ b: Bool, view: MTKView) {
+        battery = b
+        renderScale = b ? 0.35 : 0.5
+        view.preferredFramesPerSecond = b ? 30 : 60
+    }
+
     // Advances the simulation; large steps are subdivided so steering stays stable.
     func simulate(_ dt: Double) {
         var remaining = dt * timeScale
@@ -340,7 +347,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard let sceneTex else { return }
         sceneSize = (w, h)
         var f = makeFrame(size: CGSize(width: w, height: h))
-        frameIndex += 1
+        frameIndex = (frameIndex + 1).truncatingRemainder(dividingBy: 4096)
         let b = camera.basis
         prevCamera = (camera.position, b.fwd, b.right, b.up)
         let histIn = history[historyIndex], histOut = history[1 - historyIndex]

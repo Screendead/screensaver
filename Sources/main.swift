@@ -12,7 +12,7 @@ func dlog(_ s: @autoclosure () -> String) { if debugLog { print(s()); fflush(std
 enum SystemState {
     static func idleSeconds() -> Double {
         // kCGAnyInputEventType is ~0; Swift doesn't import it.
-        CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
+        CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: CGEventType(rawValue: ~0)!)
     }
 
     // Video players, calls and presentations hold one of these to keep the display awake.
@@ -90,17 +90,27 @@ struct Settings {
 // MARK: - Saver windows
 
 final class SaverWindow: NSWindow {
+    var onInput: (() -> Void)?
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+    // Swallow input here: unhandled keys would otherwise reach NSApp and beep.
+    override func keyDown(with event: NSEvent) { onInput?() }
+    override func keyUp(with event: NSEvent) {}
+    override func flagsChanged(with event: NSEvent) { onInput?() }
+    override func mouseDown(with event: NSEvent) { onInput?() }
+    override func rightMouseDown(with event: NSEvent) { onInput?() }
+    override func otherMouseDown(with event: NSEvent) { onInput?() }
+    override func scrollWheel(with event: NSEvent) { onInput?() }
 }
 
 final class SaverController {
     private var windows: [SaverWindow] = []
-    private var renderers: [Renderer] = []
+    private var renderers: [(Renderer, MTKView)] = []
     private var watchTimer: Timer?
-    private var shownAt = Date()
+    private var shownAt: TimeInterval = 0 // monotonic
     private var previousApp: NSRunningApplication?
     private var dismissing = false
+    private var battery = false
     let settings: Settings
     var onDismiss: (() -> Void)?
 
@@ -109,16 +119,21 @@ final class SaverController {
 
     init(settings: Settings) { self.settings = settings }
 
+    private static var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
+
     func show() {
-        guard !isShowing, let device = MTLCreateSystemDefaultDevice() else { return }
+        let screens = NSScreen.screens
+        guard !isShowing, !screens.isEmpty else { return }
         dismissing = false
-        previousApp = NSWorkspace.shared.frontmostApplication
-        let battery = settings.forceBattery || SystemState.onBattery()
+        let front = NSWorkspace.shared.frontmostApplication
+        previousApp = front?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : front
+        battery = settings.forceBattery || SystemState.onBattery()
         // A different seed per session keeps the world non-repeating across activations.
         let sessionSeed = settings.seed != 0 ? settings.seed : UInt32.random(in: 1...UInt32.max)
+        let device = MTLCreateSystemDefaultDevice()
 
-        screenFrames = NSScreen.screens.map(\.frame)
-        for (index, screen) in NSScreen.screens.enumerated() {
+        screenFrames = screens.map(\.frame)
+        for (index, screen) in screens.enumerated() {
             let window = SaverWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
             window.level = .screenSaver
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
@@ -126,13 +141,19 @@ final class SaverController {
             window.isOpaque = true
             window.hasShadow = false
             window.alphaValue = 0
+            window.isReleasedWhenClosed = false
             window.setFrame(screen.frame, display: false)
+            window.onInput = { [weak self] in self?.dismiss() }
 
-            let view = MTKView(frame: CGRect(origin: .zero, size: screen.frame.size), device: device)
-            guard let renderer = Renderer(view: view, screen: screen, seed: sessionSeed, screenIndex: index, battery: battery) else { continue }
-            renderer.timeScale = settings.timeScale
-            window.contentView = view
-            renderers.append(renderer)
+            // A screen whose renderer can't start still gets covered, in black.
+            if let device {
+                let view = MTKView(frame: CGRect(origin: .zero, size: screen.frame.size), device: device)
+                if let renderer = Renderer(view: view, screen: screen, seed: sessionSeed, screenIndex: index, battery: battery) {
+                    renderer.timeScale = settings.timeScale
+                    window.contentView = view
+                    renderers.append((renderer, view))
+                }
+            }
             windows.append(window)
             window.orderFrontRegardless()
         }
@@ -142,7 +163,7 @@ final class SaverController {
         NSCursor.hide()
         NSApp.presentationOptions = [.hideDock, .hideMenuBar]
 
-        dlog("show: active=\(NSApp.isActive) key=\(String(describing: NSApp.keyWindow)) screens=\(NSScreen.screens.count)")
+        dlog("show: active=\(NSApp.isActive) screens=\(screens.count) renderers=\(renderers.count)")
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { dlog("show+1s: active=\(NSApp.isActive) keyWindow=\(NSApp.keyWindow != nil)") }
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 2.0
@@ -150,19 +171,26 @@ final class SaverController {
             for w in windows { w.animator().alphaValue = 1 }
         }
 
-        shownAt = Date()
-        var lastIdle = SystemState.idleSeconds()
+        shownAt = SaverController.now
+        var lastPowerCheck = shownAt
+        watchTimer?.invalidate()
         watchTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
             guard let self else { return }
+            let age = SaverController.now - self.shownAt
+            // Any physical input after the moment we appeared, including during the fade-in.
             let idle = SystemState.idleSeconds()
-            // Grace period: activating our windows can itself register as an event.
-            let settled = Date().timeIntervalSince(self.shownAt) > 0.6
-            if settled && idle + 0.05 < lastIdle { dlog("input detected: idle \(idle) < \(lastIdle)"); self.dismiss() }
-            lastIdle = idle
-            if self.settings.previewDuration > 0 && Date().timeIntervalSince(self.shownAt) > self.settings.previewDuration {
-                self.dismiss()
+            if idle < age - 0.15 { dlog("input detected: idle \(idle), shown \(age)"); self.dismiss(); return }
+            if self.settings.previewDuration > 0 && age > self.settings.previewDuration { self.dismiss(); return }
+            if SaverController.now - lastPowerCheck > 5 {
+                lastPowerCheck = SaverController.now
+                let b = self.settings.forceBattery || SystemState.onBattery()
+                if b != self.battery {
+                    self.battery = b
+                    for (r, v) in self.renderers { r.setBattery(b, view: v) }
+                }
             }
         }
+        watchTimer?.tolerance = 0.005
         RunLoop.main.add(watchTimer!, forMode: .common)
     }
 
@@ -172,14 +200,19 @@ final class SaverController {
         watchTimer?.invalidate()
         watchTimer = nil
         let closing = windows
+        for w in closing { w.ignoresMouseEvents = true }
+        // Hand focus back immediately so typing during the fade lands where the user expects, but only
+        // if we still hold it (the user may already have switched apps).
+        if NSApp.isActive {
+            if let prev = previousApp, !prev.isTerminated { prev.activate() } else { NSApp.hide(nil) }
+        }
+        NSCursor.unhide()
         let finish = { [weak self] in
             guard let self else { return }
-            for w in closing { w.orderOut(nil) }
+            for w in closing { w.orderOut(nil); w.contentView = nil }
             self.windows.removeAll()
             self.renderers.removeAll()
             NSApp.presentationOptions = []
-            NSCursor.unhide()
-            self.previousApp?.activate()
             self.dismissing = false
             self.onDismiss?()
         }
@@ -197,6 +230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let settings: Settings
     lazy var saver = SaverController(settings: settings)
     var pollTimer: Timer?
+    private var systemSaverRunning = false
 
     init(settings: Settings) { self.settings = settings }
 
@@ -215,8 +249,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for name in [NSWorkspace.screensDidSleepNotification, NSWorkspace.sessionDidResignActiveNotification, NSWorkspace.willSleepNotification] {
             ws.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.saver.dismiss(animated: false) }
         }
-        // If the system screensaver starts anyway, it owns the screen.
-        DistributedNotificationCenter.default().addObserver(forName: NSNotification.Name("com.apple.screensaver.didstart"), object: nil, queue: .main) { [weak self] _ in
+        let dnc = DistributedNotificationCenter.default()
+        // If the system screensaver starts anyway, it owns the screen until it stops.
+        dnc.addObserver(forName: NSNotification.Name("com.apple.screensaver.didstart"), object: nil, queue: .main) { [weak self] _ in
+            self?.systemSaverRunning = true
+            self?.saver.dismiss(animated: false)
+        }
+        dnc.addObserver(forName: NSNotification.Name("com.apple.screensaver.didstop"), object: nil, queue: .main) { [weak self] _ in
+            self?.systemSaverRunning = false
+        }
+        dnc.addObserver(forName: NSNotification.Name("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
             self?.saver.dismiss(animated: false)
         }
         // Hiding the menu bar also posts this; only a real display change (frames differ) needs a rebuild.
@@ -226,13 +268,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.tick() }
+        pollTimer?.tolerance = 0.2
     }
 
     private func tick() {
-        dlog(String(format: "tick idle=%.1f wantsAwake=%d locked=%d asleep=%d showing=%d", SystemState.idleSeconds(),
+        dlog(String(format: "tick idle=%.1f wantsAwake=%d locked=%d asleep=%d showing=%d sys=%d", SystemState.idleSeconds(),
                      SystemState.somethingWantsDisplayAwake() ? 1 : 0, SystemState.screenIsLockedOrInactive() ? 1 : 0,
-                     SystemState.displaysAsleep() ? 1 : 0, saver.isShowing ? 1 : 0))
-        guard !saver.isShowing else { return }
+                     SystemState.displaysAsleep() ? 1 : 0, saver.isShowing ? 1 : 0, systemSaverRunning ? 1 : 0))
+        guard !saver.isShowing, !systemSaverRunning else { return }
         guard SystemState.idleSeconds() >= settings.idleThreshold else { return }
         if SystemState.somethingWantsDisplayAwake() || SystemState.screenIsLockedOrInactive() || SystemState.displaysAsleep() { return }
         saver.show()
