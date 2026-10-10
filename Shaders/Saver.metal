@@ -1622,13 +1622,22 @@ fragment float4 postFragment(VOut in [[stage_in]], texture2d<float> scene [[text
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     // Golden hour sits lower on the curve, below the shoulder where ACES bleaches warm skies to cream.
     float sunUp = smoothstep(-0.04, 0.04, f.sunDir.y);
-    float3 x = scene.sample(s, in.uv).rgb * f.misc.x * mix(1.0, 0.75, goldAmount(f.sunDir.y) * sunUp);
+    // Retro pixels: ~864 cells across the screen, each cell one flat colour ordered-dithered below.
+    float outW = 1.0 / max(abs(dfdx(in.uv.x)), 1e-6);
+    float cell = max(1.0, round(outW / 864.0));
+    float2 cellId = floor(in.pos.xy / cell);
+    float2 uv = (cellId + 0.5) * cell * float2(abs(dfdx(in.uv.x)), abs(dfdy(in.uv.y)));
+    float3 x = scene.sample(s, uv).rgb * f.misc.x * mix(1.0, 0.75, goldAmount(f.sunDir.y) * sunUp);
     float3 c = acesFit(x);
     // Noon light is the flattest; restore a little chroma the tonemap shoulder takes away.
     float l = dot(c, float3(0.2126, 0.7152, 0.0722));
     c = max(mix(float3(l), c, 1.0 + 0.10 * smoothstep(0.2, 0.45, f.sunDir.y)), 0.0);
-    float ign = fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715))));
-    float3 enc = linearToSRGB(saturate(c)) + (ign - 0.5) / 255.0;
+    // 8x8 Bayer, fixed to the screen so it never flickers; 8 levels per channel in sRGB.
+    uint2 b = uint2(cellId) & 7u;
+    uint bx = b.x ^ b.y;
+    uint bayer = ((bx & 1u) << 5) | ((b.y & 1u) << 4) | ((bx & 2u) << 2) | ((b.y & 2u) << 1) | ((bx & 4u) >> 1) | ((b.y & 4u) >> 2);
+    const float levels = 7.0;
+    float3 enc = floor(linearToSRGB(saturate(c)) * levels + (float(bayer) + 0.5) / 64.0) / levels;
     float headroom = f.misc2.w;
     if (headroom <= 1.0) return float4(enc, 1);
     // EDR: identical to SDR below scene value 1; energy above it rolls per channel into the headroom.
