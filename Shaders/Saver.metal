@@ -1466,7 +1466,9 @@ static inline float3 fogColor(thread const Ctx& x, float3 d, float T) {
 // Exponential height fog plus a slow-drifting noise modulation that pools mist in valleys.
 static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t) {
     float hf = 30.0;
-    float a = 0.0009, b = 0.0, c2 = 1.3e-6;
+    float a = 0.0009, c2 = 1.3e-6;
+    // Air: the near haze saturates into a thin linear tail, so far ranges read as layered haze rather than vanish.
+    const float K = 1.6, lambda = 6e-5;
     float k = exp(-(o.y - SEA) / hf);
     float dy = abs(d.y) < 1e-4 ? 1e-4 : d.y;
     float heightTerm = a * hf * k * (1.0 - exp(-dy * t / hf)) / dy;
@@ -1487,13 +1489,16 @@ static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t) 
     float clear = mix(1.0, 0.15, smoothstep(0.2, 0.45, x.L.sun.y));
     // Night air is crisp: moonlit ridges stay legible to the horizon.
     clear *= mix(1.0, 0.35, x.L.night);
-    return exp(-((heightTerm + b * t + c2 * t * t + mist) * clear + 6.0 * smoothstep(x.tr.fadeStart, x.tr.rmax, r)));
+    float air = K * (1.0 - exp(-c2 * t * t / K)) + lambda * t;
+    return exp(-((heightTerm + air + mist) * clear + 6.0 * smoothstep(x.tr.fadeStart, x.tr.rmax, r)));
 }
 
 static float3 applyFog(thread const Ctx& x, float3 col, float3 o, float3 d, float t) {
     float T = fogTransmittance(x, o, d, t);
     // Thin haze in-scatters less than the full horizon radiance; only thick fog converges on the sky.
-    float3 f = (fogColor(x, d, T) + x.L.keyCol * min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night)) * mix(mix(0.3, 0.12, x.L.gold), 1.0, smoothstep(0.1, 0.9, 1.0 - T));
+    // Forward scatter fades out above the horizon as the sky's does, so fully hazed land matches the sky behind it.
+    float scatter = min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night) * mix(1.0, smoothstep(0.1, 0.0, d.y), 1.0 - T);
+    float3 f = (fogColor(x, d, T) + x.L.keyCol * scatter) * mix(mix(0.3, 0.12, x.L.gold), 1.0, smoothstep(0.1, 0.9, 1.0 - T));
     return mix(f, col, T);
 }
 
@@ -1646,6 +1651,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
 
     float tw = d.y < 0 ? (SEA - o.y) / d.y : 1e9;
     bool water = d.y < 0 && tw > 0 && (!h.hit || tw < h.t);
+    if (f.misc2.z == 9 && (water || !h.hit)) return float4(0, 0, 0, water ? tw : 6e4);
     // Sea past the world's edge is fully hazed: it takes the fog colour alone, with no ring of ocean around the land.
     if (water && length((o + d * tw).xz - x.tr.cam) >= x.tr.rmax) {
         if (f.misc2.z == 3) return float4(0, 0, 0, 1);
@@ -1743,6 +1749,11 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     } else if (h.hit) {
         col = shadeL(x, o, d, h, true);
         tSurf = h.t;
+        // Debug: flat level colours, morph bands white.
+        if (f.misc2.z == 9) {
+            const float3 flat[5] = { float3(1, 0, 0), float3(0, 1, 0), float3(0, 0, 1), float3(1, 1, 0), float3(1, 0, 1) };
+            return float4(morphAt(x.tr, h.level, (o + d * h.t).xz) > 0.0 ? float3(1) : flat[h.level], h.t);
+        }
         // Debug: levels tinted, morph bands striped toward the next level's tint.
         if (f.misc2.z == 8) {
             const float3 tint[5] = { float3(1, 0.3, 0.3), float3(0.3, 1, 0.3), float3(0.3, 0.5, 1), float3(1, 1, 0.3), float3(1, 0.3, 1) };

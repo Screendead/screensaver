@@ -300,6 +300,9 @@ final class Clipmap {
 
     var idle: Bool { job == nil }
 
+    // Forgets the windows, so the next encode rebuilds every level whole (VR_COARSE_FULL: checks strips against it).
+    func invalidate() { lo = Array(repeating: nil, count: Clipmap.levels); job = nil }
+
     private func nextJob(_ center: SIMD2<Double>) -> Job? {
         let n = Int32(Clipmap.size), step = Int32(Clipmap.snap)
         for i in 0..<Clipmap.levels {
@@ -399,6 +402,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var gpuTimes: [Double] = []
     private var sceneSize = (width: 0, height: 0)
     static let logTiming = ProcessInfo.processInfo.environment["VR_TIMING"] != nil
+    static let fullCoarse = ProcessInfo.processInfo.environment["VR_COARSE_FULL"] != nil
     fileprivate var exposure: Double = 1.5
     // Holds the time of day fixed for snapshots, so exposure and the shot director see the rendered sun.
     var pinnedPhase: Double?
@@ -569,6 +573,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         var f = makeFrame(size: CGSize(width: w, height: h))
         frameIndex = (frameIndex + 1).truncatingRemainder(dividingBy: 4096)
         bakeClouds(into: cb, frame: &f)
+        if Renderer.fullCoarse { clipmap.invalidate() }
         clipmap.encode(into: cb, center: SIMD2(camera.position.x, camera.position.z), drain: world.synchronous)
         let b = camera.basis
         prevCamera = (camera.position, b.fwd, b.right, b.up)
@@ -683,6 +688,7 @@ enum Snapshot {
             return
         }
         r.debugMode = settings.debugMode
+        r.timeScale = settings.timeScale
         r.world.synchronous = true
         r.camera.pitchOverride = settings.pitch
         let w = Int(settings.screenshotSize.width), h = Int(settings.screenshotSize.height)
