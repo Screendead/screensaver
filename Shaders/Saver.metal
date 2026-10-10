@@ -1056,10 +1056,10 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     // Below ~2 pixels per voxel step shadows and sky visibility alias into a hatch that crawls under motion;
     // shade the continuous slope under the stairs instead.
     float wf2 = s.mat == 0 ? smoothstep(0.2, 0.5, fp) : 0.0;
-    // A face a few pixels wide keeps its exact normal: a column's central difference tilts only the tops at a
-    // ledge, so they would shade unlike the rest of their plane. Toward 2 pixels per voxel the slope under the
-    // stairs takes over, smooth across ledges.
-    float wn = smoothstep(0.33, 0.6, fp);
+    // Terrain faces a few pixels wide keep their exact normal: a column's central difference tilts only the tops
+    // at a ledge, so they would shade unlike the rest of their plane. Toward 2 pixels per voxel the slope under
+    // the stairs takes over, smooth across ledges. Canopies keep the early blend toward their column normal.
+    float wn = s.mat == 0 ? smoothstep(0.33, 0.6, fp) : wf;
     if (s.mat == 0 && wn > 0.0) {
         float R = max(2.0, 1.5 * fp);
         float2 grad = float2(groundSmooth(x.hm, p.xz + float2(R, 0), x.size) - groundSmooth(x.hm, p.xz - float2(R, 0), x.size),
@@ -1079,9 +1079,15 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     // Canopies would otherwise drop to cut-out silhouettes under the moon.
     if (s.mat == 1 || s.mat == 2) alb *= 1.0 + 1.4 * x.L.night * (1.0 - 0.5 * s.autumn);
     float ndl = max(dot(nl, x.L.key), 0.0);
-    // Low risers stand in for a slope, not a wall: one facing the sun takes no more key light than that slope.
-    float stepK = h.normal.y == 0 && s.mat == 0 ? 1.0 - smoothstep(2.0, 5.0, s.riser) : 0.0;
-    ndl = min(ndl, mix(ndl, max(mix(x.L.key.y, dot(nS, x.L.key), 0.5), 0.0), stepK));
+    // A riser face only a column wide (a jog in a step edge) facing a low sun lights up as a lone bright cube once
+    // it is a few pixels across; with the footprint its key light fades to that of the tread it stands for.
+    if (h.normal.y == 0 && s.mat == 0 && wn < 1.0) {
+        int2 t = h.normal.x != 0 ? int2(0, 1) : int2(1, 0), o = h.normal.xz;
+        float run = float(groundAt(x.hm, h.voxel.xz + t, x.size) > groundAt(x.hm, h.voxel.xz + t + o, x.size) + 0.5)
+                  + float(groundAt(x.hm, h.voxel.xz - t, x.size) > groundAt(x.hm, h.voxel.xz - t + o, x.size) + 0.5);
+        float lone = (1.0 - 0.5 * run) * smoothstep(0.05, 0.25, fp);
+        ndl = mix(ndl, max(x.L.key.y, 0.0), lone * (1.0 - wn));
+    }
     float hiSun = smoothstep(0.15, 0.45, x.L.key.y) * (1.0 - x.L.night);
     float sh = 1.0;
     if (shadows && ndl > 0.0 && x.L.shadows) {
