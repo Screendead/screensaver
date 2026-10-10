@@ -33,6 +33,8 @@ final class FlightCamera {
     var heightAt: (Double, Double) -> Double? = { _, _ in nil }
     // Structure sites on the loaded map.
     var sitesAt: () -> [SiteInfo] = { [] }
+    // Index of the current night, as the lamps read it (beacons and rites burn only on some nights).
+    var nightIndex = 0
     // Sites a shot was built around, and when; each rests for a while so one place can't own the flight.
     private var framedAt: [UInt32: Double] = [:]
     private var focus: SIMD2<Double>?
@@ -97,13 +99,34 @@ final class FlightCamera {
             guard d > 90, d < 450 else { continue }
             if abs(FlightCamera.angleDiff(atan2(v.x, v.y), heading)) > 0.35 { continue }
             let day: [SiteInfo.Kind: Double] = [.henge: 1, .ruins: 0.7, .hamlet: 0.7, .jetty: 0.5, .camp: 0.3, .cairn: 0.2]
-            let lit: [SiteInfo.Kind: Double] = [.hamlet: 0.9, .camp: 0.8, .jetty: 0.7, .henge: 0.2]
-            let w = (day[site.kind] ?? 0) * (1 - night) + (lit[site.kind] ?? 0) * night
+            let w = (day[site.kind] ?? 0) * (1 - night) + litInterest(site) * night
             let f = w * min(max((d - 90) / 60, 0), 1) * (1 - min(max((d - 300) / 150, 0), 1))
             sum += f
             if f > best { best = f; top = site }
         }
         return (min(0.5 * sum, 0.35 + 0.15 * night), top)
+    }
+
+    // Hearths, camp fires and jetty lanterns burn every night; a henge is only worth a night shot when its
+    // rite is lit, and a beacon adds to its hamlet. Mirrors lampLevel in Shaders/Saver.metal.
+    private func litInterest(_ site: SiteInfo) -> Double {
+        func pcg(_ v: UInt32) -> UInt32 {
+            let state = v &* 747796405 &+ 2891336453
+            let word = ((state >> ((state >> 28) &+ 4)) ^ state) &* 277803737
+            return (word >> 22) ^ word
+        }
+        func burns(_ l: SiteInfo.Lamp, _ chance: Double) -> Bool {
+            let h = pcg(site.id &+ UInt32(l.index % World.maxLamps) &* 7717)
+            let nightH = pcg(UInt32(bitPattern: Int32(truncatingIfNeeded: nightIndex)) &* 1597334677 ^ pcg(7 &* 3812015801 ^ h))
+            return Double(nightH & 0xffffff) / 16777215.0 <= chance
+        }
+        switch site.kind {
+        case .hamlet: return site.lamps.contains { $0.kind == 5 && burns($0, 0.35) } ? 1.0 : 0.9
+        case .camp: return 0.8
+        case .jetty: return 0.7
+        case .henge: return site.lamps.contains { $0.kind == 6 && burns($0, 0.3) } ? 0.8 : 0
+        default: return 0
+        }
     }
 
     private func shotScore(_ heading: Double, lightYaw: Double, lightW: Double, noon: Double, night: Double = 0) -> Double {
@@ -192,7 +215,7 @@ final class FlightCamera {
             // moon still frames it.
             if nightW > 0.5 {
                 let p = SIMD2(position.x, position.z)
-                for site in sitesAt() where site.kind == .hamlet || site.kind == .camp || site.kind == .jetty {
+                for site in sitesAt() where litInterest(site) > 0 {
                     let v = site.pos - p
                     let b = atan2(v.x, v.y)
                     if simd_length(v) < 450, abs(FlightCamera.angleDiff(b, moonYaw)) < 1.0 { headings.append(b) }

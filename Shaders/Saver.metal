@@ -1140,7 +1140,7 @@ kernel void updateLamps(device const Site* sites [[buffer(0)]],
     float fl = flicker(t, float(li) * 3.7 + hashf(h) * 40.0, uint(f.mapInfo.w));
     float k = kind == L_WINDOW ? 1.0 + (fl - 1.0) * 0.3 : kind == L_LANTERN ? 1.0 + (fl - 1.0) * 0.25 : fl;
     float sunAmt = smoothstep(-0.02, 0.05, f.lights.x);
-    float day = kind == L_WINDOW || kind == L_LANTERN ? 1.0 : mix(1.0, 0.15, sunAmt);
+    float day = kind == L_WINDOW || kind == L_LANTERN ? 1.0 : mix(1.0, 0.02, sunAmt);
     pos[id] = float4(p, float(kind));
     state[id] = float4(LAMP_COL[kind] * lvl * k * day, LAMP_R[kind]);
 }
@@ -1173,7 +1173,9 @@ kernel void bakeLights(texture2d<float, access::write> lm [[texture(0)]],
                 float4 lp = pos[si * MAX_LAMPS + l], ls = state[si * MAX_LAMPS + l];
                 float R = ls.w;
                 float dd = length(p - lp.xz);
-                if (dd >= R || all(ls.rgb == 0.0)) continue;
+                // Window lamps sit at the house centre and the map has no occlusion, so they would floodlight the
+                // house's own walls from inside; their light is only the window faces.
+                if (dd >= R || all(ls.rgb == 0.0) || int(lp.w) == L_WINDOW) continue;
                 float3 e = ls.rgb * LAMP_I[int(lp.w)] / (1.0 + (dd / (0.25 * R)) * (dd / (0.25 * R))) * smoothstep(R, 0.6 * R, dd);
                 float wgt = dot(e, float3(0.3, 0.59, 0.11));
                 E += e;
@@ -1184,8 +1186,10 @@ kernel void bakeLights(texture2d<float, access::write> lm [[texture(0)]],
     ld.write(P, gid);
 }
 
-// In-scatter of the nearest lamps' light along a ray to tEnd: the closed-form integral of 1/(r^2 + 4) along the
-// ray, so a hamlet or a fire hangs in a soft glow of its own haze, and the glow stops at whatever hides it.
+// In-scatter of the nearest lamps' light along a ray to tEnd: the closed-form integral of 1/(r^2 + 4) - 1/(Rh^2 + 4)
+// over the ray's chord through a sphere of radius Rh = 3 reach, so a hamlet or a fire hangs in a soft glow of its
+// own haze that ends at zero a few reaches out, and the glow stops at whatever hides it. Without the sphere the
+// integral falls off only as 1/distance and distant lamps tint the whole night.
 static float3 lampHaze(device const float4* pos, device const float4* state, constant int4* refs, int count,
                        float3 o, float3 d, float tEnd) {
     float3 sum = 0;
@@ -1196,9 +1200,15 @@ static float3 lampHaze(device const float4* pos, device const float4* state, con
         float4 lp = pos[li];
         float3 v = lp.xyz - o;
         float tc = dot(v, d);
-        float hh = sqrt(max(dot(v, v) - tc * tc, 0.0) + 4.0);
-        float I = (atan((tEnd - tc) / hh) - atan(-tc / hh)) / hh;
-        sum += ls.rgb * LAMP_I[int(lp.w)] * I;
+        float p2 = max(dot(v, v) - tc * tc, 0.0);
+        float Rh = 3.0 * ls.w;
+        if (p2 >= Rh * Rh) continue;
+        float c = sqrt(Rh * Rh - p2);
+        float t0 = max(tc - c, 0.0), t1 = min(tc + c, tEnd);
+        if (t1 <= t0) continue;
+        float hh = sqrt(p2 + 4.0);
+        float I = (atan((t1 - tc) / hh) - atan((t0 - tc) / hh)) / hh - (t1 - t0) / (Rh * Rh + 4.0);
+        sum += ls.rgb * LAMP_I[int(lp.w)] * max(I, 0.0);
     }
     return sum;
 }
@@ -1827,11 +1837,14 @@ static Surface surfaceAt(texture2d<float> hm, texture2d<float> clim, texture2d<u
             float fy = wy - float(P.y0);
             float e = clamp(fpA * 0.6, 0.03, 0.25);
             if (((sb >> (22u + side)) & 1u) != 0u) {
-                float m = smoothstep(0.28 - e, 0.28 + e, uv.x) * smoothstep(0.72 + e, 0.72 - e, uv.x)
-                        * smoothstep(0.55 - e, 0.55 + e, fy) * smoothstep(1.45 + e, 1.45 - e, fy);
-                m = mix(m, 0.2, smoothstep(0.05, 0.3, fpA));
+                float mx = smoothstep(0.28 - e, 0.28 + e, uv.x) * smoothstep(0.72 + e, 0.72 - e, uv.x);
+                // The height band is not foreshortened when the wall is seen edge-on, so the glow keeps it and
+                // only the band across the wall fades to its mean.
+                float ey = clamp(fp * 0.6, 0.03, 0.25);
+                float my = smoothstep(0.55 - ey, 0.55 + ey, fy) * smoothstep(1.45 + ey, 1.45 - ey, fy);
+                float m = mix(mx * my, 0.2, smoothstep(0.05, 0.3, fpA));
                 a = mix(a, float3(0.025, 0.025, 0.03), m);
-                winM = m;
+                winM = mix(mx, 0.44, smoothstep(0.05, 0.3, fpA)) * mix(my, 0.3, smoothstep(0.3, 1.0, fp));
             }
             if (((sb >> 26) & 7u) == side + 1u) {
                 float m = smoothstep(0.25 - e, 0.25 + e, uv.x) * smoothstep(0.75 + e, 0.75 - e, uv.x) * smoothstep(1.6 + e, 1.6 - e, fy);
@@ -1846,9 +1859,11 @@ static Surface surfaceAt(texture2d<float> hm, texture2d<float> clim, texture2d<u
             if (P.kind == P_FIRE && topCourse) {
                 float flame = perlin3(float3(wq * 2.5, wy * 1.6 - time * 1.4), seed + 320u) * 0.5 + 0.5;
                 flame = mix(flame, 0.5, smoothstep(0.05, 0.3, fpA));
-                s.emit = E * (n.y > 0 ? 1.0 : mix(0.3, 1.0, flame) * (0.55 + 0.45 * fract(wy)));
+                // Per-channel tonemapping bleaches a hot core to white; held this low, the core stays orange and
+                // the flame noise carries it.
+                s.emit = E * float3(1.0, 0.7, 0.5) * (n.y > 0 ? mix(0.05, 0.24, flame) : mix(0.02, 0.17, flame) * (0.45 + 0.55 * fract(wy)));
             } else if (P.kind == P_BOX && topCourse) {
-                s.emit = E * (n.y > 0 ? 1.0 : 0.6 * smoothstep(0.3, 0.8, fract(wy)));
+                s.emit = E * float3(1.0, 0.8, 0.6) * (n.y > 0 ? 0.16 : 0.3 * smoothstep(0.3, 0.8, fract(wy)));
             } else if (house) {
                 s.emit = E * winM;
             }
@@ -2500,12 +2515,14 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             float3 E = x.lightMap.sample(bl, wp.xz * inv, level(0)).rgb * 0.5 + x.lightMap.sample(bl, (wp.xz + vh * 4.0) * inv, level(0)).rgb * 0.3
                      + x.lightMap.sample(bl, (wp.xz + vh * 10.0) * inv, level(0)).rgb * 0.2;
             if (any(E > 1e-4)) {
-                // Ripple facets elongated toward the viewer, as the moon's path is.
-                float2 rq = float2(dot(ww, vh) * 1.2, (ww.x * vh.y - ww.y * vh.x) * 4.0);
-                float ripple = perlin3(float3(rq, x.time * 0.8), x.seed + 63u) + 0.3 * e0;
+                // Ripple facets on fixed world axes; the streak toward the viewer comes from the offset samples
+                // above. A basis turned to each pixel's view direction would multiply the jitter by the world
+                // coordinates and crawl. Facets hand over to their mean before they shrink to a pixel along the
+                // foreshortened view.
+                float ripple = perlin3(float3(ww * 1.6, x.time * 0.7), x.seed + 63u) + 0.3 * e0;
                 float fpv = tw * x.pixelAngle / max(-d.y, 0.1);
-                float spark = mix(smoothstep(0.18, 0.38, ripple), 0.15, saturate(fpv * 0.5));
-                col += E * (0.04 + 0.6 * spark) * x.lights.w;
+                float spark = mix(smoothstep(0.08, 0.38, ripple), 0.22, saturate(fpv * 2.0));
+                col += E * (0.06 + 0.5 * spark) * x.lights.w;
             }
         }
         tSurf = tw;
