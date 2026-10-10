@@ -49,6 +49,19 @@ struct Sight {
         return out(x, tanV * aspect) < r && out(y, tanV) < r
     }
 
+    // Fog over the bird's footprint is thinnest at its top edge or its near face: an upward ray leaves the height fog, and at long
+    // range a pixel's change in slope moves the transmittance by several percent.
+    func clearest(_ p: SIMD3<Double>, size: Double) -> Double {
+        let v = p - pos, t = simd_length(v)
+        let r = reach(size: size, at: t) + t * pixelAngle
+        // The near face too: the shader fogs a bird at the box entry, and near the map edge the edge fog changes by
+        // several percent per voxel.
+        return [p, p + up * r, p - up * r, p - v / max(t, 1e-9) * min(r, 0.9 * t)].map { q in
+            let w = q - pos, l = simd_length(w)
+            return transmittance(from: pos, dir: w / l, t: l)
+        }.max()!
+    }
+
     // Port of fogTransmittance in Shaders/Saver.metal without the mist term (mist only lowers it).
     func transmittance(from o: SIMD3<Double>, dir d: SIMD3<Double>, t: Double) -> Double {
         let hf = 30.0, a = 0.0009, c2 = 1.3e-6
@@ -94,7 +107,7 @@ struct Sight {
     func direct(_ p: SIMD3<Double>, size: Double, margin: Double = 0) -> Bool {
         guard inFrame(p, size: size, margin: margin) else { return false }
         let v = p - pos, t = simd_length(v)
-        if t > 1, transmittance(from: pos, dir: v / t, t: t) < Sight.fogHidden * (slack > 0 ? 0.8 : 1) { return false }
+        if t > 1, clearest(p, size: size) < Sight.fogHidden * (slack > 0 ? 0.8 : 1) { return false }
         return !hiddenBehindGround(from: pos, p, extent: reach(size: size, at: t))
     }
 

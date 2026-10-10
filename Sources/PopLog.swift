@@ -52,6 +52,15 @@ final class PopLog {
             let cause = oldFlocks.contains(d.flock) ? "fade-in" : "spawn"
             if sight.sees(d.pos, size: d.size) { report(cause, d, sight: sight, time: time) }
         }
+        // A bird that jumps further in one step than it can fly vanishes in one place and appears in another.
+        for (id, d) in now {
+            guard let o = drawn[id] else { continue }
+            let jump = simd_length(d.pos - o.pos)
+            if jump > Wildlife.flight(d.kind).maxSpeed * dt * 1.5 + 0.5,
+               sight.sees(d.pos, size: d.size) || (lastSight?.sees(o.pos, size: o.size) ?? false) {
+                report("teleport", d, sight: sight, time: time, note: String(format: " jump=%.1f dy=%.1f", jump, d.pos.y - o.pos.y))
+            }
+        }
         if let prev = lastSight {
             for (id, d) in drawn where now[id] == nil {
                 let cause = liveFlocks.contains(d.flock) ? "fade-out/cull" : "retire"
@@ -62,7 +71,7 @@ final class PopLog {
         lastSight = sight
     }
 
-    private func report(_ cause: String, _ d: Drawn, sight: Sight, time: Double) {
+    private func report(_ cause: String, _ d: Drawn, sight: Sight, time: Double, note: String = "") {
         pops += 1
         byCause["\(cause) \(d.kind)", default: 0] += 1
         guard printed < 60 else { return }
@@ -71,7 +80,7 @@ final class PopLog {
         let z = simd_dot(v, sight.fwd)
         print(String(format: "POP t=%.2f %@ %@ dist=%.0f screen=(%.2f,%.2f)%@", time, cause, "\(d.kind)", simd_length(v),
                      simd_dot(v, sight.right) / max(z, 1e-3) / (sight.tanV * sight.aspect), simd_dot(v, sight.up) / max(z, 1e-3) / sight.tanV,
-                     sight.direct(d.pos, size: d.size) ? "" : " (reflection)"))
+                     (sight.direct(d.pos, size: d.size) ? "" : " (reflection)") + note))
     }
 
     func summary(_ w: Wildlife) -> String {

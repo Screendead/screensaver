@@ -420,7 +420,7 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
 // below them counts.
 static inline float solidFloor(float4 c) {
     if (c.a > 0.0) return c.g;
-    if (c.a < 0.0 && -c.a < c.r) return -c.a;
+    // Structures too: a lintel, eave, deck, stilt house or hull is open in [g, b) whatever its base says.
     return c.b > c.g ? c.g : c.r;
 }
 
