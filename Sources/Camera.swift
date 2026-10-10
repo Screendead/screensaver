@@ -13,6 +13,8 @@ final class FlightCamera {
     private var time: Double = 0
     private(set) var surveyAmount: Double = 0
     private var facing: Double = 0
+    private var shotYaw: Double?
+    private var nextShot: Double = 0
     var sun = SIMD3<Double>(0, 1, 0)
     var pitchOverride: Double?
 
@@ -56,6 +58,33 @@ final class FlightCamera {
         sin(t * 0.0131 * k + 1.3) * 0.5 + sin(t * 0.0077 * k + 4.1) * 0.3 + sin(t * 0.0031 * k + 2.7) * 0.2
     }
 
+    private static func angleDiff(_ a: Double, _ b: Double) -> Double {
+        atan2(sin(a - b), cos(a - b))
+    }
+
+    // Shot director: score a candidate heading by what the frame would hold. Relief across the middle
+    // distance gives a subject; some water is welcome but a frame full of it is not; facing a low sun or
+    // the moon puts the light in shot; large turns cost a little so motion stays calm.
+    private func shotScore(_ heading: Double, lightYaw: Double, lightW: Double) -> Double {
+        let p = SIMD2(position.x, position.z)
+        var sum = 0.0, sum2 = 0.0, wet = 0.0, n = 0.0
+        for dist in stride(from: 80.0, through: 400.0, by: 40.0) {
+            for off in [-0.3, -0.15, 0.0, 0.15, 0.3] {
+                let a = heading + off
+                let hq = h(p.x + sin(a) * dist, p.y + cos(a) * dist)
+                sum += hq; sum2 += hq * hq; n += 1
+                if hq <= 20.0 { wet += 1 }
+            }
+        }
+        let mean = sum / n
+        let relief = min(sqrt(max(sum2 / n - mean * mean, 0)) / 25, 1)
+        let wf = wet / n
+        let water = wf < 0.1 ? 0 : (wf < 0.45 ? 0.4 : 0.4 - 2.0 * (wf - 0.45))
+        let light = lightW * max(0, cos(heading - lightYaw)) * 0.8
+        let turn = -0.25 * abs(FlightCamera.angleDiff(heading, yaw))
+        return relief + water + light + turn
+    }
+
     func placeAtStart() {
         position.y = max(position.y, footprintMax(position.x, position.z, radius: 24) + 30)
     }
@@ -89,7 +118,14 @@ final class FlightCamera {
         let moonYaw = atan2(moon.x, moon.z)
         let steerMoon = sin(moonYaw - yaw) * 0.05 * nightW
         let facingMoon = nightW * max(0, cos(moonYaw - yaw))
-        let targetRate = max(-0.09, min(0.09, steer * 0.004 * steerSign * (1 - 0.6 * w) + wander(time, 1) * 0.035 + steerKey + steerMoon))
+        if time >= nextShot {
+            let lightW = max(w, nightW)
+            let lightYaw = nightW > w ? moonYaw : keyYaw
+            shotYaw = (-3...3).map { yaw + Double($0) * 0.5 }.max { shotScore($0, lightYaw: lightYaw, lightW: lightW) < shotScore($1, lightYaw: lightYaw, lightW: lightW) }
+            nextShot = time + 12
+        }
+        let steerShot = shotYaw.map { sin(FlightCamera.angleDiff($0, yaw)) * 0.05 } ?? 0
+        let targetRate = max(-0.09, min(0.09, steer * 0.004 * steerSign * (1 - 0.6 * w) * 0.4 + wander(time, 1) * 0.02 + steerShot + steerKey + steerMoon))
         // Critically damped spring on yaw rate: turns take tens of seconds.
         let k = 0.25
         yawAccel += (k * k * (targetRate - yawRate) - 2 * k * yawAccel) * dt
