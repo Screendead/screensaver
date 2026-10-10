@@ -726,7 +726,7 @@ static inline float3 paintedTone(float y, float2 lat, uint seed, float fp) {
     float t = saturate(v * 0.75 + 0.5) * 4.0;
     float i = min(floor(t), 3.0), f = t - i;
     const float3 pal[5] = { float3(0.21, 0.19, 0.18), float3(0.43, 0.24, 0.17), float3(0.53, 0.41, 0.26),
-                            float3(0.60, 0.54, 0.45), float3(0.45, 0.40, 0.40) };
+                            float3(0.53, 0.47, 0.39), float3(0.45, 0.40, 0.40) };
     float e = clamp(fp * 0.5, 0.12, 0.5);
     return mix(pal[int(i)], pal[int(i) + 1], smoothstep(0.5 - e, 0.5 + e, f));
 }
@@ -807,7 +807,10 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
     }
     float lagoon = smoothstep(0.0, 0.35, lagoonAmount(c));
     grass = mix(grass, float3(0.14, 0.20, 0.12), lagoon);
-    float3 sand = mix(float3(0.47, 0.41, 0.29), float3(0.60, 0.53, 0.39), lagoon);
+    // Pale ground (sand, salt, snow) sits well below the clouds, and drifts in tone so open flats never read as one sheet.
+    float drift = 1.0 + 0.12 * perlin2(wq / 110.0, seed + 32u);
+    float3 sand = mix(float3(0.33, 0.29, 0.21), float3(0.37, 0.33, 0.245), lagoon) * drift;
+    float3 snow = float3(0.31, 0.325, 0.35) * drift;
     float3 desertTop = float3(0.54, 0.34, 0.19);
     float3 tread = mix(grass, desertTop, desert) * (0.95 + 0.1 * perlin2(wq / 40.0, seed + 30u));
     // Shoreline benches alternate rust and ochre with height, drifting slowly along the rim.
@@ -835,15 +838,14 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
         tread = mix(tread, bed, painted);
         stone = mix(stone, paintedTone(float(v.y), lat, seed, fpA), painted);
     }
-    int drops = int(H - hx0 >= 3.0) + int(H - hx1 >= 3.0) + int(H - hz0 >= 3.0) + int(H - hz1 >= 3.0);
     bool beach = H <= SEA + 1.2;
     if (beach) tread = sand;
     // Salt crust: cream with slow Perlin drifts, and a faint polygon net from two crossing sets of
     // Perlin zero-lines that fades long before it could alias.
     float crustW = beach ? smoothstep(0.3, 0.6, salt) : 0.0;
     if (crustW > 0.0) {
-        float3 crust = mix(float3(0.66, 0.63, 0.56), float3(0.68, 0.60, 0.56), saturate(perlin2(wq / 210.0, seed + 23u) + 0.5))
-                     * (1.0 + 0.07 * perlin2(wq / 60.0, seed + 19u) + 0.04 * perlin2(wq / 17.0, seed + 20u));
+        float3 crust = mix(float3(0.32, 0.305, 0.27), float3(0.33, 0.29, 0.27), saturate(perlin2(wq / 210.0, seed + 23u) + 0.5))
+                     * (drift + 0.07 * perlin2(wq / 60.0, seed + 19u) + 0.04 * perlin2(wq / 17.0, seed + 20u));
         float lw = 0.06 + fpA * 0.6;
         float net = max(1.0 - smoothstep(0.0, lw, abs(perlin2(wq / 2.4, seed + 21u))),
                         1.0 - smoothstep(0.0, lw, abs(perlin2(OCT_ROT * wq / 2.4 + 13.7, seed + 22u))));
@@ -865,12 +867,9 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
     if (snowy) s.riser = 0.0;
 
     if (n.y > 0 && !underGap) {
-        if (float(v.y + 1) > snowline) s.albedo = float3(0.63, 0.66, 0.71);
-        else if (beach) s.albedo = tread;
-        else if (drops >= 2) s.albedo = stone;
+        if (float(v.y + 1) > snowline) s.albedo = snow;
         else s.albedo = tread;
-        float sandy = float(v.y + 1) > snowline || (drops >= 2 && !beach) ? 0.0 : beach ? 1.0 - crustW : smoothstep(0.35, 0.7, desert);
-        if (painted > 0.0 && !beach && !snowy) s.albedo = mix(s.albedo, tread, painted);
+        float sandy = float(v.y + 1) > snowline ? 0.0 : beach ? 1.0 - crustW : smoothstep(0.35, 0.7, desert);
         if (sandy > 0.0) {
             float3 rp = sandRipples(v.xz + mapOrigin, uv, w, fpA, time, seed) * sandy;
             s.albedo *= 1.0 + rp.x;
@@ -879,7 +878,7 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
     } else if (n.y == 0 && !underGap) {
         if (beach) s.albedo = tread * 0.85;
         else if (slope < 4.0 && !snowy) s.albedo = mix(mix(tread, stone, 0.5) * 0.9, stone * 0.95, painted);
-        else s.albedo = snowy ? mix(stone, float3(0.63, 0.66, 0.71), 0.45) : stone;
+        else s.albedo = snowy ? mix(stone, snow, 0.45) : stone;
     } else {
         s.albedo = stone * 0.9;
     }
@@ -1011,9 +1010,14 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     float3 alb = h.normal.y == 0 ? mix(s.albedo, s.tread, wf * (1.0 - keep)) : s.albedo;
     // Moonlight drains colour.
     alb = mix(alb, float3(dot(alb, float3(0.3, 0.59, 0.11))), 0.4 * x.L.night);
+    // Pale sand, salt and stone would glow under the moon brighter than the sky above them.
+    if (s.mat == 0) alb *= 1.0 - 0.45 * x.L.night * smoothstep(0.15, 0.45, dot(alb, float3(0.3, 0.59, 0.11)));
     // Canopies would otherwise drop to cut-out silhouettes under the moon.
     if (s.mat == 1 || s.mat == 2) alb *= 1.0 + 1.4 * x.L.night * (1.0 - 0.5 * s.autumn);
     float ndl = max(dot(nl, x.L.key), 0.0);
+    // Low risers stand in for a slope, not a wall: one facing the sun takes no more key light than that slope.
+    float stepK = h.normal.y == 0 && s.mat == 0 ? 1.0 - smoothstep(2.0, 5.0, s.riser) : 0.0;
+    ndl = min(ndl, mix(ndl, max(mix(x.L.key.y, dot(nS, x.L.key), 0.5), 0.0), stepK));
     float hiSun = smoothstep(0.15, 0.45, x.L.key.y) * (1.0 - x.L.night);
     float sh = 1.0;
     if (shadows && ndl > 0.0 && x.L.shadows) {
@@ -1036,6 +1040,9 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     // Golden hour: shade is the violet dome opposite the sun, well below the key, so hillsides keep dark values.
     skyFill *= mix(float3(1.0), float3(0.62, 0.58, 0.85), x.L.gold * x.L.sunAmt);
     skyFill *= mix(1.0, skyVisibility(x.hm, x.size, h.voxel, h.normal, p.y), mix(0.55, 0.85, hiSun));
+    // A wall sees half the dome, and the half it sees is the dimmer horizon side; without this a riser in shade
+    // outshines the sunlit tread above it under a low sun.
+    skyFill *= 0.5 + 0.5 * saturate(nl.y);
     float3 bounce = (1.0 - saturate(nl.y)) * 0.35 * alb * x.L.keyCol * max(x.L.key.y, 0.0);
     // High sun: risers sit in cooler shade so terraces keep their modelling at noon.
     float drop = s.H - min(min(s.nh.x, s.nh.y), min(s.nh.z, s.nh.w));
