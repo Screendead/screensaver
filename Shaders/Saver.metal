@@ -2323,7 +2323,7 @@ static float cornerAO(texture2d<float> hm, int size, int3 v, int3 n, float2 uv) 
 // Fraction of open sky above a point, from how far the surrounding columns rise above y within 6 voxels.
 // Heights are filtered, so a c on a column centre reads exact columns.
 // Coarse levels sample their own slice at the same world radii.
-static float skyVisibility(thread const Terrain& tr, int k, float2 c, float y) {
+static float skyVisibility(thread const Terrain& tr, int k, float2 c, float y, bool lite = false) {
     constexpr sampler bl(filter::linear, address::clamp_to_edge);
     constexpr sampler blr(filter::linear, address::repeat);
     float2 inv = 1.0 / float2(tr.hm.get_width(), tr.hm.get_height());
@@ -2331,9 +2331,9 @@ static float skyVisibility(thread const Terrain& tr, int k, float2 c, float y) {
     float2 fo = float2(levelOrigin(tr, k) & (COARSE_N - 1));
     float occ = 0.0;
     const int2 dirs[8] = { int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1), int2(1, 1), int2(-1, 1), int2(1, -1), int2(-1, -1) };
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 8; i += lite ? 2 : 1) {
         float m = 0.0;
-        for (int r = 1; r <= 3; r++) {
+        for (int r = lite ? 2 : 1; r <= (lite ? 2 : 3); r++) {
             float dist = float(r * 2) * (i < 4 ? 1.0 : 1.414);
             float2 q = c + float2(dirs[i] * (r * 2));
             float rise = (k == 0 ? tr.hm.sample(bl, q * inv, level(0)).r
@@ -2342,7 +2342,7 @@ static float skyVisibility(thread const Terrain& tr, int k, float2 c, float y) {
         }
         occ += m;
     }
-    return 1.0 - occ / 8.0;
+    return 1.0 - occ / (lite ? 4.0 : 8.0);
 }
 
 // Position on the face in [0, 1) of a column s voxels wide (y stays in unit voxels).
@@ -2456,12 +2456,13 @@ kernel void bakeShadowHeight(texture2d<float, access::write> out [[texture(0)]],
     float cell = b.cam.z;
     float2 P = (float2(c) + 0.5) * cell;
     float hl = length(b.key.xz);
-    if (hl < 1e-3 || b.key.y <= 0.0) { out.write(float4(-1e4), uint2(t)); return; }
+    if (hl < 1e-3 || b.key.y <= 0.0) { out.write(float4(-1e4, -1e4, 0, 0), uint2(t)); return; }
     float2 dir = b.key.xz / hl;
     float tanE = b.key.y / hl;
     int levels = int(b.cam.w);
-    float S = -1e4;
-    float d = b.key.w;
+    // x: occluders from the near ray's reach on; y: from two texels out, for pixels that trace no near ray.
+    float S = -1e4, Sa = -1e4;
+    float d = 2.0 * cell;
     float step = cell;
     for (int i = 0; i < 96; i++) {
         float2 X = P + dir * d;
@@ -2475,25 +2476,28 @@ kernel void bakeShadowHeight(texture2d<float, access::write> out [[texture(0)]],
         float hm = ch.read(uint2(mc & ((2048 >> m) - 1)), uint(k - 1), uint(m)).r;
         float w = float(1 << (k + m));
         // The cell's nearest part lies up to ~0.7 of its width closer than X.
-        S = max(S, hm - max(d - 0.7 * w, b.key.w) * tanE);
+        float hs = hm - max(d - 0.7 * w, cell) * tanE;
+        Sa = max(Sa, hs);
+        if (d >= b.key.w) S = max(S, hm - max(d - 0.7 * w, b.key.w) * tanE);
         if ((d - w) * tanE > 2100.0) break;
         d += step;
         if (d > 5.0 * step) step *= 2.0;
         if (d > 7000.0) break;
     }
-    out.write(float4(S), uint2(t));
+    out.write(float4(S, Sa, 0, 0), uint2(t));
 }
 
 // Fraction of the key light the maps let through to p (map-local); never lighter than a lit column.
-static float shadowMapLit(thread const Ctx& x, float3 p) {
+static float shadowMapLit(thread const Ctx& x, float3 p, bool all) {
     constexpr sampler rs(filter::linear, address::repeat);
     float2 w = p.xz + float2(x.origin);
     float2 cw = x.tr.cam + float2(x.origin);
     float2 dv = abs(w - cw);
     float rn = max(dv.x, dv.y) / (SHADOW_CELL * float(SHADOW_N / 2));
     float bn = smoothstep(0.80, 0.92, rn);
-    float S = x.shadowNear.sample(rs, w / (SHADOW_CELL * float(SHADOW_N)), level(0)).r;
-    if (bn > 0.0) S = mix(S, x.shadowFar.sample(rs, w / (4.0 * SHADOW_CELL * float(SHADOW_N)), level(0)).r, bn);
+    float2 Sn = x.shadowNear.sample(rs, w / (SHADOW_CELL * float(SHADOW_N)), level(0)).rg;
+    if (bn > 0.0) Sn = mix(Sn, x.shadowFar.sample(rs, w / (4.0 * SHADOW_CELL * float(SHADOW_N)), level(0)).rg, bn);
+    float S = all ? Sn.y : Sn.x;
     float pen = mix(6.0, 14.0, bn);
     return mix(smoothstep(S - pen, S + pen, p.y), 1.0, smoothstep(0.85, 0.95, rn * 0.25));
 }
@@ -2572,7 +2576,9 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, int shadows)
     if (any(s.nrm != 0.0)) nl = s.nrm;
     nl = normalize(mix(nl, float3(0, 1, 0), s.level));
     // Coarse levels are always past the footprint where corner AO is fully replaced.
-    float ao = (s.level < 1.0 ? mix(k == 0 ? mix(cornerAO(x.tr.hm, x.tr.size, h.voxel, h.normal, uv), 0.85, wf) : 0.85, 1.0, s.level) : 1.0) * s.canopy;
+    // Seen in water (reflections, the bed) the surface is rippled out of focus: no corner AO, a coarse sky visibility.
+    bool lite = shadows != 1;
+    float ao = (s.level < 1.0 ? mix(k == 0 && !lite ? mix(cornerAO(x.tr.hm, x.tr.size, h.voxel, h.normal, uv), 0.85, wf) : 0.85, 1.0, s.level) : 1.0) * s.canopy;
     float drop = s.H - min(min(s.nh.x, s.nh.y), min(s.nh.z, s.nh.w));
     // Cliffs several pixels tall keep their strata; only sub-pixel stairs take the tread colour. Keyed to the
     // column's deepest drop, not this face's: the faces of a wall running diagonal to the grid alternate
@@ -2626,7 +2632,10 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, int shadows)
         int shadowIters = brute ? 4000 : maps ? (x.quality > 0.5 ? 48 : 32) : (x.quality > 0.5 ? 120 : 48);
         Hit sHit;
         sHit.hit = false; sHit.t = 1e9; sHit.iters = 0;
-        if (shadows == 1) sHit = trace(x.tr, so, x.L.key, brute ? 6000.0 : maps ? SHADOW_NEAR : 700.0, shadowIters, k);
+        // Past the 1-voxel map a pixel spans columns: the maps alone, with occluders from two texels out.
+        // Under the moon, whose shadows are soft and faint, only near ground keeps the traced ray.
+        bool mapOnly = maps && (shadows == 2 || k >= 1 || (x.L.night > 0.5 && h.t > 250.0));
+        if (!mapOnly) sHit = trace(x.tr, so, x.L.key, brute ? 6000.0 : maps ? SHADOW_NEAR : 700.0, shadowIters, k);
         // A ray that runs out of steps is still threading terrain toward the sun: count it as blocked there, so a
         // shaded spot never comes out lit.
         sHit.hit = sHit.hit || sHit.iters >= shadowIters;
@@ -2635,7 +2644,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, int shadows)
         // The lift moves the ray's start about 1 / L.y along it; contact reach moves with it.
         float reach = wf2 / max(x.L.key.y, 0.05);
         sh = sHit.hit ? 0.35 * (1.0 - smoothstep(2.0 + reach, 8.0 + reach, sHit.t)) : 1.0;
-        if (maps) sh = min(sh, shadowMapLit(x, so));
+        if (maps) sh = min(sh, shadowMapLit(x, so, mapOnly));
         if (wf2 > 0.0) sh = mix(sh, min(sh, stairShadow(x.tr, k, p.xz, x.L.key, d, contact, 0.35)), wf2);
         float floorSh = mix(mix(0.5, 0.25, hiSun), 0.32, x.L.gold);
         sh = mix(sh, floorSh + (1.0 - floorSh) * sh, wf);
@@ -2651,7 +2660,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, int shadows)
     skyFill *= mix(float3(1.0), float3(0.62, 0.58, 0.85), x.L.gold * x.L.sunAmt);
     float2 svAt = mix((float2(h.voxel.xz + h.normal.xz) + 0.5) * cs, p.xz, wf2);
     float svY = wf2 > 0.0 ? mix(p.y, groundSmoothL(x.tr, k, p.xz), wf2) : p.y;
-    skyFill *= mix(1.0, skyVisibility(x.tr, k, svAt, svY), mix(0.55, 0.85, hiSun));
+    skyFill *= mix(1.0, skyVisibility(x.tr, k, svAt, svY, lite), mix(0.55, 0.85, hiSun));
     // A wall sees half the dome, and the half it sees is the dimmer horizon side; without this a riser in shade
     // outshines the sunlit tread above it under a low sun.
     skyFill *= 0.5 + 0.5 * saturate(nl.y);
@@ -2807,7 +2816,7 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float tEn
     float t0 = max(min(ta, tb), 0.0), t1 = min(max(ta, tb), tEnd);
     if (t0 > 7000.0 * CLOUD_S || t1 <= t0) return c;
     // Night steps are dithered, so fewer suffice.
-    int steps = x.quality > 0.5 ? (x.L.night > 0.99 ? 9 : 14) : 8;
+    int steps = x.quality > 0.5 ? (x.L.night > 0.99 ? 8 : 12) : 8;
     float dt = (t1 - t0) / float(steps);
     float lowSun = 1.0 - smoothstep(0.02, 0.28, abs(x.L.sun.y));
     float2 dh = normalize(d.xz + 1e-5), sh2 = normalize(x.L.sun.xz + 1e-5);
@@ -3234,8 +3243,10 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         float3 r = reflect(d, n);
         r.y = abs(r.y);
         float3 refl;
-        if (x.quality > 0.5) {
-            Hit rh = trace(x.tr, wp + float3(0, 0.02, 0), r, x.tr.rmax, 260, wl);
+        if (x.quality > 0.5 && (int(f.shadow.y) & 4) == 0) {
+            // Rippled reflections of water past 300 trace from the 2-voxel ring: its far shore reads the same, at half
+            // the steps.
+            Hit rh = trace(x.tr, wp + float3(0, 0.02, 0), r, x.tr.rmax, 260, max(wl, tw > 300.0 ? 1 : 0));
             // Shadowed: unshadowed, a sun-facing wall in the shade of the far rim mirrors as a pale streak.
             refl = rh.hit ? applyFog(x, shadeL(x, wp, r, rh, x.shadowMode == 1.0 ? 2 : 1), wp, r, rh.t)
                            : softCloudSky(x, wp, r);

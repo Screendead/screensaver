@@ -587,7 +587,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private let shadowPipeline: MTLComputePipelineState
     private let shadowMaps: [MTLTexture]
     static let shadowN = 1024, shadowCell = 8.0
-    private static let shadowBands = [64, 128]
+    private static let shadowBands = [256, 512]
     private var shadowBand = [0, 0]
     private var shadowValid = false
     private var shadowFrom: (cam: SIMD2<Double>, key: SIMD3<Double>)?
@@ -606,7 +606,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     // coordinates) and re-baked when the camera nears its edge.
     private var cloudTex: MTLTexture?
     private var cloudCenter: SIMD2<Double>?
-    static let cloudTexels = 2048, cloudTexel = 14.0
+    static let cloudTexels = 2048, cloudTexel = 20.0
     private var history: [MTLTexture] = []
     // Lamps: per-frame position and state (schedule, flicker), and their light baked onto the map.
     private let lampPipeline: MTLComputePipelineState
@@ -699,7 +699,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         shadowPipeline = shP
         horizonPipeline = hzP
         horizonBuf = hzB
-        let sd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: Renderer.shadowN, height: Renderer.shadowN, mipmapped: false)
+        let sd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg32Float, width: Renderer.shadowN, height: Renderer.shadowN, mipmapped: false)
         sd.usage = [.shaderRead, .shaderWrite]
         sd.storageMode = .private
         guard let sm0 = device.makeTexture(descriptor: sd), let sm1 = device.makeTexture(descriptor: sd) else { return nil }
@@ -1097,7 +1097,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         let (key, casts) = Renderer.keyLight(clock.sunDirection)
         let levels = (1...Clipmap.levels).prefix { clipmap.ready($0) }.count
         // VR_PROFILE (tests): "noshadow" drops terrain shadows, "nobake" keeps the maps but skips their rebaking.
-        f.shadow.y = Renderer.profile == "nearclouds" ? 1 : Renderer.profile == "lowmax" ? 2 : 0
+        f.shadow.y = Renderer.profile == "nearclouds" ? 1 : Renderer.profile == "lowmax" ? 2 : Renderer.profile == "norefl" ? 4 : 0
         if Renderer.profile == "noshadow" { f.shadow.x = 3; return }
         if Renderer.profile == "oldshadow" { f.shadow.x = 0; return }
         if Renderer.profile == "nobake" && shadowValid { f.shadow.x = 1; return }
