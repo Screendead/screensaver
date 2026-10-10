@@ -18,6 +18,7 @@ struct Frame {
     var prevUp = SIMD4<Float>()
     var jitter = SIMD4<Float>()
     var cloud = SIMD4<Float>()
+    var birds = SIMD4<Float>()
 }
 
 enum GPU {
@@ -239,6 +240,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
     let world: World
     let camera: FlightCamera
+    let wildlife: Wildlife
+    // Ring of bird buffers: up to three frames are in flight.
+    private var birdBuffers: [MTLBuffer] = []
+    private var birdIndex = 0
     var clock = SkyClock()
     private(set) var battery: Bool
     var timeScale: Double = 1
@@ -290,10 +295,14 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Spec offset displays by 90 s of the same flight; steering reads GPU heights, so displays
         // instead start at different places in the same world.
         camera = FlightCamera(seed: seed &+ UInt32(screenIndex) &* 7919)
+        wildlife = Wildlife(seed: seed &+ UInt32(screenIndex) &* 7919)
+        birdBuffers = (0..<3).compactMap { _ in device.makeBuffer(length: Wildlife.bufferLength, options: .storageModeShared) }
+        guard birdBuffers.count == 3 else { return nil }
         self.battery = battery
         renderScale = battery ? 0.7 : 1.0
         super.init()
         camera.heightAt = { [unowned world] x, z in world.height(x: x, z: z) }
+        wildlife.heightAt = camera.heightAt
         world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
         camera.placeAtStart()
     }
@@ -331,6 +340,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             if let p = pinnedPhase { clock.phase = p }
             camera.sun = clock.sunDirection
             camera.step(dt: step)
+            wildlife.step(dt: step, camera: camera, sunY: clock.sunDirection.y, phase: clock.phase)
             if Renderer.logTiming, let g = world.height(x: camera.position.x, z: camera.position.z), camera.position.y < g + 2 {
                 print(String(format: "camera low: y=%.1f ground=%.1f", camera.position.y, g))
             }
@@ -395,6 +405,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         var f = makeFrame(size: CGSize(width: w, height: h))
         frameIndex = (frameIndex + 1).truncatingRemainder(dividingBy: 4096)
         bakeClouds(into: cb, frame: &f)
+        let birdBuf = birdBuffers[birdIndex]
+        birdIndex = (birdIndex + 1) % birdBuffers.count
+        f.birds.x = Float(wildlife.upload(into: birdBuf, origin: SIMD3(Double(world.origin.x), 0, Double(world.origin.y))))
         let b = camera.basis
         prevCamera = (camera.position, b.fwd, b.right, b.up)
         let histIn = history[historyIndex], histOut = history[1 - historyIndex]
@@ -407,6 +420,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         if let enc = cb.makeRenderCommandEncoder(descriptor: sp) {
             enc.setRenderPipelineState(scenePipeline)
             enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
+            enc.setFragmentBuffer(birdBuf, offset: 0, index: 1)
             enc.setFragmentTexture(world.heightTex, index: 0)
             enc.setFragmentTexture(cloudTex, index: 1)
             enc.setFragmentTexture(world.climateTex, index: 2)
@@ -520,6 +534,8 @@ enum Snapshot {
             r.simulate(t - simulated)
             if let phase = settings.phase { r.clock.phase = phase }
             simulated = t
+            if let d = Double(ProcessInfo.processInfo.environment["VR_BIRDTEST"] ?? "") { r.wildlife.testPattern(camera: r.camera, distance: d) }
+            if let d = Double(ProcessInfo.processInfo.environment["VR_MURMUR"] ?? "") { r.wildlife.testMurmuration(camera: r.camera, distance: d) }
             var times: [Double] = []
             let env = ProcessInfo.processInfo.environment
             let frames = env["VR_MOTION"] != nil ? 48 : 12
@@ -541,8 +557,10 @@ enum Snapshot {
             }
             tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
             write(bytes: bytes, width: w, height: h, to: out)
-            print(String(format: "t=%.0f phase=%.3f sunY=%.2f exposure=%.2f cam=(%.0f,%.0f,%.0f) gpu=%.1fms -> %@", t, r.clock.phase,
-                         r.clock.sunDirection.y, r.exposure, r.camera.position.x, r.camera.position.y, r.camera.position.z, times.min()!, out))
+            let seen = r.wildlife.inView(camera: r.camera, aspect: Double(w) / Double(h), tanHalf: tan(25.0 * .pi / 180))
+            print(String(format: "t=%.0f phase=%.3f sunY=%.2f exposure=%.2f cam=(%.0f,%.0f,%.0f) gpu=%.1fms birds=%d flocks=%d near=%.0f -> %@", t, r.clock.phase,
+                         r.clock.sunDirection.y, r.exposure, r.camera.position.x, r.camera.position.y, r.camera.position.z, times.min()!,
+                         seen.count, seen.flocks, seen.nearest.isFinite ? seen.nearest : -1, out))
         }
     }
 
