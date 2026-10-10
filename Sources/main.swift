@@ -6,6 +6,9 @@ import MetalKit
 
 // MARK: - System state probes
 
+let debugLog = ProcessInfo.processInfo.environment["VR_DEBUG"] != nil
+func dlog(_ s: @autoclosure () -> String) { if debugLog { print(s()); fflush(stdout) } }
+
 enum SystemState {
     static func idleSeconds() -> Double {
         // kCGAnyInputEventType is ~0; Swift doesn't import it.
@@ -102,6 +105,7 @@ final class SaverController {
     var onDismiss: (() -> Void)?
 
     var isShowing: Bool { !windows.isEmpty }
+    private(set) var screenFrames: [CGRect] = []
 
     init(settings: Settings) { self.settings = settings }
 
@@ -113,6 +117,7 @@ final class SaverController {
         // A different seed per session keeps the world non-repeating across activations.
         let sessionSeed = settings.seed != 0 ? settings.seed : UInt32.random(in: 1...UInt32.max)
 
+        screenFrames = NSScreen.screens.map(\.frame)
         for (index, screen) in NSScreen.screens.enumerated() {
             let window = SaverWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
             window.level = .screenSaver
@@ -137,6 +142,8 @@ final class SaverController {
         NSCursor.hide()
         NSApp.presentationOptions = [.hideDock, .hideMenuBar]
 
+        dlog("show: active=\(NSApp.isActive) key=\(String(describing: NSApp.keyWindow)) screens=\(NSScreen.screens.count)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { dlog("show+1s: active=\(NSApp.isActive) keyWindow=\(NSApp.keyWindow != nil)") }
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 2.0
             ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
@@ -150,7 +157,7 @@ final class SaverController {
             let idle = SystemState.idleSeconds()
             // Grace period: activating our windows can itself register as an event.
             let settled = Date().timeIntervalSince(self.shownAt) > 0.6
-            if settled && idle + 0.05 < lastIdle { self.dismiss() }
+            if settled && idle + 0.05 < lastIdle { dlog("input detected: idle \(idle) < \(lastIdle)"); self.dismiss() }
             lastIdle = idle
             if self.settings.previewDuration > 0 && Date().timeIntervalSince(self.shownAt) > self.settings.previewDuration {
                 self.dismiss()
@@ -208,14 +215,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for name in [NSWorkspace.screensDidSleepNotification, NSWorkspace.sessionDidResignActiveNotification, NSWorkspace.willSleepNotification] {
             ws.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.saver.dismiss(animated: false) }
         }
-        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+        // If the system screensaver starts anyway, it owns the screen.
+        DistributedNotificationCenter.default().addObserver(forName: NSNotification.Name("com.apple.screensaver.didstart"), object: nil, queue: .main) { [weak self] _ in
             self?.saver.dismiss(animated: false)
+        }
+        // Hiding the menu bar also posts this; only a real display change (frames differ) needs a rebuild.
+        NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self, self.saver.isShowing, self.saver.screenFrames != NSScreen.screens.map(\.frame) else { return }
+            self.saver.dismiss(animated: false)
         }
 
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.tick() }
     }
 
     private func tick() {
+        dlog(String(format: "tick idle=%.1f wantsAwake=%d locked=%d asleep=%d showing=%d", SystemState.idleSeconds(),
+                     SystemState.somethingWantsDisplayAwake() ? 1 : 0, SystemState.screenIsLockedOrInactive() ? 1 : 0,
+                     SystemState.displaysAsleep() ? 1 : 0, saver.isShowing ? 1 : 0))
         guard !saver.isShowing else { return }
         guard SystemState.idleSeconds() >= settings.idleThreshold else { return }
         if SystemState.somethingWantsDisplayAwake() || SystemState.screenIsLockedOrInactive() || SystemState.displaysAsleep() { return }

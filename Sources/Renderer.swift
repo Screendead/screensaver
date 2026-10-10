@@ -253,7 +253,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         // instead start at different places in the same world.
         camera = FlightCamera(seed: seed &+ UInt32(screenIndex) &* 7919)
         self.battery = battery
-        renderScale = battery ? 0.4 : 0.6
+        renderScale = battery ? 0.35 : 0.5
         super.init()
         camera.heightAt = { [unowned world] x, z in world.height(x: x, z: z) }
         world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
@@ -286,6 +286,9 @@ final class Renderer: NSObject, MTKViewDelegate {
             let step = min(remaining, 1.0 / 30.0)
             camera.sun = clock.sunDirection
             camera.step(dt: step)
+            if Renderer.logTiming, let g = world.height(x: camera.position.x, z: camera.position.z), camera.position.y < g + 2 {
+                print(String(format: "camera low: y=%.1f ground=%.1f", camera.position.y, g))
+            }
             clock.advance(step)
             world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
             remaining -= step
@@ -303,7 +306,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         let p = camera.position - o
         f.camPos = SIMD4(Float(p.x), Float(p.y), Float(p.z), Float(tan(25.0 * .pi / 180)))
         f.camFwd = SIMD4(SIMD3<Float>(b.fwd), Float(size.width / size.height))
-        f.camRight = SIMD4(SIMD3<Float>(b.right), Float(simTime.truncatingRemainder(dividingBy: 3600)))
+        f.camRight = SIMD4(SIMD3<Float>(b.right), Float(simTime))
         f.camUp = SIMD4(SIMD3<Float>(b.up), battery ? 0 : 1)
         f.sunDir = SIMD4(SIMD3<Float>(clock.sunDirection), Float(clock.phase))
         f.resolution = SIMD4(Float(size.width), Float(size.height), Float(1 / size.width), Float(1 / size.height))
@@ -388,7 +391,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         simulate(dt)
         if view.colorPixelFormat == .rgba16Float {
             headroom = Float(view.window?.screen?.maximumExtendedDynamicRangeColorComponentValue ?? 1)
-            headroom = max(headroom, 1.0001)
+            // Capped: past ~4x, glints and glitter stop reading as light and start reading as effects.
+            headroom = min(max(headroom, 1.0001), 4)
+            if frameIndex == 30 { dlog("EDR headroom now \(headroom), potential \(view.window?.screen?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 0), format \(view.colorPixelFormat.rawValue)") }
         }
         guard let drawable = view.currentDrawable, let cb = queue.makeCommandBuffer() else { return }
         encode(into: cb, output: drawable.texture, outputSize: view.drawableSize)
