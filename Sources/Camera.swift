@@ -63,22 +63,10 @@ final class FlightCamera {
     }
 
     // Shot director: score a candidate heading by what the frame would hold. Relief across the middle
-    // distance gives a subject; some water is welcome but a frame full of it is not; the foreground, the
-    // lower third of the frame, should hold some shape rather than one flat sheet of sand, salt or snow;
-    // facing a low sun or the moon puts the light in shot; large turns cost a little so motion stays calm.
+    // distance gives a subject; some water is welcome but a frame full of it is not; facing a low sun or
+    // the moon puts the light in shot; large turns cost a little so motion stays calm.
     private func shotScore(_ heading: Double, lightYaw: Double, lightW: Double) -> Double {
         let p = SIMD2(position.x, position.z)
-        var fs = 0.0, fs2 = 0.0, fn = 0.0, wall = 0.0
-        for dist in stride(from: 20.0, through: 70.0, by: 10.0) {
-            for off in [-0.35, -0.15, 0.0, 0.15, 0.35] {
-                let a = heading + off
-                let hq = h(p.x + sin(a) * dist, p.y + cos(a) * dist)
-                fs += hq; fs2 += hq * hq; fn += 1
-                if hq > position.y - 4 { wall += 1 }
-            }
-        }
-        let fmean = fs / fn
-        let fore = min(sqrt(max(fs2 / fn - fmean * fmean, 0)) / 4, 1)
         var sum = 0.0, sum2 = 0.0, wet = 0.0, n = 0.0
         for dist in stride(from: 80.0, through: 400.0, by: 40.0) {
             for off in [-0.3, -0.15, 0.0, 0.15, 0.3] {
@@ -94,8 +82,7 @@ final class FlightCamera {
         let water = wf < 0.1 ? 0 : (wf < 0.45 ? 0.4 : 0.4 - 2.0 * (wf - 0.45))
         let light = lightW * max(0, cos(heading - lightYaw)) * 0.8
         let turn = -0.25 * abs(FlightCamera.angleDiff(heading, yaw))
-        // Ground rising to the lens fills the frame with one face.
-        return relief + water + 0.5 * fore - 1.5 * wall / fn + light + turn
+        return relief + water + light + turn
     }
 
     func placeAtStart() {
@@ -164,15 +151,12 @@ final class FlightCamera {
             lo = min(lo, hq); hi = max(hi, hq)
         }
         let roughClimb = min(max((hi - lo - 6) * 1.5, 0), 30)
-        // Flat ground under the lens (sand, salt pans, snowfields, valley floors): rise and look out to the horizon.
-        let flat = hi >= 19.9 ? min(max((4 - (hi - lo)) / 3, 0), 1) : 0
-        let clearance = roughClimb + 16 + 12 * (wander(time + 500, 0.7) + 0.6) + 10 * surveyAmount + 40 * max(0, min(1, -mode / 0.6)) + 14 * flat
+        let clearance = roughClimb + 12 + 12 * (wander(time + 500, 0.7) + 0.6) + 10 * surveyAmount + 40 * max(0, min(1, -mode / 0.6))
         let target = max(ahead, 19.85) + clearance
         let kc = 0.35
         climbRate += (kc * kc * (target - position.y) - 2 * kc * climbRate) * dt
         position.y += climbRate * dt
-        // Canopies count in the heightmap; looking down, the lower frame sits close under the lens.
-        let floor = footprintMax(position.x, position.z, radius: 8) + 10 + 10 * surveyAmount
+        let floor = footprintMax(position.x, position.z, radius: 4) + 8
         if position.y < floor { position.y = floor; climbRate = max(climbRate, 0) }
 
         // Survey/vista cycle: the horizon sweeps the whole frame every few minutes so no region of the
@@ -188,7 +172,6 @@ final class FlightCamera {
         // Over open water, look out at the far shore rather than down at a featureless mirror.
         let look = p + fwdFlat * 70
         if h(look.x, look.y) <= 20.0 { s *= 0.35 }
-        s *= 1 - 0.6 * flat
         var targetPitch = -0.08 - 0.40 * s + 0.05 * facing + 0.03 * wander(time + 900, 1.3) + max(-0.04, min(0.06, climbRate * 0.03))
         // Facing the moon: lift the view so the moon sits near the top and its path lies across the water.
         let moonPitch = min(asin(moon.y) - 0.30, 0.2)
