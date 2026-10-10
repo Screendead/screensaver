@@ -17,6 +17,7 @@ struct Frame {
     var prevRight = SIMD4<Float>()
     var prevUp = SIMD4<Float>()
     var jitter = SIMD4<Float>()
+    var cloud = SIMD4<Float>()
 }
 
 enum GPU {
@@ -65,6 +66,7 @@ final class World {
     private final class Buffer {
         let tex: MTLTexture
         let levels: [MTLTexture]
+        let climate: MTLTexture
         var origin = SIMD2<Int32>(Int32.min, Int32.min)
         var globalMax: Float = 255
         var cpuHeights: [Float] = []
@@ -73,8 +75,12 @@ final class World {
             let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: World.size, height: World.size, mipmapped: true)
             td.usage = [.shaderRead, .shaderWrite, .pixelFormatView]
             td.storageMode = .shared
-            guard let t = device.makeTexture(descriptor: td) else { return nil }
+            let cd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: World.size, height: World.size, mipmapped: false)
+            cd.usage = [.shaderRead, .shaderWrite]
+            cd.storageMode = .private
+            guard let t = device.makeTexture(descriptor: td), let c = device.makeTexture(descriptor: cd) else { return nil }
             tex = t
+            climate = c
             levels = (0..<t.mipmapLevelCount).map {
                 t.makeTextureView(pixelFormat: .rgba16Float, textureType: .type2D, levels: $0..<($0 + 1), slices: 0..<1)!
             }
@@ -89,6 +95,7 @@ final class World {
     private let reducePipeline: MTLComputePipelineState
     private let cleanupPipeline: MTLComputePipelineState
     private let plantPipeline: MTLComputePipelineState
+    private let climatePipeline: MTLComputePipelineState
     private let scratch: [MTLTexture]
     private var buffers: [Buffer]
     private var active = 0
@@ -96,6 +103,7 @@ final class World {
     var synchronous = false
 
     var heightTex: MTLTexture { buffers[active].tex }
+    var climateTex: MTLTexture { buffers[active].climate }
     var origin: SIMD2<Int32> { buffers[active].origin }
     var globalMax: Float { buffers[active].globalMax }
 
@@ -107,7 +115,7 @@ final class World {
         sd.usage = [.shaderRead, .shaderWrite]
         sd.storageMode = .private
         guard let gen = pipeline("generateHeight"), let red = pipeline("reduceMax"), let clean = pipeline("cleanupColumns"),
-              let plant = pipeline("plantTrees"),
+              let plant = pipeline("plantTrees"), let clim = pipeline("bakeClimate"),
               let s0 = device.makeTexture(descriptor: sd), let s1 = device.makeTexture(descriptor: sd), let q = device.makeCommandQueue(),
               let a = Buffer(device: device), let b = Buffer(device: device) else { return nil }
         self.device = device
@@ -117,6 +125,7 @@ final class World {
         reducePipeline = red
         cleanupPipeline = clean
         plantPipeline = plant
+        climatePipeline = clim
         scratch = [s0, s1]
         buffers = [a, b]
     }
@@ -154,6 +163,9 @@ final class World {
         enc.setComputePipelineState(plantPipeline)
         enc.setTexture(scratch[1], index: 0)
         enc.setTexture(buf.levels[0], index: 1)
+        enc.dispatchThreads(full, threadsPerThreadgroup: tg)
+        enc.setComputePipelineState(climatePipeline)
+        enc.setTexture(buf.climate, index: 0)
         enc.dispatchThreads(full, threadsPerThreadgroup: tg)
         enc.setComputePipelineState(reducePipeline)
         for l in 1..<buf.levels.count {
@@ -215,6 +227,12 @@ final class Renderer: NSObject, MTKViewDelegate {
     let scenePipeline: MTLRenderPipelineState
     let postPipeline: MTLRenderPipelineState
     let taaPipeline: MTLRenderPipelineState
+    private let cloudPipeline: MTLComputePipelineState
+    // The fine cloud field only drifts with the wind, so it is baked once around the camera (in drifted
+    // coordinates) and re-baked when the camera nears its edge.
+    private var cloudTex: MTLTexture?
+    private var cloudCenter: SIMD2<Double>?
+    static let cloudTexels = 2048, cloudTexel = 4.0
     private var history: [MTLTexture] = []
     private var historyIndex = 0
     private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
@@ -259,12 +277,14 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard let sp = try? device.makeRenderPipelineState(descriptor: scene),
               let tp = try? device.makeRenderPipelineState(descriptor: taa),
               let pp = try? device.makeRenderPipelineState(descriptor: post),
+              let cf = lib.makeFunction(name: "cloudField").flatMap({ try? device.makeComputePipelineState(function: $0) }),
               let world = World(device: device, library: lib, seed: seed) else { return nil }
         self.device = device
         self.queue = queue
         scenePipeline = sp
         postPipeline = pp
         taaPipeline = tp
+        cloudPipeline = cf
         self.world = world
         // Spec offset displays by 90 s of the same flight; steering reads GPU heights, so displays
         // instead start at different places in the same world.
@@ -370,6 +390,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         sceneSize = (w, h)
         var f = makeFrame(size: CGSize(width: w, height: h))
         frameIndex = (frameIndex + 1).truncatingRemainder(dividingBy: 4096)
+        bakeClouds(into: cb, frame: &f)
         let b = camera.basis
         prevCamera = (camera.position, b.fwd, b.right, b.up)
         let histIn = history[historyIndex], histOut = history[1 - historyIndex]
@@ -383,6 +404,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setRenderPipelineState(scenePipeline)
             enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
             enc.setFragmentTexture(world.heightTex, index: 0)
+            enc.setFragmentTexture(cloudTex, index: 1)
+            enc.setFragmentTexture(world.climateTex, index: 2)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
         }
@@ -409,6 +432,32 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
         }
+    }
+
+    private func bakeClouds(into cb: MTLCommandBuffer, frame f: inout Frame) {
+        let n = Renderer.cloudTexels, span = Double(n) * Renderer.cloudTexel
+        if cloudTex == nil {
+            let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: n, height: n, mipmapped: false)
+            td.usage = [.shaderRead, .shaderWrite]
+            td.storageMode = .private
+            cloudTex = device.makeTexture(descriptor: td)
+        }
+        guard let cloudTex else { return }
+        // Must match CLOUD_DRIFT in Shaders/Saver.metal.
+        let drift = SIMD2(cos(0.6), sin(0.6)) * 1.6 * Double(Float(simTime))
+        let cam = SIMD2(camera.position.x, camera.position.z) - drift
+        if cloudCenter.map({ simd_length(cam - $0) > span * 0.2 }) ?? true,
+           let enc = cb.makeComputeCommandEncoder() {
+            cloudCenter = (cam / Renderer.cloudTexel).rounded(.down) * Renderer.cloudTexel
+            var info = SIMD4<Float>(Float(cloudCenter!.x - span / 2), Float(cloudCenter!.y - span / 2), Float(Renderer.cloudTexel),
+                                    Float(bitPattern: world.seed))
+            enc.setComputePipelineState(cloudPipeline)
+            enc.setTexture(cloudTex, index: 0)
+            enc.setBytes(&info, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+            enc.dispatchThreads(MTLSize(width: n, height: n, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+            enc.endEncoding()
+        }
+        if let c = cloudCenter { f.cloud = SIMD4(Float(c.x - span / 2), Float(c.y - span / 2), Float(Renderer.cloudTexel), 0) }
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}

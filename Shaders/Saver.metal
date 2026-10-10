@@ -17,6 +17,7 @@ struct Frame {
     float4 prevRight;
     float4 prevUp;
     float4 jitter;     // xy subpixel jitter in NDC
+    float4 cloud;      // xy cloud field origin in drifted world xz, z field texel size (0: no field)
 };
 
 constant float SEA = 19.85;
@@ -120,6 +121,24 @@ static inline Climate climate(float2 w, uint seed) {
 }
 
 // Painted hills: the hot, semi-dry belt between grassland and desert.
+// Climate is smooth over hundreds of voxels but costs seven noise octaves, so each map bakes it per column.
+kernel void bakeClimate(texture2d<float, access::write> out [[texture(0)]],
+                        constant int4& info [[buffer(0)]],
+                        uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= uint(info.z) || gid.y >= uint(info.z)) return;
+    Climate c = climate(float2(int2(gid) + info.xy), uint(info.w));
+    out.write(float4(c.temp, c.moist, c.fall, c.basin), gid);
+}
+
+// Baked climate at map-local position p (column centres at integer + 0.5).
+static inline Climate climateAt(texture2d<float> t, float2 p) {
+    constexpr sampler bl(filter::linear, address::clamp_to_edge);
+    float4 v = t.sample(bl, p / float2(t.get_width(), t.get_height()), level(0));
+    Climate c;
+    c.temp = v.x; c.moist = v.y; c.fall = v.z; c.basin = v.w;
+    return c;
+}
+
 static inline float paintedAmount(Climate c) {
     return smoothstep(0.45, 0.6, c.temp) * smoothstep(0.30, 0.42, c.moist) * smoothstep(0.66, 0.54, c.moist);
 }
@@ -768,7 +787,7 @@ static inline float3 sandRipples(int2 v, float2 uv, float2 w, float fp, float ti
     return float3(0.045 * amp * r + 0.035 * swell + 0.05 * streak, 0.018 * amp * dr * wind);
 }
 
-static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 uv, float fp, float fpA, int2 mapOrigin, uint seed, float time) {
+static Surface surfaceAt(texture2d<float> hm, texture2d<float> clim, int size, int3 v, int3 n, float2 uv, float fp, float fpA, int2 mapOrigin, uint seed, float time) {
     Surface s;
     s.slope = 0;
     s.mat = 0;
@@ -790,7 +809,7 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
     float wy = n.y != 0 ? float(v.y + max(n.y, 0)) : float(v.y) + uv.y;
     float nb = n.x < 0 ? hx0 : n.x > 0 ? hx1 : n.z < 0 ? hz0 : hz1;
     s.riser = n.y == 0 ? H - nb : 0.0;
-    Climate c = climate(w, seed);
+    Climate c = climateAt(clim, float2(v.xz) + 0.5);
     float desert = desertAmount(c);
     float painted = smoothstep(0.0, 0.6, paintedAmount(c));
     float cold = smoothstep(0.42, 0.18, c.temp);
@@ -808,7 +827,9 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
     float rimW = smoothstep(0.05, 0.4, salt);
 
     float snowline = mix(160.0, 92.0, cold) + 5.0 * perlin2(w / 160.0, seed + 21u);
-    float3 stone = strataTone(wy, wq, seed, max(desert, rimW), fpA);
+    // Rock tone shows on side and under faces, and on high treads; a low tread never reads it.
+    bool needStone = !(n.y > 0 && !underGap) || H - SEA > 0.55 * 110.0;
+    float3 stone = needStone ? strataTone(wy, wq, seed, max(desert, rimW), fpA) : float3(0);
 
     float3 grassWet = float3(0.12, 0.20, 0.13), grassDry = float3(0.40, 0.34, 0.16), grassCold = float3(0.20, 0.23, 0.17);
     float3 grass = mix(mix(grassDry, grassWet, smoothstep(0.3, 0.7, c.moist)), grassCold, cold);
@@ -849,7 +870,7 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
         float2 lat = paintedLateral(w, seed);
         float3 bed = mix(paintedTone(H - 1.0, lat, seed, fpA), float3(0.44, 0.40, 0.28), floorK);
         tread = mix(tread, bed, painted);
-        stone = mix(stone, paintedTone(float(v.y), lat, seed, fpA), painted);
+        if (needStone) stone = mix(stone, paintedTone(float(v.y), lat, seed, fpA), painted);
     }
     bool beach = H <= SEA + 1.2;
     if (beach) tread = sand;
@@ -981,16 +1002,31 @@ static inline float2 faceUV(float3 p, int3 n) {
 
 constant float CLOUD_Y = 240.0; // above the tallest peaks
 
-static inline float cloudDensity(float2 q, uint seed, float time, float cover) {
-    q -= float2(cos(0.6), sin(0.6)) * time * 1.6;
-    return fbm2(q / 300.0, 3, seed + 40u) + perlin3(float3(q / 520.0, time * 0.004), seed + 41u) * 0.35 + cover - 0.5;
+// Coverage = a fine fbm part, which only drifts with the wind, and a slow part (one broad, slowly evolving
+// octave plus the cover offset).
+constant float2 CLOUD_DRIFT = float2(0.825336, 0.564642) * 1.6; // (cos 0.6, sin 0.6) units per second
+
+static inline float cloudFineAt(float2 qd, uint seed) { return fbm2(qd / 300.0, 3, seed + 40u); }
+
+static inline float cloudFine(float2 q, uint seed, float time) { return cloudFineAt(q - CLOUD_DRIFT * time, seed); }
+
+// The fine field in drifted coordinates, baked once into a texture around the camera.
+kernel void cloudField(texture2d<float, access::write> out [[texture(0)]],
+                       constant float4& info [[buffer(0)]],
+                       uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= out.get_width() || gid.y >= out.get_height()) return;
+    out.write(float4(cloudFineAt(info.xy + (float2(gid) + 0.5) * info.z, as_type<uint>(info.w))), gid);
 }
 
-static inline float cloudShadow(float3 p, float3 L, int2 mapOrigin, uint seed, float time, float cover) {
-    if (L.y <= 0.02) return 1.0;
-    float2 q = p.xz + L.xz / L.y * (CLOUD_Y - p.y) + float2(mapOrigin);
-    return mix(1.0, mix(0.6, 0.32, smoothstep(0.3, 0.5, L.y)), smoothstep(0.0, 0.14, cloudDensity(q, seed, time, cover)));
+static inline float cloudSlow(float2 q, uint seed, float time, float cover) {
+    q -= float2(cos(0.6), sin(0.6)) * time * 1.6;
+    return perlin3(float3(q / 520.0, time * 0.004), seed + 41u) * 0.35 + cover - 0.5;
 }
+
+static inline float cloudDensity(float2 q, uint seed, float time, float cover) {
+    return cloudFine(q, seed, time) + cloudSlow(q, seed, time, cover);
+}
+
 
 struct Ctx {
     texture2d<float> hm;
@@ -1004,7 +1040,26 @@ struct Ctx {
     float cover;
     Light L;
     float dither; // per-pixel, per-frame in [0, 1); TAA resolves it
+    texture2d<float> cloudTex;
+    float3 cloudInfo; // as Frame.cloud
+    texture2d<float> clim;
 };
+
+// Baked fine cloud field where it covers q, else evaluated.
+static inline float cloudFineBaked(thread const Ctx& x, float2 q) {
+    constexpr sampler bl(filter::linear, address::clamp_to_edge);
+    float2 qd = q - CLOUD_DRIFT * x.time;
+    float2 u = (qd - x.cloudInfo.xy) / (x.cloudInfo.z * float(x.cloudTex.get_width()));
+    if (x.cloudInfo.z > 0.0 && all(u > 0.002) && all(u < 0.998)) return x.cloudTex.sample(bl, u, level(0)).r;
+    return cloudFineAt(qd, x.seed);
+}
+
+static inline float cloudShadow(thread const Ctx& x, float3 p, float3 L) {
+    if (L.y <= 0.02) return 1.0;
+    float2 q = p.xz + L.xz / L.y * (CLOUD_Y - p.y) + float2(x.origin);
+    float dens = cloudFineBaked(x, q) + cloudSlow(q, x.seed, x.time, x.cover);
+    return mix(1.0, mix(0.6, 0.32, smoothstep(0.3, 0.5, L.y)), smoothstep(0.0, 0.14, dens));
+}
 
 // Mean light reaching the stairs around p, as seen along d, averaged bilinearly over the four nearest
 // columns: a higher neighbour toward the light shades a strip of a column's tread (to contact level ct), and
@@ -1048,7 +1103,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     float fp = h.t * x.pixelAngle; // voxels per pixel
     // Footprint stretched across a grazing face, for detail that must fade before it aliases along the view.
     float fpA = fp / max(abs(dot(n, d)), 0.15);
-    Surface s = surfaceAt(x.hm, x.size, h.voxel, h.normal, uv, fp, fpA, x.origin, x.seed, x.time);
+    Surface s = surfaceAt(x.hm, x.clim, x.size, h.voxel, h.normal, uv, fp, fpA, x.origin, x.seed, x.time);
     // Prefilter: from ~1/10 voxel per pixel, relax AO and shadows and give risers their tread colour, so
     // distant stairs read as contour bands, not moire.
     float wf = smoothstep(0.025, 0.20, fp);
@@ -1107,7 +1162,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
         sh = mix(sh, floorSh + (1.0 - floorSh) * sh, wf);
         sh = mix(sh, 1.0, 0.3 * x.L.night);
     }
-    sh *= mix(1.0, cloudShadow(p, x.L.key, x.origin, x.seed, x.time, x.cover), x.L.sunAmt);
+    sh *= mix(1.0, cloudShadow(x, p, x.L.key), x.L.sunAmt);
     float lowFill = mix(0.9, 1.0, smoothstep(0.1, 0.4, x.L.key.y));
     // Low light: shadows take the cool zenith, against warm key light.
     // High sun: fill is the deep zenith, so shade reads blue against warm key light.
@@ -1216,12 +1271,27 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d) {
     float3 acc = 0;
     float silver = 0;
     float jit = 0.5 + x.L.night * (x.dither - 0.5);
+    // The slow part varies over hundreds of units: sample it at knots ~40 units apart along the ray (or one
+    // per step, if those are further apart) and interpolate; only the fine part is evaluated per step.
+    float kt = max(40.0 / max(length(d.xz), 1e-4), dt);
+    float ka = t0, kb = t0 + kt;
+    float2 qa = (o.xz + d.xz * ka) + float2(x.origin), qb = (o.xz + d.xz * kb) + float2(x.origin);
+    float sa = cloudSlow(qa, x.seed, x.time, x.cover), sb = cloudSlow(qb, x.seed, x.time, x.cover);
+    float wa = -1e9, wb = -1e9;
     for (int i = 0; i < steps; i++) {
         float t = t0 + (float(i) + jit) * dt;
         float3 p = o + d * t;
         float2 q = p.xz + float2(x.origin);
+        while (t > kb) {
+            ka = kb; qa = qb; sa = sb; wa = wb;
+            kb += kt;
+            qb = (o.xz + d.xz * kb) + float2(x.origin);
+            sb = cloudSlow(qb, x.seed, x.time, x.cover);
+            wb = -1e9;
+        }
+        float kf = saturate((t - ka) / kt);
         // Night skies stay mostly clear: fewer, thinner banks.
-        float base = cloudDensity(q, x.seed, x.time, x.cover) - 0.07 * x.L.night;
+        float base = cloudFineBaked(x, q) + mix(sa, sb, kf) - 0.07 * x.L.night;
         // Night: a finer octave frays the edges into wisps for the moon to light through.
         if (x.L.night > 0.0 && base > -0.15) {
             float2 qd = q - float2(x.time * 1.3, 0);
@@ -1232,7 +1302,12 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d) {
         float dens = saturate((base - 0.04) * mix(3.0, 9.0, x.L.night)) * smoothstep(0.0, 0.2, h01) * (1.0 - smoothstep(top * 0.7, top, h01));
         if (dens < 0.01) continue;
         // Under the moon the sample's own density stands in for the occlusion toward the light.
-        float toward = x.L.night > 0.99 ? base : cloudDensity(q + sunStep, x.seed, x.time, x.cover);
+        float toward = base;
+        if (x.L.night <= 0.99) {
+            if (wa < -1e8) wa = cloudSlow(qa + sunStep, x.seed, x.time, x.cover);
+            if (wb < -1e8) wb = cloudSlow(qb + sunStep, x.seed, x.time, x.cover);
+            toward = cloudFineBaked(x, q + sunStep) + mix(wa, wb, kf);
+        }
         float shadow = exp(-saturate((toward - 0.04) * 3.0) * 2.2) * (0.55 + 0.45 * h01);
         float3 lit = x.L.keyCol * (0.15 + 0.85 * shadow) * (0.6 + 0.4 * toSun) + ambient * (0.6 + 0.4 * h01);
         // Golden hour: bodies sit in violet shade and only sun-facing crowns take the gold.
@@ -1288,7 +1363,8 @@ static float3 softCloudSky(thread const Ctx& x, float3 o, float3 r) {
 }
 
 fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0)]],
-                              texture2d<float> hm [[texture(0)]]) {
+                              texture2d<float> hm [[texture(0)]], texture2d<float> cloudTex [[texture(1)]],
+                              texture2d<float> clim [[texture(2)]]) {
     float2 ndc = in.uv * 2.0 - 1.0;
     ndc.y = -ndc.y;
     ndc += f.jitter.xy;
@@ -1298,7 +1374,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
 
     Ctx x { hm, f.mapInfo.z, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w, f.misc.y,
             2.0 * tanH * f.resolution.w, f.misc.w, makeLight(f.sunDir.xyz),
-            fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))) };
+            fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
+            cloudTex, f.cloud.xyz, clim };
 
     Hit h = trace(hm, o, d, 4000.0, 400, x.globalMax, x.size);
     if (f.misc2.z == 1) return float4(float(h.iters) / 400.0, h.hit ? 0.3 : 0.0, h.iters >= 399 ? 1 : 0, 1);
@@ -1315,9 +1392,10 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         float e0 = perlin3(float3(ww * 0.3, x.time * 0.25), x.seed + 60u);
         float ex = perlin3(float3((ww + float2(0.05, 0)) * 0.3, x.time * 0.25), x.seed + 60u);
         float ez = perlin3(float3((ww + float2(0, 0.05)) * 0.3, x.time * 0.25), x.seed + 60u);
-        float lagoon = smoothstep(0.0, 0.35, lagoonAmount(climate(ww, x.seed)));
+        Climate wc = climateAt(x.clim, wp.xz);
+        float lagoon = smoothstep(0.0, 0.35, lagoonAmount(wc));
         // Pools on a salt pan are a still skin over pale crust: a near-perfect mirror.
-        float salt = saltAmount(climate(ww, x.seed));
+        float salt = saltAmount(wc);
         float rs = max(0.35 * saturate(1.0 - tw * x.pixelAngle * 4.0) * (1.0 - 0.6 * lagoon), 0.08 * x.L.night) * (1.0 - 0.7 * salt);
         float3 n = normalize(float3(-(ex - e0) * rs, 1.0, -(ez - e0) * rs));
         float3 r = reflect(d, n);
@@ -1332,8 +1410,15 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         }
         float3 deep = x.L.zenith * 0.18 + x.L.horizon * 0.06 + float3(0.004, 0.014, 0.018);
         float3 under = deep;
+        float cosi = saturate(-dot(d, n));
+        float fres = 0.02 + 0.98 * pow(1.0 - cosi, 5.0);
+        float bedPath = h.t - tw;
+        // How much of the lit bed survives the water and the surface reflection; below a few thousandths it
+        // can't show, and its shade() is the costliest part of a water pixel.
+        float bedShows = (1.0 - fres) * max(exp(-bedPath * mix(0.35, 0.08, salt)) * (1.0 - lagoon),
+                                            lagoon * exp(-(bedPath + SEA - (o.y + d.y * h.t)) * 0.065));
         if (h.hit) {
-            float path = h.t - tw;
+            float path = bedPath;
             // Lagoon beds are lit by sunlight refracted steeply down through the surface. Flux per horizontal
             // area is kept (less what the surface reflects), so the light is redistributed from risers to treads.
             Ctx xr = x;
@@ -1342,7 +1427,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             float ky = max(x.L.key.y, 0.0);
             xr.L.key = normalize(mix(x.L.key, kr, lagoon));
             xr.L.keyCol *= mix(1.0, ky / kr.y * (0.98 - 0.98 * pow(1.0 - ky, 5.0)), lagoon);
-            float3 lit = shade(xr, o, d, h, false);
+            float3 lit = bedShows > 0.003 ? shade(xr, o, d, h, false) : float3(0);
             under = mix(deep, lit * mix(float3(0.55, 0.8, 0.85), float3(0.9, 0.95, 0.97), salt), exp(-path * mix(0.35, 0.08, salt)));
             if (lagoon > 0.0) {
                 // Clear water over sand: red is absorbed first, so the bed turns aquamarine, then teal, then blue.
@@ -1356,8 +1441,6 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             }
         }
         under *= 1.0 - 0.4 * x.L.night;
-        float cosi = saturate(-dot(d, n));
-        float fres = 0.02 + 0.98 * pow(1.0 - cosi, 5.0);
         col = mix(under, refl, fres);
         // Glitter path toward the sun or moon: the main EDR highlight.
         col += x.L.keyCol * 6.0 * pow(max(dot(r, x.L.key), 0.0), mix(mix(900.0, 4000.0, x.L.night), 350.0, x.L.gold)) * fres * (x.L.shadows ? 1.0 : 0.3) * (1.0 + 0.5 * x.L.night);
