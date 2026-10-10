@@ -112,8 +112,8 @@ static inline float2 seedOffset(uint seed) {
 static inline Climate climate(float2 w, uint seed) {
     float2 p = w + seedOffset(seed);
     Climate c;
-    c.temp = saturate(fbm2(p / 2000.0, 2, seed + 11) * 1.6 + 0.5);
-    c.moist = saturate(fbm2(p / 1800.0 + 91.0, 2, seed + 12) * 1.6 + 0.5);
+    c.temp = saturate(fbm2(p / 900.0, 2, seed + 11) * 1.6 + 0.5);
+    c.moist = saturate(fbm2(p / 800.0 + 91.0, 2, seed + 12) * 1.6 + 0.5);
     return c;
 }
 
