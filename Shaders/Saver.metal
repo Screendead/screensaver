@@ -1111,38 +1111,51 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     // Below ~2 pixels per voxel step shadows and sky visibility alias into a hatch that crawls under motion;
     // shade the continuous slope under the stairs instead.
     float wf2 = s.mat == 0 ? smoothstep(0.2, 0.5, fp) : 0.0;
-    // Terrain faces a few pixels wide keep their exact normal: a column's central difference tilts only the tops
-    // at a ledge, so they would shade unlike the rest of their plane. Toward 2 pixels per voxel the slope under
-    // the stairs takes over, smooth across ledges. Canopies keep the early blend toward their column normal.
-    float wn = s.mat == 0 ? smoothstep(0.33, 0.6, fp) : wf;
-    if (s.mat == 0 && wn > 0.0) {
+    // Tops a few pixels wide keep their exact normal: a column's central difference tilts only the tops at a
+    // ledge, so they would shade unlike the rest of their plane. Toward 2 pixels per voxel the slope under the
+    // stairs takes over, smooth across ledges. Side faces blend with their tread colour (wf), toward the column
+    // normal until that slope takes over: a riser in tread colour lit as a wall reads as a veil over the hill
+    // behind it. Canopies keep their column normal blend.
+    float wt = smoothstep(0.33, 0.6, fp);
+    float wn = s.mat == 0 && h.normal.y != 0 ? wt : wf;
+    if (s.mat == 0 && wt > 0.0) {
         float R = max(2.0, 1.5 * fp);
         float2 grad = float2(groundSmooth(x.hm, p.xz + float2(R, 0), x.size) - groundSmooth(x.hm, p.xz - float2(R, 0), x.size),
                              groundSmooth(x.hm, p.xz + float2(0, R), x.size) - groundSmooth(x.hm, p.xz - float2(0, R), x.size)) / (2.0 * R);
-        nS = normalize(float3(-grad.x, 1.0, -grad.y));
+        float3 g = normalize(float3(-grad.x, 1.0, -grad.y));
+        nS = h.normal.y != 0 ? g : normalize(mix(nS, g, wt));
     }
     float3 nl = normalize(mix(normalize(n - float3(s.slope.x, 0.0, s.slope.y)), nS, wn));
     nl = normalize(mix(nl, float3(0, 1, 0), s.level));
     float ao = mix(mix(cornerAO(x.hm, x.size, h.voxel, h.normal, uv), 0.85, wf), 1.0, s.level) * s.canopy;
-    // Cliffs several pixels tall keep their strata; only sub-pixel stairs take the tread colour.
-    float keep = smoothstep(6.0, 14.0, s.riser / fp) * smoothstep(3.0, 5.0, s.riser);
-    float3 alb = h.normal.y == 0 ? mix(s.albedo, s.tread, wf * (1.0 - keep)) : s.albedo;
-    // Moonlight drains colour.
-    alb = mix(alb, float3(dot(alb, float3(0.3, 0.59, 0.11))), 0.4 * x.L.night);
-    // Pale sand, salt and stone would glow under the moon brighter than the sky above them.
-    if (s.mat == 0) alb *= 1.0 - 0.5 * x.L.night * s.pale;
-    // Canopies would otherwise drop to cut-out silhouettes under the moon.
-    if (s.mat == 1 || s.mat == 2) alb *= 1.0 + 1.4 * x.L.night * (1.0 - 0.5 * s.autumn);
-    float ndl = max(dot(nl, x.L.key), 0.0);
-    // A riser face only a column wide (a jog in a step edge) facing a low sun lights up as a lone bright cube once
-    // it is a few pixels across; with the footprint its key light fades to that of the tread it stands for.
+    float drop = s.H - min(min(s.nh.x, s.nh.y), min(s.nh.z, s.nh.w));
+    // Cliffs several pixels tall keep their strata; only sub-pixel stairs take the tread colour. Keyed to the
+    // column's deepest drop, not this face's: the faces of a wall running diagonal to the grid alternate
+    // between shallow and deep neighbours, which would stripe it strata, tread, strata.
+    float cliff = s.riser > 0.0 ? drop : 0.0;
+    float keep = smoothstep(6.0, 14.0, cliff / fp) * smoothstep(3.0, 5.0, cliff);
+    // A riser face only a column wide (a jog in a step edge) is a lone cube face: lit, it is a bright cube; in shade,
+    // stone against sand, a dark notch. With the footprint it fades to the tread it stands for, colour and light.
+    float lone = 0.0;
     if (h.normal.y == 0 && s.mat == 0 && wn < 1.0) {
         int2 t = h.normal.x != 0 ? int2(0, 1) : int2(1, 0), o = h.normal.xz;
         float run = float(groundAt(x.hm, h.voxel.xz + t, x.size) > groundAt(x.hm, h.voxel.xz + t + o, x.size) + 0.5)
                   + float(groundAt(x.hm, h.voxel.xz - t, x.size) > groundAt(x.hm, h.voxel.xz - t + o, x.size) + 0.5);
-        float lone = (1.0 - 0.5 * run) * smoothstep(0.05, 0.25, fp);
-        ndl = mix(ndl, max(x.L.key.y, 0.0), lone * (1.0 - wn));
+        lone = (1.0 - 0.5 * run) * smoothstep(0.01, 0.05, fp) * (1.0 - wn) * (1.0 - keep);
     }
+    float3 alb = h.normal.y == 0 ? mix(s.albedo, s.tread, max(wf * (1.0 - keep), lone)) : s.albedo;
+    // Moonlight drains colour.
+    alb = mix(alb, float3(dot(alb, float3(0.3, 0.59, 0.11))), 0.4 * x.L.night);
+    // Pale sand, salt and stone would glow under the moon brighter than the sky above them.
+    if (s.mat == 0) alb *= 1.0 - 0.5 * x.L.night * s.pale;
+    // Canopies would otherwise drop to cut-out silhouettes under the moon: lifted toward the luminance of a lifted
+    // green crown, never past it, or fall foliage, already several times brighter, glows like candy.
+    if (s.mat == 1 || s.mat == 2) {
+        float l = dot(alb, float3(0.3, 0.59, 0.11));
+        alb = mix(alb, float3(l), 0.4 * x.L.night * s.autumn);
+        alb *= 1.0 + x.L.night * (clamp(0.17 / max(l, 1e-3), 1.0, 2.4) - 1.0);
+    }
+    float ndl = mix(max(dot(nl, x.L.key), 0.0), max(x.L.key.y, 0.0), lone);
     float hiSun = smoothstep(0.15, 0.45, x.L.key.y) * (1.0 - x.L.night);
     float sh = 1.0;
     if (shadows && ndl > 0.0 && x.L.shadows) {
@@ -1178,7 +1191,6 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     skyFill *= 0.5 + 0.5 * saturate(nl.y);
     float3 bounce = (1.0 - saturate(nl.y)) * 0.35 * alb * x.L.keyCol * max(x.L.key.y, 0.0);
     // High sun: risers sit in cooler shade so terraces keep their modelling at noon.
-    float drop = s.H - min(min(s.nh.x, s.nh.y), min(s.nh.z, s.nh.w));
     float3 riserShade = mix(float3(1.0), float3(0.82, 0.86, 0.95),
                             (h.normal.y == 0 ? 1.0 - saturate(nl.y) : 0.0) * smoothstep(0.3, 0.6, x.L.key.y) * smoothstep(1.5, 4.0, drop));
     // Night: no pure-black riser feet; a faint indigo ambient keeps the steps readable as stone, not holes.

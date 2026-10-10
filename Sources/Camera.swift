@@ -117,15 +117,23 @@ final class FlightCamera {
         let moon = simd_normalize(SIMD3(-sun.x, max(-sun.y, 0.08), -sun.z))
         let moonYaw = atan2(moon.x, moon.z)
         let steerMoon = sin(moonYaw - yaw) * 0.05 * nightW
-        let facingMoon = nightW * max(0, cos(moonYaw - yaw))
+        let moonOff = abs(FlightCamera.angleDiff(moonYaw, yaw))
+        // The moon sits fully in frame within ~0.5 rad of the heading (horizontal half-field ~0.62 rad).
+        let facingMoon = nightW * min(max((1.0 - moonOff) / 0.5, 0), 1)
         if time >= nextShot {
             let lightW = max(w, nightW)
             let lightYaw = nightW > w ? moonYaw : keyYaw
-            shotYaw = (-3...3).map { yaw + Double($0) * 0.5 }.max { shotScore($0, lightYaw: lightYaw, lightW: lightW) < shotScore($1, lightYaw: lightYaw, lightW: lightW) }
+            // At night the shots are only those that hold the moon; terrain picks among them. Free headings let
+            // relief outvote the moon wherever the land happens to rise away from it.
+            let (center, span, step) = nightW > 0.5 ? (moonYaw, 2, 0.15) : (yaw, 3, 0.5)
+            let headings: [Double] = (-span...span).map { center + Double($0) * step }
+            shotYaw = headings.max { shotScore($0, lightYaw: lightYaw, lightW: lightW) < shotScore($1, lightYaw: lightYaw, lightW: lightW) }
             nextShot = time + 12
         }
         let steerShot = shotYaw.map { sin(FlightCamera.angleDiff($0, yaw)) * 0.05 } ?? 0
-        let targetRate = max(-0.09, min(0.09, steer * 0.004 * steerSign * (1 - 0.6 * w) * 0.4 + wander(time, 1) * 0.02 + steerShot + steerKey + steerMoon))
+        let valley: Double = steer * 0.004 * steerSign * (1 - 0.6 * w) * 0.4
+        let drift: Double = (valley + wander(time, 1) * 0.02) * (1 - nightW)
+        let targetRate = max(-0.09, min(0.09, drift + steerShot + steerKey + steerMoon))
         // Critically damped spring on yaw rate: turns take tens of seconds.
         let k = 0.25
         yawAccel += (k * k * (targetRate - yawRate) - 2 * k * yawAccel) * dt
