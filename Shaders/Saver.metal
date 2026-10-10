@@ -23,6 +23,7 @@ struct Frame {
     float4 birds;      // x bird flock count
     float4 lod[5];     // per level: x morph band start, y handoff radius (the last level's is the world's edge), z morph end, w column width
     float4 fade;       // x fog fade start, y world radius, z level count, w ring centre's offset ahead of the camera (tests)
+    float4 shadow;     // x 1 when the shadow-height maps hold the current key light, y debug: brute-force shadow rays
 };
 
 constant float SEA = 19.85;
@@ -2308,6 +2309,9 @@ struct Ctx {
     texture2d<float> lightMap;
     texture2d<float> lightDir;
     float4 lights;
+    texture2d<float> shadowNear;  // shadow-height maps, SHADOW_CELL and 4x that, toroidal
+    texture2d<float> shadowFar;
+    float shadowMode;             // 0 none, 1 maps, 2 brute-force rays (debug)
 };
 
 // Baked fine cloud field where it covers q, else evaluated.
@@ -2324,6 +2328,75 @@ static inline float cloudShadow(thread const Ctx& x, float3 p, float3 L) {
     float2 q = p.xz + L.xz / L.y * (CLOUD_Y - p.y) + float2(x.origin);
     float dens = cloudFineBaked(x, q) + cloudSlow(q, x.seed, x.time, x.cover);
     return mix(1.0, mix(0.6, 0.32, smoothstep(0.3, 0.5, L.y)), smoothstep(0.0, 0.14, dens));
+}
+
+// MARK: - Shadow-height maps
+
+// Two world-anchored toroidal grids around the camera (SHADOW_N texels a side; SHADOW_CELL voxels and 4x that):
+// each texel holds the height below which its column is in the shadow of terrain at least SHADOW_NEAR away toward
+// the key light, from the coarse rings' max mips. Rebaked a band per frame; shade() traces only the near ray.
+constant float SHADOW_CELL = 8.0;
+constant int SHADOW_N = 1024;
+constant float SHADOW_NEAR = 160.0;
+
+struct ShadowBake {
+    float4 key;     // xyz key light direction, w horizontal start distance
+    float4 cam;     // xy camera world xz, z cell size, w levels built
+    int4 rows;      // x first row of this band, y camera cell x, z camera cell z
+};
+
+kernel void bakeShadowHeight(texture2d<float, access::write> out [[texture(0)]],
+                             texture2d_array<float> ch [[texture(1)]],
+                             constant ShadowBake& b [[buffer(0)]],
+                             uint2 g [[thread_position_in_grid]]) {
+    int2 t = int2(g) + int2(0, b.rows.x);
+    if (t.x >= SHADOW_N || t.y >= SHADOW_N) return;
+    // The window's cell for this texel: the one within half a window of the camera's cell.
+    int2 lo = b.rows.yz - SHADOW_N / 2;
+    int2 c = lo + ((t - lo) & (SHADOW_N - 1));
+    float cell = b.cam.z;
+    float2 P = (float2(c) + 0.5) * cell;
+    float hl = length(b.key.xz);
+    if (hl < 1e-3 || b.key.y <= 0.0) { out.write(float4(-1e4), uint2(t)); return; }
+    float2 dir = b.key.xz / hl;
+    float tanE = b.key.y / hl;
+    int levels = int(b.cam.w);
+    float S = -1e4;
+    float d = b.key.w;
+    float step = cell;
+    for (int i = 0; i < 96; i++) {
+        float2 X = P + dir * d;
+        float r = length(X - b.cam.xy);
+        // Finest ring that holds X, at the max mip whose cells are as wide as the step.
+        int k = 1;
+        while (k <= levels && r > 900.0 * float(1 << k)) k++;
+        if (k > levels) break;
+        int m = max(int(round(log2(step))) - k, 0);
+        int2 mc = int2(floor(X / float(1 << k))) >> m;
+        float hm = ch.read(uint2(mc & ((2048 >> m) - 1)), uint(k - 1), uint(m)).r;
+        float w = float(1 << (k + m));
+        // The cell's nearest part lies up to ~0.7 of its width closer than X.
+        S = max(S, hm - max(d - 0.7 * w, b.key.w) * tanE);
+        if ((d - w) * tanE > 2100.0) break;
+        d += step;
+        if (d > 8.0 * step) step *= 2.0;
+        if (d > 7000.0) break;
+    }
+    out.write(float4(S), uint2(t));
+}
+
+// Fraction of the key light the maps let through to p (map-local); never lighter than a lit column.
+static float shadowMapLit(thread const Ctx& x, float3 p) {
+    constexpr sampler rs(filter::linear, address::repeat);
+    float2 w = p.xz + float2(x.origin);
+    float2 cw = x.tr.cam + float2(x.origin);
+    float2 dv = abs(w - cw);
+    float rn = max(dv.x, dv.y) / (SHADOW_CELL * float(SHADOW_N / 2));
+    float bn = smoothstep(0.80, 0.92, rn);
+    float S = x.shadowNear.sample(rs, w / (SHADOW_CELL * float(SHADOW_N)), level(0)).r;
+    if (bn > 0.0) S = mix(S, x.shadowFar.sample(rs, w / (4.0 * SHADOW_CELL * float(SHADOW_N)), level(0)).r, bn);
+    float pen = mix(6.0, 14.0, bn);
+    return mix(smoothstep(S - pen, S + pen, p.y), 1.0, smoothstep(0.85, 0.95, rn * 0.25));
 }
 
 // Mean light reaching the stairs around p, as seen along d, averaged bilinearly over the four nearest
@@ -2447,8 +2520,11 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
         so.xz = clamp(so.xz, float2(h.voxel.xz) * cs + 0.002, float2(h.voxel.xz) * cs + (cs - 0.002));
         // Prefiltered, the ray starts a step above the column, and single steps shade by their expected cover.
         so.y = mix(so.y, max(so.y, s.H) + 1.0, wf2);
-        int shadowIters = x.quality > 0.5 ? 120 : 48;
-        Hit sHit = trace(x.tr, so, x.L.key, 700.0, shadowIters, k);
+        // With the shadow-height maps the ray only reaches SHADOW_NEAR (contact and cliff shadows); the maps hold every
+        // occluder beyond.
+        bool maps = x.shadowMode == 1.0, brute = x.shadowMode == 2.0;
+        int shadowIters = brute ? 4000 : maps ? (x.quality > 0.5 ? 64 : 32) : (x.quality > 0.5 ? 120 : 48);
+        Hit sHit = trace(x.tr, so, x.L.key, brute ? 6000.0 : maps ? SHADOW_NEAR : 700.0, shadowIters, k);
         // A ray that runs out of steps is still threading terrain toward the sun: count it as blocked there, so a
         // shaded spot never comes out lit.
         sHit.hit = sHit.hit || sHit.iters >= shadowIters;
@@ -2457,6 +2533,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
         // The lift moves the ray's start about 1 / L.y along it; contact reach moves with it.
         float reach = wf2 / max(x.L.key.y, 0.05);
         sh = sHit.hit ? 0.35 * (1.0 - smoothstep(2.0 + reach, 8.0 + reach, sHit.t)) : 1.0;
+        if (maps) sh = min(sh, shadowMapLit(x, so));
         if (wf2 > 0.0) sh = mix(sh, min(sh, stairShadow(x.tr, k, p.xz, x.L.key, d, contact, 0.35)), wf2);
         float floorSh = mix(mix(0.5, 0.25, hiSun), 0.32, x.L.gold);
         sh = mix(sh, floorSh + (1.0 - floorSh) * sh, wf);
@@ -2954,6 +3031,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
                               texture2d<float> lightMap [[texture(4)]], texture2d<float> lightDir [[texture(5)]],
                               texture2d_array<float> coarse [[texture(6)]], texture2d_array<float> coarseClim [[texture(7)]],
                               texture2d_array<float> coarseCover [[texture(8)]],
+                              texture2d<float> shadowNear [[texture(9)]], texture2d<float> shadowFar [[texture(10)]],
                               device const Site* sites [[buffer(1)]], device const float4* lampPos [[buffer(2)]],
                               device const float4* lampState [[buffer(3)]], constant int4* refs [[buffer(4)]],
                               device const float4* birds [[buffer(5)]]) {
@@ -2971,7 +3049,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
             2.0 * tanH * f.resolution.w, f.misc.w, makeLight(f.sunDir.xyz),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
-            cloudTex, f.cloud.xyz, st, sites, lampPos, lampState, lightMap, lightDir, f.lights };
+            cloudTex, f.cloud.xyz, st, sites, lampPos, lampState, lightMap, lightDir, f.lights, shadowNear, shadowFar,
+            f.misc2.z == 14 ? 2.0 : f.shadow.x };
 
     // Debug map view: 11 level 4 (+-10k tall, +-16k wide), 12 level 2, 13 level 1; hillshade, height ramp, 100-voxel
     // contours, 2k grid, yellow 10k lines, magenta world origin, red camera.

@@ -28,6 +28,7 @@ struct Frame {
     var lod3 = SIMD4<Float>()
     var lod4 = SIMD4<Float>()
     var fade = SIMD4<Float>()
+    var shadow = SIMD4<Float>()
 }
 
 enum GPU {
@@ -38,6 +39,13 @@ enum GPU {
         let exe = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
         return try? device.makeLibrary(URL: exe.appendingPathComponent("Saver.metallib"))
     }
+}
+
+// Must match ShadowBake in Shaders/Saver.metal.
+struct ShadowBake {
+    var key: SIMD4<Float>
+    var cam: SIMD4<Float>
+    var rows: SIMD4<Int32>
 }
 
 // Day cycle with a time-warp that lingers in golden and blue hour.
@@ -575,6 +583,14 @@ final class Renderer: NSObject, MTKViewDelegate {
     let postPipeline: MTLRenderPipelineState
     let taaPipeline: MTLRenderPipelineState
     private let cloudPipeline: MTLComputePipelineState
+    // Shadow-height maps (see bakeShadowHeight in Shaders/Saver.metal): near and far cascades, a band rebaked per frame.
+    private let shadowPipeline: MTLComputePipelineState
+    private let shadowMaps: [MTLTexture]
+    static let shadowN = 1024, shadowCell = 8.0
+    private static let shadowBands = [16, 32]
+    private var shadowBand = [0, 0]
+    private var shadowValid = false
+    private var shadowFrom: (cam: SIMD2<Double>, key: SIMD3<Double>)?
     // The fine cloud field only drifts with the wind, so it is baked once around the camera (in drifted
     // coordinates) and re-baked when the camera nears its edge.
     private var cloudTex: MTLTexture?
@@ -653,6 +669,7 @@ final class Renderer: NSObject, MTKViewDelegate {
               let tp = try? device.makeRenderPipelineState(descriptor: taa),
               let pp = try? device.makeRenderPipelineState(descriptor: post),
               let cf = lib.makeFunction(name: "cloudField").flatMap({ try? device.makeComputePipelineState(function: $0) }),
+              let shP = lib.makeFunction(name: "bakeShadowHeight").flatMap({ try? device.makeComputePipelineState(function: $0) }),
               let lampP = lib.makeFunction(name: "updateLamps").flatMap({ try? device.makeComputePipelineState(function: $0) }),
               let lightP = lib.makeFunction(name: "bakeLights").flatMap({ try? device.makeComputePipelineState(function: $0) }),
               let lpos = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.maxLamps * 16, options: .storageModePrivate),
@@ -665,6 +682,12 @@ final class Renderer: NSObject, MTKViewDelegate {
         postPipeline = pp
         taaPipeline = tp
         cloudPipeline = cf
+        shadowPipeline = shP
+        let sd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: Renderer.shadowN, height: Renderer.shadowN, mipmapped: false)
+        sd.usage = [.shaderRead, .shaderWrite]
+        sd.storageMode = .private
+        guard let sm0 = device.makeTexture(descriptor: sd), let sm1 = device.makeTexture(descriptor: sd) else { return nil }
+        shadowMaps = [sm0, sm1]
         lampPipeline = lampP
         lightPipeline = lightP
         lampPos = lpos
@@ -855,6 +878,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         clipmap.encode(into: cb, center: SIMD2(camera.position.x, camera.position.z), drain: world.synchronous && !Renderer.chunkedCoarse,
                        active: activeLevels)
         bakeLamps(into: cb, frame: &f)
+        bakeShadows(into: cb, frame: &f)
         birdSlots.wait()
         cb.addCompletedHandler { [birdSlots] _ in birdSlots.signal() }
         let birdBuf = birdBuffers[birdIndex]
@@ -883,6 +907,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentTexture(clipmap.height, index: 6)
             enc.setFragmentTexture(clipmap.climate, index: 7)
             enc.setFragmentTexture(clipmap.cover, index: 8)
+            enc.setFragmentTexture(shadowMaps[0], index: 9)
+            enc.setFragmentTexture(shadowMaps[1], index: 10)
             enc.setFragmentBuffer(lampPos, offset: 0, index: 2)
             enc.setFragmentBuffer(lampState, offset: 0, index: 3)
             enc.setFragmentBytes(&hazeRefs, length: 128, index: 4)
@@ -968,6 +994,50 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.dispatchThreads(MTLSize(width: t, height: t, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
         }
         enc.endEncoding()
+    }
+
+    // The key light as the shader's makeLight picks it, and whether it casts shadows.
+    static func keyLight(_ sun: SIMD3<Double>) -> (SIMD3<Double>, Bool) {
+        let e = sun.y
+        if e > -0.02 { return (sun, true) }
+        let glow = simd_normalize(SIMD3(sun.x, 0.05, sun.z))
+        let moon = simd_normalize(SIMD3(-sun.x, max(-sun.y * 0.7, 0.08), -sun.z))
+        let t = min(max((e + 0.09) / (-0.16 + 0.09), 0), 1)
+        let m = t * t * (3 - 2 * t)
+        return (simd_normalize(glow + (moon - glow) * m), m > 0.5)
+    }
+
+    // A band of each shadow-height map per frame, around the camera, for the current key light; everything at once
+    // when the camera or the light has jumped (startup, snapshots), so the maps never hold another place's shadows.
+    private func bakeShadows(into cb: MTLCommandBuffer, frame f: inout Frame) {
+        let (key, casts) = Renderer.keyLight(clock.sunDirection)
+        let levels = (1...Clipmap.levels).prefix { clipmap.ready($0) }.count
+        guard casts, levels > 0, let enc = cb.makeComputeCommandEncoder() else { shadowValid = false; f.shadow.x = 0; return }
+        let cam = SIMD2(camera.position.x, camera.position.z)
+        let jumped = shadowFrom.map { simd_length($0.cam - cam) > 300 || simd_dot($0.key, key) < 0.9998 } ?? true
+        if !shadowValid || jumped { shadowFrom = (cam, key); shadowBand = [0, 0] }
+        let full = !shadowValid || jumped
+        let cosE = simd_length(SIMD2(key.x, key.z))
+        enc.setComputePipelineState(shadowPipeline)
+        enc.setTexture(clipmap.height, index: 1)
+        for c in 0..<2 {
+            let cell = Renderer.shadowCell * (c == 0 ? 1 : 4)
+            let bands = Renderer.shadowBands[c], rows = Renderer.shadowN / bands
+            let todo = full ? bands : 1
+            for _ in 0..<todo {
+                var b = ShadowBake(key: SIMD4(Float(key.x), Float(key.y), Float(key.z), Float(max(0.8 * 160 * cosE, cell))),
+                                   cam: SIMD4(Float(cam.x), Float(cam.y), Float(cell), Float(levels)),
+                                   rows: SIMD4(Int32(shadowBand[c] * rows), Int32(floor(cam.x / cell)), Int32(floor(cam.y / cell)), 0))
+                enc.setTexture(shadowMaps[c], index: 0)
+                enc.setBytes(&b, length: MemoryLayout<ShadowBake>.stride, index: 0)
+                enc.dispatchThreads(MTLSize(width: Renderer.shadowN, height: rows, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+                shadowBand[c] = (shadowBand[c] + 1) % bands
+                if c == 0 && shadowBand[0] == 0 { shadowFrom = (cam, key) }
+            }
+        }
+        enc.endEncoding()
+        shadowValid = true
+        f.shadow.x = 1
     }
 
     private func bakeClouds(into cb: MTLCommandBuffer, frame f: inout Frame) {
