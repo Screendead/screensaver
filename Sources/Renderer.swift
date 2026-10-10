@@ -232,7 +232,7 @@ final class World {
 // toroidally (texel = world cell & 2047) around the camera, so re-centring rewrites only the 64-cell strip that
 // enters the window, a chunk per frame inside the frame's own command buffer.
 final class Clipmap {
-    static let levels = 4, size = 2048, snap = 64, chunk = 256
+    static let levels = 4, size = 2048, snap = 64, chunk = 128
     // Must match Frame.lod in Shaders/Saver.metal: a level hands off to the next at 860 of its own columns,
     // which keeps every read inside the window while a strip is rewritten.
     static func handoff(_ k: Int) -> Double { 860.0 * Double(1 << k) }
@@ -327,7 +327,12 @@ final class Clipmap {
     // Encodes pending generation: one chunk, or with `drain` everything the camera position needs. A whole-window
     // rebuild (startup, or a jump of more than 8 strips) is always encoded in one go.
     func encode(into cb: MTLCommandBuffer, center: SIMD2<Double>, drain: Bool) {
-        var budget = drain ? Int.max : 1
+        // A level more than a strip behind the camera could soon be read past its window: catch it up at once.
+        let lagging = (0..<Clipmap.levels).contains { i in
+            let t = Clipmap.target(center, level: i + 1)
+            return lo[i].map { abs($0.x - t.x) > Int32(Clipmap.snap) || abs($0.y - t.y) > Int32(Clipmap.snap) } ?? true
+        }
+        var budget = drain || lagging ? Int.max : 1
         if job == nil { job = nextJob(center) }
         guard job != nil, let enc = cb.makeComputeCommandEncoder() else { return }
         defer { enc.endEncoding() }
@@ -366,6 +371,7 @@ final class Clipmap {
                                     threadsPerThreadgroup: MTLSize(width: min(16, Int(r.z)), height: min(16, Int(r.w)), depth: 1))
             }
             lo[j.level] = j.newLo
+            if Renderer.logTiming { print("coarse level \(j.level + 1) window \(j.newLo) (\(j.w)x\(j.h))") }
             job = nil
         }
     }
@@ -403,6 +409,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var sceneSize = (width: 0, height: 0)
     static let logTiming = ProcessInfo.processInfo.environment["VR_TIMING"] != nil
     static let fullCoarse = ProcessInfo.processInfo.environment["VR_COARSE_FULL"] != nil
+    // VR_CHUNKED: snapshots update the coarse rings a chunk per frame, as live.
+    static let chunkedCoarse = ProcessInfo.processInfo.environment["VR_CHUNKED"] != nil
     fileprivate var exposure: Double = 1.5
     // Holds the time of day fixed for snapshots, so exposure and the shot director see the rendered sun.
     var pinnedPhase: Double?
@@ -574,7 +582,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         frameIndex = (frameIndex + 1).truncatingRemainder(dividingBy: 4096)
         bakeClouds(into: cb, frame: &f)
         if Renderer.fullCoarse { clipmap.invalidate() }
-        clipmap.encode(into: cb, center: SIMD2(camera.position.x, camera.position.z), drain: world.synchronous)
+        clipmap.encode(into: cb, center: SIMD2(camera.position.x, camera.position.z), drain: world.synchronous && !Renderer.chunkedCoarse)
         let b = camera.basis
         prevCamera = (camera.position, b.fwd, b.right, b.up)
         let histIn = history[historyIndex], histOut = history[1 - historyIndex]
@@ -705,7 +713,7 @@ enum Snapshot {
             simulated = t
             var times: [Double] = []
             let env = ProcessInfo.processInfo.environment
-            let frames = env["VR_MOTION"] != nil ? 48 : 12
+            let frames = env["VR_MOTION"] != nil ? Int(env["VR_MOTION_FRAMES"] ?? "") ?? 48 : 12
             // VR_FRAMES=n also writes each of the last n frames, for measuring frame-to-frame crawl.
             let dump = min(Int(env["VR_FRAMES"] ?? "") ?? 0, frames)
             var bytes = [UInt8](repeating: 0, count: w * h * 4)
@@ -717,6 +725,7 @@ enum Snapshot {
                 cb.commit()
                 cb.waitUntilCompleted()
                 times.append((cb.gpuEndTime - cb.gpuStartTime) * 1000)
+                if Renderer.logTiming { print(String(format: "frame %d gpu %.2f ms%@", i, times.last!, r.clipmap.idle ? "" : " (coarse job pending)")) }
                 if i >= frames - dump {
                     tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
                     write(bytes: bytes, width: w, height: h, to: out.replacingOccurrences(of: ".png", with: "_f\(i - frames + dump).png"))
