@@ -23,7 +23,8 @@ struct Frame {
     float4 birds;      // x bird flock count
     float4 lod[5];     // per level: x morph band start, y handoff radius (the last level's is the world's edge), z morph end, w column width
     float4 fade;       // x fog fade start, y world radius, z level count, w ring centre's offset ahead of the camera (tests)
-    float4 shadow;     // x 1 when the shadow-height maps hold the current key light, y debug: brute-force shadow rays
+    float4 shadow;     // x 1 when the shadow-height maps hold the current key light (3 no shadows), y profiling flags, z 1 when
+                       // the horizon buffer is valid
 };
 
 constant float SEA = 19.85;
@@ -1652,6 +1653,52 @@ static Hit trace(thread const Terrain& tr, float3 o, float3 d, float tMax, int m
     return h;
 }
 
+// MARK: - Horizon
+
+// The terrain horizon around the camera: per azimuth bin, the steepest tangent of elevation any terrain reaches,
+// from the max mips (cells a few percent of the distance wide, so a bin also bounds its neighbours' gaps). A
+// primary ray above its bin's horizon (and the neighbours') can hit nothing and skips the trace.
+constant int HORIZON_BINS = 1024;
+
+kernel void bakeHorizon(device float* out [[buffer(0)]],
+                        constant Frame& f [[buffer(1)]],
+                        texture2d<float> hm [[texture(0)]],
+                        texture2d_array<float> coarse [[texture(1)]],
+                        uint gid [[thread_position_in_grid]]) {
+    if (gid >= uint(HORIZON_BINS)) return;
+    int levels = int(f.fade.z);
+    Terrain tr { hm, coarse, coarse, coarse, hm, f.lod, f.mapInfo.xy, f.mapInfo.z, levels,
+                 f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, 0.0 };
+    float a = (float(gid) + 0.5) * 6.2831853 / float(HORIZON_BINS);
+    float2 dir = float2(sin(a), cos(a));
+    float3 o = f.camPos.xyz;
+    float best = -1e9;
+    float d = 1.0;
+    while (d < tr.rmax) {
+        float2 X = o.xz + dir * d;
+        int k = levelAt(tr, length(X - tr.cam));
+        if (k >= levels) break;
+        float cs = tr.lod[k].w;
+        // Cell about 3% of the distance (and at least two columns) wide, from mip 1 so morph targets are bounded.
+        int m = clamp(int(ceil(log2(max(0.03 * d, 2.0 * cs) / cs))), 1, MAX_LEVEL);
+        float w = cs * float(1 << m);
+        int2 mc = (int2(floor(X / cs)) + levelOrigin(tr, k)) >> m;
+        float hmax = maxAt(tr, k, mc, m);
+        best = max(best, (hmax - o.y) / max(d - 0.75 * w, 0.5));
+        d += 0.5 * w;
+    }
+    out[gid] = best;
+}
+
+static inline bool aboveHorizon(device const float* hz, float3 d) {
+    float l = length(d.xz);
+    if (l < 1e-4) return d.y > 0.0;
+    float a = atan2(d.x, d.z);
+    int i = int(floor((a < 0.0 ? a + 6.2831853 : a) / 6.2831853 * float(HORIZON_BINS)));
+    float t = max(max(hz[(i + HORIZON_BINS - 1) % HORIZON_BINS], hz[i % HORIZON_BINS]), hz[(i + 1) % HORIZON_BINS]);
+    return d.y / l > t + 0.002;
+}
+
 // MARK: - Fullscreen
 
 struct VOut { float4 pos [[position]]; float2 uv; };
@@ -2360,6 +2407,7 @@ struct Ctx {
     texture2d<float> shadowNear;  // shadow-height maps, SHADOW_CELL and 4x that, toroidal
     texture2d<float> shadowFar;
     float shadowMode;             // 0 none, 1 maps, 2 brute-force rays (debug)
+    bool prof1;
 };
 
 // Baked fine cloud field where it covers q, else evaluated.
@@ -2428,7 +2476,7 @@ kernel void bakeShadowHeight(texture2d<float, access::write> out [[texture(0)]],
         S = max(S, hm - max(d - 0.7 * w, b.key.w) * tanE);
         if ((d - w) * tanE > 2100.0) break;
         d += step;
-        if (d > 8.0 * step) step *= 2.0;
+        if (d > 5.0 * step) step *= 2.0;
         if (d > 7000.0) break;
     }
     out.write(float4(S), uint2(t));
@@ -2484,7 +2532,8 @@ static float stairShadow(thread const Terrain& tr, int k, float2 p, float3 L, fl
     return lit / area;
 }
 
-static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows) {
+// shadows: 0 none, 1 traced near ray and maps, 2 maps only (reflections: ripples hide contact shadows).
+static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, int shadows) {
     float3 p = o + d * h.t;
     float3 n = float3(h.normal);
     int k = h.level;
@@ -2563,7 +2612,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     if (h.normal.y == 0 && built && drop <= 2.0 && !any(s.nrm != 0.0)) ndl = mix(ndl, min(ndl, max(x.L.key.y, 0.0)), x.L.night);
     float hiSun = smoothstep(0.15, 0.45, x.L.key.y) * (1.0 - x.L.night);
     float sh = 1.0;
-    if (shadows && ndl > 0.0 && x.L.shadows) {
+    if (shadows > 0 && ndl > 0.0 && x.L.shadows && x.shadowMode != 3.0) {
         // Keep the origin inside the hit voxel's footprint so boundary columns can't self-shadow.
         float3 so = p + n * 0.02;
         so.xz = clamp(so.xz, float2(h.voxel.xz) * cs + 0.002, float2(h.voxel.xz) * cs + (cs - 0.002));
@@ -2572,8 +2621,10 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
         // With the shadow-height maps the ray only reaches SHADOW_NEAR (contact and cliff shadows); the maps hold every
         // occluder beyond.
         bool maps = x.shadowMode == 1.0, brute = x.shadowMode == 2.0;
-        int shadowIters = brute ? 4000 : maps ? (x.quality > 0.5 ? 64 : 32) : (x.quality > 0.5 ? 120 : 48);
-        Hit sHit = trace(x.tr, so, x.L.key, brute ? 6000.0 : maps ? SHADOW_NEAR : 700.0, shadowIters, k);
+        int shadowIters = brute ? 4000 : maps ? (x.quality > 0.5 ? 48 : 32) : (x.quality > 0.5 ? 120 : 48);
+        Hit sHit;
+        sHit.hit = false; sHit.t = 1e9; sHit.iters = 0;
+        if (shadows == 1) sHit = trace(x.tr, so, x.L.key, brute ? 6000.0 : maps ? SHADOW_NEAR : 700.0, shadowIters, k);
         // A ray that runs out of steps is still threading terrain toward the sun: count it as blocked there, so a
         // shaded spot never comes out lit.
         sHit.hit = sHit.hit || sHit.iters >= shadowIters;
@@ -2643,7 +2694,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
 
 // In a morph band the shading also slides to the next level's, reaching it where the geometry does, so the switch
 // at the handoff circle is seamless in colour and light as well as in shape.
-static float3 shadeL(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows) {
+static float3 shadeL(thread const Ctx& x, float3 o, float3 d, Hit h, int shadows) {
     float3 p = o + d * h.t;
     float w = morphAt(x.tr, h.level, p.xz);
     // One shading per pixel: the next level's with probability w, varying per pixel and frame for TAA to blend.
@@ -2842,7 +2893,7 @@ static float4 skyWithClouds(thread const Ctx& x, float3 o, float3 d) {
     // Forward-scatter glow near the horizon, matching what applyFog adds to fogged land.
     bare += x.L.keyCol * min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night) * smoothstep(0.1, 0.0, d.y);
     float3 discs = skyColor(d, x.L, true, x.seed, x.time) - raw;
-    CloudSample c = cloudSheet(x, o, d);
+    CloudSample c = cloudSheet(x, o, d, x.prof1 ? 7000.0 : 1e9);
     // Clouds hide the stars, moon and sun behind them.
     // At night thin cloud veils the moon instead of hiding it.
     float3 sky = bare + discs * mix(1.0 - saturate(c.a * 3.0), (1.0 - c.a) * (1.0 - c.a), x.L.night);
@@ -3084,7 +3135,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
                               texture2d<float> shadowNear [[texture(9)]], texture2d<float> shadowFar [[texture(10)]],
                               device const Site* sites [[buffer(1)]], device const float4* lampPos [[buffer(2)]],
                               device const float4* lampState [[buffer(3)]], constant int4* refs [[buffer(4)]],
-                              device const float4* birds [[buffer(5)]]) {
+                              device const float4* birds [[buffer(5)]], device const float* horizon [[buffer(6)]]) {
     float2 ndc = in.uv * 2.0 - 1.0;
     ndc.y = -ndc.y;
     ndc += f.jitter.xy;
@@ -3095,12 +3146,13 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     int levels = int(f.fade.z);
     float gmax = f.misc.y;
     for (int k = 1; k < levels; k++) gmax = max(gmax, coarse.read(uint2(0), uint(k - 1), coarse.get_num_mip_levels() - 1).r + 1.0);
+    if (int(f.shadow.y) & 2) gmax = min(gmax, 260.0);
     Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax };
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
             2.0 * tanH * f.resolution.w, f.misc.w, makeLight(f.sunDir.xyz),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
             cloudTex, f.cloud.xyz, st, sites, lampPos, lampState, lightMap, lightDir, f.lights, shadowNear, shadowFar,
-            f.misc2.z == 14 ? 2.0 : f.shadow.x };
+            f.misc2.z == 14 ? 2.0 : f.shadow.x, (int(f.shadow.y) & 1) != 0 };
 
     // Debug map view: 11 level 4 (+-10k tall, +-16k wide), 12 level 2, 13 level 1; hillshade, height ramp, 100-voxel
     // contours, 2k grid, yellow 10k lines, magenta world origin, red camera.
@@ -3132,7 +3184,9 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         return float4(c * c, 1);
     }
     const int primaryIters = 520;
-    Hit h = trace(x.tr, o, d, x.tr.rmax, primaryIters, 0);
+    Hit h;
+    h.hit = false; h.t = x.tr.rmax; h.iters = 0; h.level = 0;
+    if (f.shadow.z == 0.0 || !aboveHorizon(horizon, d)) h = trace(x.tr, o, d, x.tr.rmax, primaryIters, 0);
     if (f.misc2.z == 1) return float4(float(h.iters) / float(primaryIters), h.hit ? 0.3 : 0.0, h.iters >= primaryIters - 1 ? 1 : 0, 1);
     if (f.misc2.z == 5) return float4(skyColor(d, x.L, false, x.seed, x.time), 1);
     if (f.misc2.z == 6) return float4(skyWithClouds(x, o, d).rgb, 1);
@@ -3181,7 +3235,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         if (x.quality > 0.5) {
             Hit rh = trace(x.tr, wp + float3(0, 0.02, 0), r, x.tr.rmax, 260, wl);
             // Shadowed: unshadowed, a sun-facing wall in the shade of the far rim mirrors as a pale streak.
-            refl = rh.hit ? applyFog(x, shadeL(x, wp, r, rh, true), wp, r, rh.t)
+            refl = rh.hit ? applyFog(x, shadeL(x, wp, r, rh, x.shadowMode == 1.0 ? 2 : 1), wp, r, rh.t)
                            : softCloudSky(x, wp, r);
             if (nFlocks > 0) {
                 float tB = rh.hit ? rh.t : 3000.0;
@@ -3210,7 +3264,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             float ky = max(x.L.key.y, 0.0);
             xr.L.key = normalize(mix(x.L.key, kr, lagoon));
             xr.L.keyCol *= mix(1.0, ky / kr.y * (0.98 - 0.98 * pow(1.0 - ky, 5.0)), lagoon);
-            float3 lit = bedShows > 0.003 ? shadeL(xr, o, d, h, false) : float3(0);
+            float3 lit = bedShows > 0.003 ? shadeL(xr, o, d, h, 0) : float3(0);
             under = mix(deep, lit * mix(float3(0.55, 0.8, 0.85), float3(0.9, 0.95, 0.97), salt), exp(-path * mix(0.35, 0.08, salt)));
             if (lagoon > 0.0) {
                 // Clear water over sand: red is absorbed first, so the bed turns aquamarine, then teal, then blue.
@@ -3275,7 +3329,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         }
         tSurf = tw;
     } else if (h.hit) {
-        col = shadeL(x, o, d, h, true);
+        col = shadeL(x, o, d, h, 1);
         tSurf = h.t;
         // Debug: flat level colours, morph bands white.
         if (f.misc2.z == 9) {

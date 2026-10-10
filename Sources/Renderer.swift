@@ -587,13 +587,16 @@ final class Renderer: NSObject, MTKViewDelegate {
     private let shadowPipeline: MTLComputePipelineState
     private let shadowMaps: [MTLTexture]
     static let shadowN = 1024, shadowCell = 8.0
-    private static let shadowBands = [16, 32]
+    private static let shadowBands = [64, 128]
     private var shadowBand = [0, 0]
     private var shadowValid = false
     private var shadowFrom: (cam: SIMD2<Double>, key: SIMD3<Double>)?
     // Far heights for the camera: level 3's max mip 2 (32-voxel cells, toroidal, about +-7.7k around the camera),
     // read back every few frames; conservative, being a max.
     private let farTex: MTLTexture
+    // The terrain horizon around the camera (bakeHorizon): sky pixels above it skip the trace.
+    private let horizonPipeline: MTLComputePipelineState
+    private let horizonBuf: MTLBuffer
     private var farHeights: [Float16] = []
     private var farCentre = SIMD2<Int>(Int.min, Int.min)
     private var farAge = 0
@@ -644,6 +647,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var sceneSize = (width: 0, height: 0)
     private(set) var aspect: Float = 16.0 / 10.0
     static let logTiming = ProcessInfo.processInfo.environment["VR_TIMING"] != nil
+    static let profile = ProcessInfo.processInfo.environment["VR_PROFILE"] ?? ""
     static let fullCoarse = ProcessInfo.processInfo.environment["VR_COARSE_FULL"] != nil
     // VR_CHUNKED: snapshots update the coarse rings a chunk per frame, as live.
     static let chunkedCoarse = ProcessInfo.processInfo.environment["VR_CHUNKED"] != nil
@@ -678,6 +682,8 @@ final class Renderer: NSObject, MTKViewDelegate {
               let pp = try? device.makeRenderPipelineState(descriptor: post),
               let cf = lib.makeFunction(name: "cloudField").flatMap({ try? device.makeComputePipelineState(function: $0) }),
               let shP = lib.makeFunction(name: "bakeShadowHeight").flatMap({ try? device.makeComputePipelineState(function: $0) }),
+              let hzP = lib.makeFunction(name: "bakeHorizon").flatMap({ try? device.makeComputePipelineState(function: $0) }),
+              let hzB = device.makeBuffer(length: 1024 * 4, options: .storageModePrivate),
               let lampP = lib.makeFunction(name: "updateLamps").flatMap({ try? device.makeComputePipelineState(function: $0) }),
               let lightP = lib.makeFunction(name: "bakeLights").flatMap({ try? device.makeComputePipelineState(function: $0) }),
               let lpos = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.maxLamps * 16, options: .storageModePrivate),
@@ -691,6 +697,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         taaPipeline = tp
         cloudPipeline = cf
         shadowPipeline = shP
+        horizonPipeline = hzP
+        horizonBuf = hzB
         let sd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: Renderer.shadowN, height: Renderer.shadowN, mipmapped: false)
         sd.usage = [.shaderRead, .shaderWrite]
         sd.storageMode = .private
@@ -899,6 +907,16 @@ final class Renderer: NSObject, MTKViewDelegate {
                        active: activeLevels)
         bakeLamps(into: cb, frame: &f)
         bakeShadows(into: cb, frame: &f)
+        if Renderer.profile != "nohorizon", let enc = cb.makeComputeCommandEncoder() {
+            f.shadow.z = 1
+            enc.setComputePipelineState(horizonPipeline)
+            enc.setBuffer(horizonBuf, offset: 0, index: 0)
+            enc.setBytes(&f, length: MemoryLayout<Frame>.stride, index: 1)
+            enc.setTexture(world.heightTex, index: 0)
+            enc.setTexture(clipmap.height, index: 1)
+            enc.dispatchThreads(MTLSize(width: 1024, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
+            enc.endEncoding()
+        }
         farAge += 1
         if farAge >= 20 { farAge = 0; encodeFar(into: cb, wait: false) }
         birdSlots.wait()
@@ -919,6 +937,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setRenderPipelineState(scenePipeline)
             enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
             enc.setFragmentBuffer(birdBuf, offset: 0, index: 5)
+            enc.setFragmentBuffer(horizonBuf, offset: 0, index: 6)
             enc.setFragmentTexture(world.heightTex, index: 0)
             enc.setFragmentTexture(cloudTex, index: 1)
             enc.setFragmentTexture(world.climateTex, index: 2)
@@ -1077,6 +1096,11 @@ final class Renderer: NSObject, MTKViewDelegate {
     private func bakeShadows(into cb: MTLCommandBuffer, frame f: inout Frame) {
         let (key, casts) = Renderer.keyLight(clock.sunDirection)
         let levels = (1...Clipmap.levels).prefix { clipmap.ready($0) }.count
+        // VR_PROFILE (tests): "noshadow" drops terrain shadows, "nobake" keeps the maps but skips their rebaking.
+        f.shadow.y = Renderer.profile == "nearclouds" ? 1 : Renderer.profile == "lowmax" ? 2 : 0
+        if Renderer.profile == "noshadow" { f.shadow.x = 3; return }
+        if Renderer.profile == "oldshadow" { f.shadow.x = 0; return }
+        if Renderer.profile == "nobake" && shadowValid { f.shadow.x = 1; return }
         guard casts, levels > 0, let enc = cb.makeComputeCommandEncoder() else { shadowValid = false; f.shadow.x = 0; return }
         let cam = SIMD2(camera.position.x, camera.position.z)
         let jumped = shadowFrom.map { simd_length($0.cam - cam) > 300 || simd_dot($0.key, key) < 0.9998 } ?? true
