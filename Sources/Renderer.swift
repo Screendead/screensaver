@@ -344,8 +344,10 @@ final class Renderer: NSObject, MTKViewDelegate {
             f.prevRight = SIMD4(SIMD3<Float>(pc.right), 0)
             f.prevUp = SIMD4(SIMD3<Float>(pc.up), 0)
         }
-        // Halton(2,3) subpixel jitter, accumulated by the temporal resolve.
-        let k = Int(frameIndex) % 8 + 1
+        // Halton(2,3) subpixel jitter, accumulated by the temporal resolve; upsampling needs more phases to
+        // cover every output pixel.
+        let phases = min(64, Int((8 / min(renderScale * renderScale, 1)).rounded(.up)))
+        let k = Int(frameIndex) % phases + 1
         func halton(_ i: Int, _ b: Int) -> Double { var f = 1.0, r = 0.0, i = i; while i > 0 { f /= Double(b); r += f * Double(i % b); i /= b }; return r }
         f.jitter = SIMD4(Float((halton(k, 2) - 0.5) * 2 / size.width), Float((halton(k, 3) - 0.5) * 2 / size.height), 0, 0)
         return f
@@ -353,11 +355,14 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     func encode(into cb: MTLCommandBuffer, output: MTLTexture, outputSize: CGSize) {
         let w = max(16, Int(outputSize.width * renderScale)), h = max(16, Int(outputSize.height * renderScale))
-        if sceneTex?.width != w || sceneTex?.height != h {
+        let ow = Int(outputSize.width), oh = Int(outputSize.height)
+        if sceneTex?.width != w || sceneTex?.height != h || history.first?.width != ow || history.first?.height != oh {
             let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: w, height: h, mipmapped: false)
             td.usage = [.renderTarget, .shaderRead]
             td.storageMode = .private
             sceneTex = device.makeTexture(descriptor: td)
+            td.width = ow
+            td.height = oh
             history = (0..<2).compactMap { _ in device.makeTexture(descriptor: td) }
             prevCamera = nil
         }
@@ -472,11 +477,10 @@ enum Snapshot {
             for i in 0..<frames {
                 if env["VR_MOTION"] != nil { r.simulate(1.0 / 60) }
                 let cb = r.queue.makeCommandBuffer()!
-                let t0 = CACurrentMediaTime()
                 r.encode(into: cb, output: tex, outputSize: CGSize(width: w, height: h))
                 cb.commit()
                 cb.waitUntilCompleted()
-                times.append((CACurrentMediaTime() - t0) * 1000)
+                times.append((cb.gpuEndTime - cb.gpuStartTime) * 1000)
                 if i >= frames - dump {
                     tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
                     write(bytes: bytes, width: w, height: h, to: out.replacingOccurrences(of: ".png", with: "_f\(i - frames + dump).png"))

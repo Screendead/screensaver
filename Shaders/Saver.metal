@@ -1077,7 +1077,7 @@ static inline float3 itmap(float3 v) { return v / max(1.0 - max(max(v.r, v.g), v
 
 // 9-tap Catmull-Rom via bilinear taps: bilinear history fetches blur edges a little more every frame the
 // camera moves, which TAA then accumulates.
-static float3 sampleCatmullRom(texture2d<float> t, sampler s, float2 uv) {
+static float4 sampleCatmullRom(texture2d<float> t, sampler s, float2 uv) {
     float2 size = float2(t.get_width(), t.get_height());
     float2 sp = uv * size;
     float2 tc = floor(sp - 0.5) + 0.5;
@@ -1088,50 +1088,76 @@ static float3 sampleCatmullRom(texture2d<float> t, sampler s, float2 uv) {
     float2 w3 = f * f * (-0.5 + 0.5 * f);
     float2 w12 = w1 + w2;
     float2 t0 = (tc - 1.0) / size, t3 = (tc + 2.0) / size, t12 = (tc + w2 / w12) / size;
-    float3 c = 0;
-    c += t.sample(s, float2(t0.x, t0.y)).rgb * w0.x * w0.y;
-    c += t.sample(s, float2(t12.x, t0.y)).rgb * w12.x * w0.y;
-    c += t.sample(s, float2(t3.x, t0.y)).rgb * w3.x * w0.y;
-    c += t.sample(s, float2(t0.x, t12.y)).rgb * w0.x * w12.y;
-    c += t.sample(s, float2(t12.x, t12.y)).rgb * w12.x * w12.y;
-    c += t.sample(s, float2(t3.x, t12.y)).rgb * w3.x * w12.y;
-    c += t.sample(s, float2(t0.x, t3.y)).rgb * w0.x * w3.y;
-    c += t.sample(s, float2(t12.x, t3.y)).rgb * w12.x * w3.y;
-    c += t.sample(s, float2(t3.x, t3.y)).rgb * w3.x * w3.y;
+    float4 c = 0;
+    c += t.sample(s, float2(t0.x, t0.y)) * w0.x * w0.y;
+    c += t.sample(s, float2(t12.x, t0.y)) * w12.x * w0.y;
+    c += t.sample(s, float2(t3.x, t0.y)) * w3.x * w0.y;
+    c += t.sample(s, float2(t0.x, t12.y)) * w0.x * w12.y;
+    c += t.sample(s, float2(t12.x, t12.y)) * w12.x * w12.y;
+    c += t.sample(s, float2(t3.x, t12.y)) * w3.x * w12.y;
+    c += t.sample(s, float2(t0.x, t3.y)) * w0.x * w3.y;
+    c += t.sample(s, float2(t12.x, t3.y)) * w12.x * w3.y;
+    c += t.sample(s, float2(t3.x, t3.y)) * w3.x * w3.y;
     return max(c, 0.0);
 }
 
-// Temporal resolve: reproject history through the previous camera (the world is static), clamp it to
-// the current 3x3 neighbourhood, and blend. Alpha carries hit distance.
+// Temporal resolve, upsampling: runs at output resolution over a jittered scene that may be smaller. Each
+// scene sample lands at its jittered position and is splatted by distance in output pixels, so detail finer
+// than a scene pixel builds up over frames. History is reprojected through the previous camera (the world
+// is static) and clamped to the scene's 3x3 neighbourhood. Scene alpha carries hit distance; history alpha
+// carries the accumulated sample weight.
 fragment float4 taaFragment(VOut in [[stage_in]], texture2d<float> cur [[texture(0)]],
                             texture2d<float> hist [[texture(1)]], constant Frame& f [[buffer(0)]]) {
     constexpr sampler lin(filter::linear, address::clamp_to_edge);
-    int2 px = int2(in.pos.xy);
-    float4 c = cur.read(uint2(px));
-    if (f.prevPos.w < 0.5 || f.misc2.z == 7) return c;
-    float3 mn = tmap(c.rgb), mx = mn;
-    int2 lim = int2(cur.get_width() - 1, cur.get_height() - 1);
+    float2 outSize = float2(hist.get_width(), hist.get_height());
+    float2 inSize = float2(cur.get_width(), cur.get_height());
+    float2 toOut = outSize / inSize;
+    float2 jit = float2(f.jitter.x, -f.jitter.y) * 0.5 * inSize;
+    float2 sp = in.pos.xy / toOut - jit;
+    int2 base = int2(floor(sp));
+    int2 lim = int2(inSize) - 1;
+    float3 sum = 0, mn = 1e9, mx = -1e9;
+    float wsum = 0, depth = 1e9;
     for (int j = -1; j <= 1; j++)
         for (int i = -1; i <= 1; i++) {
-            float3 v = tmap(cur.read(uint2(clamp(px + int2(i, j), int2(0), lim))).rgb);
-            mn = min(mn, v);
-            mx = max(mx, v);
+            int2 k = clamp(base + int2(i, j), int2(0), lim);
+            float4 v = cur.read(uint2(k));
+            float2 dpx = (float2(base + int2(i, j)) + 0.5 - sp) * toOut;
+            float w = exp(-2.29 * dot(dpx, dpx));
+            float3 t = tmap(v.rgb);
+            sum += t * w;
+            wsum += w;
+            mn = min(mn, t);
+            mx = max(mx, t);
+            depth = min(depth, v.a);
         }
+    float3 c = sum / wsum;
+    float4 fresh = float4(itmap(c), wsum);
+    if (f.prevPos.w < 0.5 || f.misc2.z == 7) {
+        if (all(toOut == 1.0)) return float4(cur.read(uint2(clamp(int2(in.pos.xy), int2(0), lim))).rgb, wsum);
+        return fresh;
+    }
 
     float2 ndc = in.uv * 2.0 - 1.0;
     ndc.y = -ndc.y;
     float tanH = f.camPos.w;
     float3 d = normalize(f.camFwd.xyz + f.camRight.xyz * ndc.x * tanH * f.camFwd.w + f.camUp.xyz * ndc.y * tanH);
-    float3 wp = f.camPos.xyz + d * min(c.a, 1e5);
+    float3 wp = f.camPos.xyz + d * min(depth, 1e5);
     float3 v = wp - f.prevPos.xyz;
     float z = dot(v, f.prevFwd.xyz);
-    if (z <= 0.01) return c;
+    if (z <= 0.01) return fresh;
     float2 pn = float2(dot(v, f.prevRight.xyz) / (z * tanH * f.camFwd.w), dot(v, f.prevUp.xyz) / (z * tanH));
     float2 puv = float2(pn.x * 0.5 + 0.5, 0.5 - pn.y * 0.5);
-    if (any(puv < 0.0) || any(puv > 1.0)) return c;
+    if (any(puv < 0.0) || any(puv > 1.0)) return fresh;
     // Clamp and blend in a compressed space so sub-pixel EDR spikes can't smear or flicker.
-    float3 h = clamp(tmap(sampleCatmullRom(hist, lin, puv)), mn, mx);
-    return float4(itmap(mix(h, tmap(c.rgb), 0.12)), c.a);
+    float4 hs = sampleCatmullRom(hist, lin, puv);
+    float3 h = tmap(hs.rgb);
+    float3 hc = clamp(h, mn, mx);
+    // Capped so the blend never falls below 0.12 of a full-resolution sample's weight; a history the clamp
+    // had to move is partly stale, so it counts for less.
+    float hw = min(hs.a, 10.0) * (1.0 - smoothstep(0.02, 0.15, length(hc - h)) * 0.75);
+    float a = wsum / (wsum + hw);
+    return float4(itmap(mix(hc, c, a)), hw + wsum);
 }
 
 static inline float3 acesFit(float3 x) {
