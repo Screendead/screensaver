@@ -416,13 +416,25 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
     dst.write(float4(float(hi), G, floating ? leaf : G, leaf), gid);
 }
 
+// Height a column is solid from the ground up: under an arch's gap, a canopy or a building's openings only the part
+// below them counts.
+static inline float solidFloor(float4 c) {
+    if (c.a > 0.0) return c.g;
+    if (c.a < 0.0 && -c.a < c.r) return -c.a;
+    return c.b > c.g ? c.g : c.r;
+}
+
+// r: the highest column below (the tracer's skip levels); g: the lowest solid floor below (the CPU's sightline test).
 kernel void reduceMax(texture2d<float, access::read> src [[texture(0)]],
                       texture2d<float, access::write> dst [[texture(1)]],
+                      constant int& fromColumns [[buffer(0)]],
                       uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
     uint2 s = gid * 2;
-    float m = max(max(src.read(s).r, src.read(s + uint2(1, 0)).r), max(src.read(s + uint2(0, 1)).r, src.read(s + uint2(1, 1)).r));
-    dst.write(float4(m, 0, 0, 0), gid);
+    float4 a = src.read(s), b = src.read(s + uint2(1, 0)), c = src.read(s + uint2(0, 1)), d = src.read(s + uint2(1, 1));
+    float m = max(max(a.r, b.r), max(c.r, d.r));
+    float lo = fromColumns != 0 ? min(min(solidFloor(a), solidFloor(b)), min(solidFloor(c), solidFloor(d))) : min(min(a.g, b.g), min(c.g, d.g));
+    dst.write(float4(m, lo, 0, 0), gid);
 }
 
 // MARK: - Structures
