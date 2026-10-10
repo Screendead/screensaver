@@ -241,9 +241,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     let world: World
     let camera: FlightCamera
     let wildlife: Wildlife
-    // Ring of bird buffers: up to three frames are in flight.
+    // Ring of bird buffers, one per frame in flight; the semaphore keeps the CPU from overwriting one the GPU reads.
     private var birdBuffers: [MTLBuffer] = []
     private var birdIndex = 0
+    private let birdSlots = DispatchSemaphore(value: 3)
     var clock = SkyClock()
     private(set) var battery: Bool
     var timeScale: Double = 1
@@ -405,6 +406,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         var f = makeFrame(size: CGSize(width: w, height: h))
         frameIndex = (frameIndex + 1).truncatingRemainder(dividingBy: 4096)
         bakeClouds(into: cb, frame: &f)
+        birdSlots.wait()
+        cb.addCompletedHandler { [birdSlots] _ in birdSlots.signal() }
         let birdBuf = birdBuffers[birdIndex]
         birdIndex = (birdIndex + 1) % birdBuffers.count
         f.birds.x = Float(wildlife.upload(into: birdBuf, origin: SIMD3(Double(world.origin.x), 0, Double(world.origin.y))))
