@@ -117,8 +117,18 @@ static inline Climate climate(float2 w, uint seed) {
     return c;
 }
 
+// Painted hills: the hot, semi-dry belt between grassland and desert.
+static inline float paintedAmount(Climate c) {
+    return smoothstep(0.45, 0.6, c.temp) * smoothstep(0.30, 0.42, c.moist) * smoothstep(0.66, 0.54, c.moist);
+}
+
 static inline float desertAmount(Climate c) {
-    return smoothstep(0.45, 0.68, c.temp) * smoothstep(0.7, 0.4, c.moist);
+    return smoothstep(0.45, 0.68, c.temp) * smoothstep(0.7, 0.4, c.moist) * (1.0 - paintedAmount(c));
+}
+
+// Level of the flat alluvial floors between painted hills.
+static inline float paintedFloor(float2 p, uint seed) {
+    return SEA + 3.0 + 8.0 * saturate(perlin2(p / 700.0, seed + 110u) * 0.7 + 0.5);
 }
 
 // Column = (height, gapLo, gapHi): solid where y < height, except inside [gapLo, gapHi).
@@ -141,12 +151,23 @@ static inline float3 terrainColumn(int2 w, uint seed) {
     h = (lv + smoothstep(mix(0.55, 0.9, hi), 1.0, hn2 - lv)) * td;
 
     // Canyon country: in hot, dry regions the land steps into flat-topped mesas with sheer risers.
-    float canyon = smoothstep(0.35, 0.7, desertAmount(climate(float2(w), seed)));
+    Climate cl = climate(float2(w), seed);
+    float canyon = smoothstep(0.35, 0.7, desertAmount(cl));
     float tier = 13.0 + 4.0 * perlin2(p / 700.0, seed + 7);
     float hn = h / tier;
     float level = floor(hn);
     float mesa = (level + smoothstep(0.62, 0.9, hn - level)) * tier;
     h = mix(h, mesa, canyon);
+
+    // Painted hills: rounded mounds from billowed Perlin noise, untreaded so every voxel step shows a bed,
+    // rising from flat floors where the billow's creases are filled in.
+    float painted = paintedAmount(cl);
+    if (painted > 0.0) {
+        float b = abs(fbm2((p + warp * 0.3) / 160.0, 3, seed + 111u));
+        float amp = mix(22.0, 52.0, saturate(perlin2(p / 600.0, seed + 112u) * 0.8 + 0.5));
+        float mound = smoothstep(0.07, 0.5, b);
+        h = mix(h, paintedFloor(p, seed) + amp * mound * (2.0 - mound) * 0.75, smoothstep(0.0, 0.6, painted));
+    }
 
     // Long meandering valleys with flat water floors: the camera follows these.
     float river = abs(fbm2((p + warp * 0.6) / 1400.0, 3, seed + 6));
@@ -208,13 +229,18 @@ static inline float groveDensity(float2 w, float g, uint seed) {
     float2 p = w + seedOffset(seed);
     Climate c = climate(w, seed);
     float grove = fbm2(p / 300.0, 3, seed + 90u) + 0.3 * perlin2(p / 70.0, seed + 91u);
-    float open = 1.0 - smoothstep(0.2, 0.5, desertAmount(c));
+    float painted = paintedAmount(c);
+    float open = (1.0 - smoothstep(0.2, 0.5, desertAmount(c))) * (1.0 - smoothstep(0.1, 0.4, painted));
     float wet = smoothstep(0.25, 0.6, c.moist) * open;
     float snowline = mix(160.0, 92.0, smoothstep(0.42, 0.18, c.temp));
     float band = smoothstep(SEA + 2.0, SEA + 6.0, g) * smoothstep(snowline - 4.0, snowline - 30.0, g);
     float dense = smoothstep(0.22, 0.44, grove + 0.35 * (wet - 0.5));
+    // Sage scrub on the painted hills' valley floors.
+    float fl = paintedFloor(p, seed);
+    float scrub = painted * smoothstep(fl + 3.0, fl + 0.5, g)
+                * smoothstep(-0.3, 0.3, perlin2(p / 60.0, seed + 113u));
     // Lone trees dot even dry grassland; groves need moisture.
-    return (0.02 * open + 0.32 * dense * wet) * band;
+    return (0.02 * open + 0.32 * dense * wet + 0.18 * scrub) * band;
 }
 
 struct Tree { bool ok; int2 c; float g; int lo; int top; int kind; };
@@ -238,7 +264,8 @@ static Tree treeInCell(texture2d<float, access::read> src, int2 cell, int2 origi
     Climate c = climate(w, seed);
     // 0 shrub, 1 small round, 2 round, 3 conifer.
     float dense = groveDensity(w, t.g, seed);
-    if (hashf(r) < coniferAmount(c)) t.kind = 3;
+    if (paintedAmount(c) > 0.3) t.kind = 0;
+    else if (hashf(r) < coniferAmount(c)) t.kind = 3;
     else if (dense < 0.15) t.kind = int(hashf(pcg(r)) * 3.0);
     else t.kind = hashf(pcg(r)) < 0.3 ? 1 : 2;
     int g = int(t.g);
@@ -616,6 +643,24 @@ static inline float3 strataTone(float y, float2 w, uint seed, float desertAmt, f
     return base * mix(float3(1.0), tint, bedFade) * lum;
 }
 
+// Painted-hill beds: 1D Perlin noise in a gently dipping height picks each voxel's place on a ramp of
+// charcoal, rust, ochre, cream and lavender-grey; bed edges soften with the pixel footprint fp.
+// `lat` is the column's (dip offset, lateral facies shift) from paintedLateral.
+static inline float2 paintedLateral(float2 w, uint seed) {
+    return float2(14.0 * perlin2(w / 520.0, seed + 114u) + 1.5 * perlin2(w / 90.0, seed + 115u), 0.35 * perlin2(w / 900.0, seed + 118u));
+}
+
+static inline float3 paintedTone(float y, float2 lat, uint seed, float fp) {
+    float yd = y + lat.x;
+    float v = perlin2(float2(yd / 11.0, 0.37), seed + 116u) + 0.3 * perlin2(float2(yd / 4.0, 0.71), seed + 117u) + lat.y;
+    float t = saturate(v * 0.75 + 0.5) * 4.0;
+    float i = min(floor(t), 3.0), f = t - i;
+    const float3 pal[5] = { float3(0.21, 0.19, 0.18), float3(0.43, 0.24, 0.17), float3(0.53, 0.41, 0.26),
+                            float3(0.60, 0.54, 0.45), float3(0.45, 0.40, 0.40) };
+    float e = clamp(fp * 0.5, 0.12, 0.5);
+    return mix(pal[int(i)], pal[int(i) + 1], smoothstep(0.5 - e, 0.5 + e, f));
+}
+
 // Wind ripples on sand. Crests are level sets of a Perlin-warped wind field, so they bend and pinch across a dune,
 // and creep slowly downwind. Returns (albedo offset, slope along the wind) with amplitude already applied.
 static inline float3 sandRipples(int2 v, float2 uv, float2 w, float fp, float time, uint seed) {
@@ -663,6 +708,7 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
     s.riser = n.y == 0 ? H - nb : 0.0;
     Climate c = climate(w, seed);
     float desert = desertAmount(c);
+    float painted = smoothstep(0.0, 0.6, paintedAmount(c));
     float cold = smoothstep(0.42, 0.18, c.temp);
     bool underGap = !tree && col.z > col.y && float(v.y) < col.z;
 
@@ -686,6 +732,16 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
     float bandK = fract(floor(H / 6.0) * 0.618034);
     tread *= mix(float3(1.12, 1.04, 0.90), float3(0.90, 0.98, 1.10), bandK);
     s.tread = tread;
+    if (painted > 0.0) {
+        float2 p = w + seedOffset(seed);
+        // Alluvium on the valley floors: pale, dusty sage.
+        float fl = paintedFloor(p, seed);
+        float floorK = smoothstep(fl + 2.0, fl + 0.5, H);
+        float2 lat = paintedLateral(w, seed);
+        float3 bed = mix(paintedTone(H - 1.0, lat, seed, fpA), float3(0.44, 0.40, 0.28), floorK);
+        tread = mix(tread, bed, painted);
+        stone = mix(stone, paintedTone(float(v.y), lat, seed, fpA), painted);
+    }
     int drops = int(H - hx0 >= 3.0) + int(H - hx1 >= 3.0) + int(H - hz0 >= 3.0) + int(H - hz1 >= 3.0);
     bool beach = H <= SEA + 1.2;
     if (beach) tread = sand;
@@ -699,6 +755,7 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
         else if (drops >= 2) s.albedo = stone;
         else s.albedo = tread;
         float sandy = float(v.y + 1) > snowline || (drops >= 2 && !beach) ? 0.0 : beach ? 1.0 : smoothstep(0.35, 0.7, desert);
+        if (painted > 0.0 && !beach) s.albedo = mix(s.albedo, tread, painted);
         if (sandy > 0.0) {
             float3 rp = sandRipples(v.xz + mapOrigin, uv, w, fpA, time, seed) * sandy;
             s.albedo *= 1.0 + rp.x;
@@ -706,6 +763,7 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
         }
     } else if (n.y == 0 && !underGap) {
         if (beach) s.albedo = sand * 0.85;
+        else if (painted > 0.5) s.albedo = stone * 0.95;
         else if (slope < 4.0 && !snowy) s.albedo = mix(tread, stone, 0.5) * 0.9;
         else s.albedo = snowy ? mix(stone, float3(0.63, 0.66, 0.71), 0.45) : stone;
     } else {
@@ -717,6 +775,7 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
         float k = saturate(perlin2(w / 23.0, seed + 93u) * 0.9 + 0.5);
         float3 leaf = mix(float3(0.035, 0.07, 0.035), float3(0.065, 0.09, 0.04), k);
         leaf = mix(leaf, float3(0.025, 0.055, 0.045), conifer);
+        leaf = mix(leaf, float3(0.11, 0.125, 0.09), painted);
         // A 16x16 leaf texture: two-tone texels, faded out once a texel nears a pixel.
         int2 tx = int2(floor(uv * 16.0));
         int3 tk = n.y != 0 ? int3(v.x * 16 + tx.x, v.y * 2 + max(n.y, 0), v.z * 16 + tx.y)
