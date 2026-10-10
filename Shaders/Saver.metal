@@ -707,7 +707,7 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
 
     const float thresh[7] = { 1, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3 };
     // Chance a type is built where it is the best fit; these set the density of each type.
-    const float accept[7] = { 0, 0.35, 1.0, 0.8, 0.22, 0.18, 0.16 };
+    const float accept[7] = { 0, 0.25, 0.7, 0.55, 0.22, 0.14, 0.16 };
     float best[7] = { 0, 0, 0, 0, 0, 0, 0 };
     int2 at[7];
     // Only cells whose every candidate, survey and part (64 out) reads lie inside the map, so a cell decides the

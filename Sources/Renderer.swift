@@ -395,6 +395,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         renderScale = battery ? 0.7 : 1.0
         super.init()
         camera.heightAt = { [unowned world] x, z in world.height(x: x, z: z) }
+        camera.sitesAt = { [unowned world] in world.sites }
         world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
         camera.placeAtStart()
     }

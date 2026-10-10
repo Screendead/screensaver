@@ -31,6 +31,11 @@ final class FlightCamera {
 
     // Height lookup in world coords; returns nil outside the loaded map.
     var heightAt: (Double, Double) -> Double? = { _, _ in nil }
+    // Structure sites on the loaded map.
+    var sitesAt: () -> [SiteInfo] = { [] }
+    // Sites a shot was built around, and when; each rests for a while so one place can't own the flight.
+    private var framedAt: [UInt32: Double] = [:]
+    private var focus: SIMD2<Double>?
 
     init(seed: UInt32) {
         let s = Double(seed % 100_000)
@@ -79,7 +84,29 @@ final class FlightCamera {
     // height close ahead would fill the frame with a wall. Under a high sun close slopes read as blocks, so
     // the shot looks out: open sightlines and water count for more, and near land climbing into the lower
     // half of the frame (bottom edge 0.436 rad under the pitch) costs.
-    private func shotScore(_ heading: Double, lightYaw: Double, lightW: Double, noon: Double) -> Double {
+    // Interest of the sites a heading frames: by day the old stones and the villages, at night only what is lit.
+    // Capped, so a site adds to a shot but never outvotes the land and the light.
+    private func siteInterest(_ heading: Double, night: Double) -> (Double, SiteInfo?) {
+        let p = SIMD2(position.x, position.z)
+        var sum = 0.0, best = 0.0
+        var top: SiteInfo?
+        for site in sitesAt() {
+            if let t = framedAt[site.id], time - t < 240 { continue }
+            let v = site.pos - p
+            let d = simd_length(v)
+            guard d > 90, d < 450 else { continue }
+            if abs(FlightCamera.angleDiff(atan2(v.x, v.y), heading)) > 0.35 { continue }
+            let day: [SiteInfo.Kind: Double] = [.henge: 1, .ruins: 0.7, .hamlet: 0.7, .jetty: 0.5, .camp: 0.3, .cairn: 0.2]
+            let lit: [SiteInfo.Kind: Double] = [.hamlet: 0.9, .camp: 0.8, .jetty: 0.7, .henge: 0.2]
+            let w = (day[site.kind] ?? 0) * (1 - night) + (lit[site.kind] ?? 0) * night
+            let f = w * min(max((d - 90) / 60, 0), 1) * (1 - min(max((d - 300) / 150, 0), 1))
+            sum += f
+            if f > best { best = f; top = site }
+        }
+        return (min(0.5 * sum, 0.35 + 0.15 * night), top)
+    }
+
+    private func shotScore(_ heading: Double, lightYaw: Double, lightW: Double, noon: Double, night: Double = 0) -> Double {
         let p = SIMD2(position.x, position.z)
         var rise = -Double.infinity, nearAngle = -Double.infinity
         for dist in stride(from: 30.0, through: 100.0, by: 14.0) {
@@ -114,7 +141,7 @@ final class FlightCamera {
         let water = wf < 0.1 ? 0 : (wf < 0.45 ? pool : pool - 2.0 * (wf - 0.45))
         let light = lightW * max(0, cos(heading - lightYaw)) * 0.8
         let turn = -0.25 * abs(FlightCamera.angleDiff(heading, yaw))
-        return relief + water + light + turn + wall + fill + open
+        return relief + water + light + turn + wall + fill + open + siteInterest(heading, night: night).0
     }
 
     func placeAtStart() {
@@ -160,8 +187,26 @@ final class FlightCamera {
             // At night the shots are only those that hold the moon; terrain picks among them. Free headings let
             // relief outvote the moon wherever the land happens to rise away from it.
             let (center, span, step) = nightW > 0.5 ? (moonYaw, 3, 0.15) : (yaw, 3, 0.5)
-            let headings: [Double] = (-span...span).map { center + Double($0) * step }
-            shotYaw = headings.max { shotScore($0, lightYaw: lightYaw, lightW: lightW, noon: noon) < shotScore($1, lightYaw: lightYaw, lightW: lightW, noon: noon) }
+            var headings: [Double] = (-span...span).map { center + Double($0) * step }
+            // At night lit settlements near the moon's bearing join the shots, so a flight passes them and the
+            // moon still frames it.
+            if nightW > 0.5 {
+                let p = SIMD2(position.x, position.z)
+                for site in sitesAt() where site.kind == .hamlet || site.kind == .camp || site.kind == .jetty {
+                    let v = site.pos - p
+                    let b = atan2(v.x, v.y)
+                    if simd_length(v) < 450, abs(FlightCamera.angleDiff(b, moonYaw)) < 1.0 { headings.append(b) }
+                }
+            }
+            let scored = headings.map { ($0, shotScore($0, lightYaw: lightYaw, lightW: lightW, noon: noon, night: nightW)) }
+            let pick = scored.max { $0.1 < $1.1 }!
+            shotYaw = pick.0
+            let (interest, site) = siteInterest(pick.0, night: nightW)
+            focus = nil
+            if interest > 0.15, let site {
+                framedAt[site.id] = time
+                focus = site.pos
+            }
             nextShot = time + 12
         }
         let steerShot = shotYaw.map { sin(FlightCamera.angleDiff($0, yaw)) * 0.05 } ?? 0
@@ -193,7 +238,9 @@ final class FlightCamera {
             lo = min(lo, hq); hi = max(hi, hq)
         }
         let roughClimb = min(max((hi - lo - 6) * 1.5, 0), 30)
-        let clearance = roughClimb + 12 + 12 * (wander(time + 500, 0.7) + 0.6) + 10 * surveyAmount + 40 * max(0, min(1, -mode / 0.6)) + 14 * noon
+        var clearance = roughClimb + 12 + 12 * (wander(time + 500, 0.7) + 0.6) + 10 * surveyAmount + 40 * max(0, min(1, -mode / 0.6)) + 14 * noon
+        // Passing the site a shot was built around: a little lower, so the windows read.
+        if let f = focus, simd_length(f - p) < 150 { clearance = max(clearance - 8, min(clearance, 22)) }
         // Canyon and mesa country: down among the walls they fill the frame, so rise to look across the rims.
         // The rim level is the upper quartile of a 150-voxel neighbourhood, so a lone peak off to the side does
         // not lift the flight, or the highest rim ahead, out to where a wall would still fill the frame. Eased
