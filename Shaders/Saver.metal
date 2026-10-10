@@ -680,6 +680,10 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float sof
     // Around sunset the undersides glow ember on the sun side.
     float glowAmt = lowSun * smoothstep(-0.14, -0.02, x.L.sun.y);
     lit = lit * mix(1.0, 0.6, lowSun) + float3(1.6, 0.55, 0.20) * 1.1 * glowAmt * toSun;
+    // Night: thin cloud lets the moon's glow through and catches it near the moon, instead of
+    // cutting a dark shape out of the halo.
+    lit += float3(0.10, 0.13, 0.22) * pow(max(dot(d, x.L.moon), 0.0), 24.0) * 1.2 * x.L.night;
+    a *= mix(1.0, 0.6, x.L.night);
     c.col = lit;
     c.a = a * exp(-t / 2600.0) * smoothstep(7000.0, 2500.0, t);
     c.t = t;
