@@ -83,7 +83,13 @@ final class FlightCamera {
         let w = min(max(1 - abs(key.y - 0.15) / 0.2, 0), 1)
         let steerKey = sin(keyYaw - yaw) * 0.06 * w
         facing = w * max(0, cos(keyYaw - yaw))
-        let targetRate = max(-0.09, min(0.09, steer * 0.004 * steerSign * (1 - 0.6 * w) + wander(time, 1) * 0.035 + steerKey))
+        // Night: the moon (matching L.moon in the shader) is the focal light; turn toward it.
+        let nightW = min(max((-sun.y - 0.2) / 0.1, 0), 1)
+        let moon = simd_normalize(SIMD3(-sun.x, max(-sun.y, 0.08), -sun.z))
+        let moonYaw = atan2(moon.x, moon.z)
+        let steerMoon = sin(moonYaw - yaw) * 0.05 * nightW
+        let facingMoon = nightW * max(0, cos(moonYaw - yaw))
+        let targetRate = max(-0.09, min(0.09, steer * 0.004 * steerSign * (1 - 0.6 * w) + wander(time, 1) * 0.035 + steerKey + steerMoon))
         // Critically damped spring on yaw rate: turns take tens of seconds.
         let k = 0.25
         yawAccel += (k * k * (targetRate - yawRate) - 2 * k * yawAccel) * dt
@@ -101,7 +107,15 @@ final class FlightCamera {
         for dist in [20.0, 45.0, 75.0, 110.0] {
             ahead = max(ahead, footprintMax(position.x + fwdFlat.x * dist, position.z + fwdFlat.y * dist, radius: dist < 50 ? 5 : 8) - dist * 0.12)
         }
-        let clearance = 12 + 12 * (wander(time + 500, 0.7) + 0.6) + 10 * surveyAmount + 40 * max(0, min(1, -mode / 0.6))
+        // Dense slopes close up read as block fields; climb over rough ground so they read as contours.
+        var lo = Double.infinity, hi = -Double.infinity
+        for (dist, side) in [(25.0, 0.0), (50.0, 0.0), (35.0, 18.0), (35.0, -18.0), (0.0, 0.0)] {
+            let q = p + fwdFlat * dist + left * side
+            let hq = h(q.x, q.y)
+            lo = min(lo, hq); hi = max(hi, hq)
+        }
+        let roughClimb = min(max((hi - lo - 6) * 1.5, 0), 30)
+        let clearance = roughClimb + 12 + 12 * (wander(time + 500, 0.7) + 0.6) + 10 * surveyAmount + 40 * max(0, min(1, -mode / 0.6))
         let target = max(ahead, 19.85) + clearance
         let kc = 0.35
         climbRate += (kc * kc * (target - position.y) - 2 * kc * climbRate) * dt
@@ -122,7 +136,10 @@ final class FlightCamera {
         // Over open water, look out at the far shore rather than down at a featureless mirror.
         let look = p + fwdFlat * 70
         if h(look.x, look.y) <= 20.0 { s *= 0.35 }
-        let targetPitch = -0.08 - 0.40 * s + 0.05 * facing + 0.03 * wander(time + 900, 1.3) + max(-0.04, min(0.06, climbRate * 0.03))
+        var targetPitch = -0.08 - 0.40 * s + 0.05 * facing + 0.03 * wander(time + 900, 1.3) + max(-0.04, min(0.06, climbRate * 0.03))
+        // Facing the moon: lift the view so the moon sits near the top and its path lies across the water.
+        let moonPitch = min(asin(moon.y) - 0.30, 0.2)
+        targetPitch += (moonPitch - targetPitch) * facingMoon
         surveyAmount = s
         pitch += ((pitchOverride ?? targetPitch) - pitch) * min(1, dt * 0.25)
         let targetRoll = max(-0.07, min(0.07, -yawRate * 0.8))
