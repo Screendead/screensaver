@@ -479,6 +479,10 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
     float alt = saturate((H - SEA) / 110.0);
     tread *= mix(float3(0.93, 1.03, 0.90), float3(1.10, 1.04, 0.98), alt);
     tread = mix(tread, stone * 1.35, 0.30 * smoothstep(0.55, 1.0, alt));
+    // Hypsometric banding, as on a printed topo map: each 6-voxel elevation band steps its tint slightly,
+    // so broad hillsides read as layered contour bands rather than one repeated stair.
+    float bandK = fract(floor(H / 6.0) * 0.618034);
+    tread *= mix(float3(1.12, 1.04, 0.90), float3(0.90, 0.98, 1.10), bandK);
     s.tread = tread;
     int drops = int(H - hx0 >= 3.0) + int(H - hx1 >= 3.0) + int(H - hz0 >= 3.0) + int(H - hz1 >= 3.0);
     bool beach = H <= SEA + 1.2;
@@ -572,7 +576,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     float3 nS = normalize(float3(s.nh.x - s.nh.y, 2.0, s.nh.z - s.nh.w));
     float3 nl = normalize(mix(n, nS, wf));
     float ao = mix(cornerAO(x.hm, x.size, h.voxel, h.normal, uv), 0.85, wf);
-    float3 alb = h.normal.y == 0 ? mix(s.albedo, s.tread, wf * 0.6) : s.albedo;
+    float3 alb = h.normal.y == 0 ? mix(s.albedo, s.tread, wf) : s.albedo;
     // Moonlight drains colour.
     alb = mix(alb, float3(dot(alb, float3(0.3, 0.59, 0.11))), 0.4 * x.L.night);
     float ndl = max(dot(nl, x.L.key), 0.0);
@@ -669,6 +673,9 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float sof
     float t = (CLOUD_Y - o.y) / d.y;
     float2 q = o.xz + d.xz * t + float2(x.origin);
     float dens = cloudDensity(q, x.seed, x.time, x.cover);
+    // Self-shading: where density falls off toward the sun the band edge faces the light.
+    float densSun = cloudDensity(q + normalize(x.L.sun.xz + 1e-5) * 45.0, x.seed, x.time, x.cover);
+    float toLight = saturate(0.5 + (dens - densSun) * 4.0);
     float lv = (dens - 0.05) / 0.07;
     float aa = clamp(t * x.pixelAngle / 40.0, 0.10, 0.5) + soft;
     float fl = floor(lv), fr = lv - fl;
@@ -680,6 +687,7 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float sof
     float toSun = 0.5 + 0.5 * dot(dh, sh2);
     float3 lit = x.L.keyCol * (0.25 + 0.35 * toSun) * mix(1.0, 0.35, x.L.night) + x.L.zenith * 1.2 + x.L.horizon * 0.4;
     lit *= (0.78 + 0.08 * min(max(fl, 0.0), 3.0)) * (0.88 + 0.12 * (fl < 3.0 ? saturate(fr) : 1.0));
+    lit *= mix(1.0, mix(0.65, 1.25, toLight), x.L.sunAmt);
     // Band edges facing the sun catch a thin rim, like the terrain's lips.
     float rim = (lv >= 0.0 ? 1.0 - smoothstep(0.0, aa * 2.0, fr) : 0.0) * pow(max(dot(d, x.L.sun), 0.0), 4.0) * x.L.sunAmt;
     lit += x.L.keyCol * rim * 0.5;
