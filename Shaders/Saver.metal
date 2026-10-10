@@ -405,16 +405,37 @@ static float3 skyColor(float3 d, Light L, bool withDiscs, uint seed, float time)
         float3 q = d * 260.0;
         int3 cell = int3(floor(q));
         uint h = hash3i(cell, seed + 77u);
-        float3 gp = normalize(float3(0.35, 0.9, 0.25 + hashf(pcg(seed + 3u)) * 0.5));
-        float band = exp(-pow(dot(d, gp) / 0.18, 2.0));
+        float3 gp = normalize(float3(0.6, 0.5, 0.3 + hashf(pcg(seed + 3u)) * 0.6));
+        float bd = dot(d, gp);
+        float band = exp(-pow(bd / 0.18, 2.0));
+        // Milky Way: a wide glow and a brighter core built from layered noise, a fine grain of unresolved
+        // stars, a meandering dark rift and ragged dust clouds.
+        float n1 = perlin3(d * 3.0, seed + 80u), n2 = perlin3(d * 9.0, seed + 81u);
+        float n3 = perlin3(d * 24.0, seed + 82u), n4 = perlin3(d * 60.0, seed + 85u);
+        float wob = bd + 0.05 * n1;
+        float core = exp(-pow(wob / 0.08, 2.0));
+        float glow = (exp(-pow(wob / 0.22, 2.0)) * 0.45 + core) * saturate(0.7 + 0.5 * n1 + 0.4 * n2 + 0.3 * n3 + 0.2 * n4);
+        float rift = exp(-pow((wob - 0.015 - 0.025 * n2 - 0.01 * n3) / 0.028, 2.0)) * smoothstep(-0.3, 0.2, n1 + 0.5 * n2);
+        float murk = smoothstep(0.05, 0.35, n2 + 0.6 * n3 + 0.3 * n4) * exp(-pow(wob / 0.14, 2.0));
+        float dust = saturate(rift * 0.6 + murk * 0.4);
+        float3 mwCol = mix(float3(0.55, 0.62, 0.90), float3(0.95, 0.88, 0.78), saturate(core * (0.5 + 0.8 * n2)));
+        float horizonFade = smoothstep(0.0, 0.12, d.y);
+        float mw = glow * (1.0 - dust) * L.night * horizonFade;
+        c += mwCol * mw * 0.07;
+        if (mw > 0.02) {
+            float3 fq = d * 500.0;
+            uint fh = hash3i(int3(floor(fq)), seed + 86u);
+            float3 fsp = floor(fq) + float3(hashf(pcg(fh)), hashf(pcg(fh + 1)), hashf(pcg(fh + 2)));
+            c += mwCol * 0.25 * mw * step(0.75, hashf(pcg(fh + 3))) * smoothstep(0.75, 0.15, length(fq - fsp));
+        }
         float clump = saturate(perlin3(d * 3.0, seed + 78u) * 0.9 + 0.5);
-        float density = mix(0.004, 0.035, saturate(clump * 0.8 + band * 0.7));
+        float density = mix(0.004, 0.035, saturate(clump * 0.8 + band * 0.7 + glow * 0.6));
         if (hashf(h) > 1.0 - density) {
             float3 sp = float3(cell) + float3(hashf(pcg(h)), hashf(pcg(h + 1)), hashf(pcg(h + 2)));
             float dd = length(q - sp);
             float b = pow(hashf(pcg(h + 3)), 9.0) * 7.0 + 0.12;
             float twinkle = 0.7 + 0.3 * sin(time * 1.3 + hashf(pcg(h + 4)) * 40.0);
-            c += float3(0.9, 0.95, 1.1) * b * twinkle * smoothstep(0.55, 0.0, dd) * L.night * smoothstep(0.0, 0.05, d.y);
+            c += float3(0.9, 0.95, 1.1) * b * twinkle * smoothstep(0.55, 0.0, dd) * L.night * smoothstep(0.0, 0.05, d.y) * (1.0 - 0.8 * dust);
         }
         // Moon: a clean disc whose maria are Perlin noise.
         if (md > 0.99) {
@@ -562,6 +583,7 @@ struct Ctx {
     float pixelAngle;
     float cover;
     Light L;
+    float dither; // per-pixel, per-frame in [0, 1); TAA resolves it
 };
 
 static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows, bool lips = true) {
@@ -589,7 +611,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
         // Contact shadows from single-voxel steps draw sawtooth noise; keep them faint, cliffs full.
         sh = sHit.hit ? 0.35 * (1.0 - smoothstep(2.0, 8.0, sHit.t)) : 1.0;
         sh = mix(sh, 0.5 + 0.5 * sh, wf);
-        sh = mix(sh, 1.0, 0.75 * x.L.night);
+        sh = mix(sh, 1.0, 0.3 * x.L.night);
     }
     sh *= mix(1.0, cloudShadow(p, x.L.key, x.origin, x.seed, x.time, x.cover), x.L.sunAmt);
     float lowFill = mix(0.9, 1.0, smoothstep(0.1, 0.4, x.L.key.y));
@@ -602,22 +624,25 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     float3 riserShade = mix(float3(1.0), float3(0.60, 0.66, 0.80),
                             (1.0 - saturate(nl.y)) * smoothstep(0.3, 0.6, x.L.key.y) * smoothstep(1.5, 4.0, drop));
     // Night: no pure-black riser feet; a faint indigo ambient keeps the steps readable as stone, not holes.
-    ao = mix(ao, 1.0, 0.5 * x.L.night);
-    skyFill += float3(0.025, 0.03, 0.06) * x.L.night;
-    float3 col = alb * (x.L.keyCol * ndl * sh * mix(1.0, 0.7, x.L.night) + (skyFill * ao * riserShade + bounce));
+    ao = mix(ao, 1.0, 0.25 * x.L.night);
+    skyFill += float3(0.09, 0.12, 0.25) * x.L.night;
+    float3 col = alb * (x.L.keyCol * ndl * sh * mix(1.0, 1.1, x.L.night) + (skyFill * ao * riserShade + bounce));
     // Low sun: up-facing treads take a warm sky-dome tint instead of going to charcoal.
     col += alb * x.L.keyCol * 0.07 * (1.0 - smoothstep(0.05, 0.35, x.L.key.y)) * saturate(nl.y) * (1.0 - x.L.night);
     // Lips of steps catch low light and moonlight; these rise into EDR headroom.
-    float low = max(1.0 - smoothstep(0.05, 0.4, x.L.key.y), 0.2 * x.L.night);
-    // At night only the nearest terraces catch the moon.
-    float nightFade = mix(1.0, 1.0 - smoothstep(0.015, 0.08, fp), x.L.night);
+    float low = max(1.0 - smoothstep(0.05, 0.4, x.L.key.y), 0.8 * x.L.night);
     // Lips facing toward or away from the light glint; lips running along it stay quiet (lost-and-found edges).
     float face = abs(dot(s.lipDir, normalize(x.L.key.xz + 1e-5)));
-    float lipLight = mix(mix(0.15, 1.0, smoothstep(0.15, 0.75, face)), 0.35, x.L.night);
-    if (lips) col += s.glint * lipLight * (1.0 - wf) * nightFade * x.L.keyCol * sh * (mix(0.3, 0.75, smoothstep(0.3, 0.45, x.L.key.y) * (1.0 - x.L.night)) + 1.25 * low) * mix(alb, float3(1.0), 0.5);
+    float lipLight = mix(0.15, 1.0, smoothstep(0.15, 0.75, face));
     // Under a high moon, land sits cool and below the sky so night reads as night (won night A/B);
     // under a low moon it is already dark and keeps its contours (darkening lost the dusk A/B).
     col *= mix(float3(1.0), float3(0.5, 0.56, 0.72), x.L.night * smoothstep(0.32, 0.45, x.L.moon.y));
+    // Moonlit lips stay silver: they are added after the cool tint.
+    float3 lipTint = mix(mix(alb, float3(1.0), 0.5), float3(0.85, 0.92, 1.1), x.L.night);
+    // Moonlit lips carry further than the prefilter allows by day: they are the night's contour lines,
+    // at least a pixel wide, so they hold steady under TAA.
+    float lipFade = mix(1.0 - wf, 1.0 - smoothstep(0.08, 0.25, fp), x.L.night);
+    if (lips) col += s.glint * lipLight * lipFade * x.L.keyCol * sh * (mix(0.3, 0.75, smoothstep(0.3, 0.45, x.L.key.y) * (1.0 - x.L.night)) + 1.25 * low) * lipTint;
     return col;
 }
 
@@ -652,6 +677,8 @@ static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t) 
     float edgeDist = min(min(ep.x, float(x.size) - ep.x), min(ep.z, float(x.size) - ep.z));
     // Clear air under a high sun; haze belongs to the low light.
     float clear = mix(1.0, 0.15, smoothstep(0.3, 0.6, x.L.sun.y));
+    // Night air is crisp: moonlit ridges stay legible to the horizon.
+    clear *= mix(1.0, 0.35, x.L.night);
     return exp(-((heightTerm + b * t + c2 * t * t + mist) * clear + 5.0 * smoothstep(110.0, 10.0, edgeDist)));
 }
 
@@ -667,7 +694,7 @@ struct CloudSample { float3 col; float a; float t; };
 // Clouds: a volumetric slab above the peaks, marched in a few steps. The same noise field sets the
 // coverage; tops tower where it is dense, and each sample is self-shadowed toward the sun, so clouds have
 // lit crowns and shaded bases instead of reading as flat cut-outs.
-static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float soft) {
+static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d) {
     CloudSample c;
     c.col = 0; c.a = 0; c.t = 6e4;
     if (d.y < 0.01) return c;
@@ -675,7 +702,8 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float sof
     float ta = (y0 - o.y) / d.y, tb = (y1 - o.y) / d.y;
     float t0 = max(min(ta, tb), 0.0), t1 = max(ta, tb);
     if (t0 > 7000.0) return c;
-    int steps = x.quality > 0.5 ? 14 : 8;
+    // Night clouds have crisp edges, which need finer, dithered steps to show no slices at grazing angles.
+    int steps = (x.quality > 0.5 ? 14 : 8) + int(x.L.night * 0.0);
     float dt = (t1 - t0) / float(steps);
     float lowSun = 1.0 - smoothstep(0.02, 0.28, abs(x.L.sun.y));
     float2 dh = normalize(d.xz + 1e-5), sh2 = normalize(x.L.sun.xz + 1e-5);
@@ -685,84 +713,50 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float sof
     float glowAmt = lowSun * smoothstep(-0.14, -0.02, x.L.sun.y);
     float T = 1.0;
     float3 acc = 0;
+    float silver = 0;
+    float jit = 0.5 + x.L.night * (x.dither - 0.5);
+    float2 lastQ = float2(1e9);
+    float coarse = 0, towardC = -1e9;
+    float reuse = x.L.night > 0.0 ? 400.0 : -1.0;
     for (int i = 0; i < steps; i++) {
-        float t = t0 + (float(i) + 0.5) * dt;
+        float t = t0 + (float(i) + jit) * dt;
         float3 p = o + d * t;
         float2 q = p.xz + float2(x.origin);
-        float base = cloudDensity(q, x.seed, x.time, x.cover);
+        // Night: steep rays cross the slab within a few units, so the coarse field is reused between
+        // nearby steps.
+        bool fresh = distance_squared(q, lastQ) > reuse;
+        if (fresh) { lastQ = q; coarse = cloudDensity(q, x.seed, x.time, x.cover); towardC = -1e9; }
+        float base = coarse;
+        // Night: a finer octave frays the edges into wisps for the moon to light through.
+        if (x.L.night > 0.0 && base > -0.3) {
+            float2 qd = q - float2(x.time * 1.3, 0);
+            base += x.L.night * (0.16 * perlin2(qd / 90.0, x.seed + 42u) + 0.07 * perlin2(qd / 33.0, x.seed + 43u) + 0.035 * perlin2(qd / 13.0, x.seed + 44u));
+        }
         float h01 = (p.y - y0) / (y1 - y0);
         float top = 0.35 + 0.65 * saturate(base * 2.5);
-        float dens = saturate((base - 0.04) * 3.0) * smoothstep(0.0, 0.2, h01) * (1.0 - smoothstep(top * 0.7, top, h01));
+        float dens = saturate((base - 0.04) * mix(3.0, 9.0, x.L.night)) * smoothstep(0.0, 0.2, h01) * (1.0 - smoothstep(top * 0.7, top, h01));
         if (dens < 0.01) continue;
-        float toward = cloudDensity(q + sunStep, x.seed, x.time, x.cover);
+        if (towardC < -1e8) towardC = cloudDensity(q + sunStep, x.seed, x.time, x.cover);
+        float toward = towardC;
         float shadow = exp(-saturate((toward - 0.04) * 3.0) * 2.2) * (0.55 + 0.45 * h01);
-        float3 lit = x.L.keyCol * (0.15 + 0.85 * shadow) * mix(1.0, 0.35, x.L.night) * (0.6 + 0.4 * toSun) + ambient * (0.6 + 0.4 * h01);
+        float3 lit = x.L.keyCol * (mix(0.15, 0.4, x.L.night) + mix(0.85, 0.6, x.L.night) * shadow) * mix(1.0, 0.32, x.L.night) * (0.6 + 0.4 * toSun) + ambient * (0.6 + 0.4 * h01);
         lit += float3(1.6, 0.55, 0.20) * glowAmt * toSun * (1.0 - h01) * 0.9;
-        lit += float3(0.10, 0.13, 0.22) * pow(max(dot(d, x.L.moon), 0.0), 24.0) * 1.2 * x.L.night;
-        float a = 1.0 - exp(-dens * dt * 0.05);
+        float a = 1.0 - exp(-dens * dt * mix(0.05, 0.08, x.L.night));
         acc += T * a * lit;
+        silver += T * a * shadow;
         T *= 1.0 - a;
         if (c.t > 5e4 && T < 0.6) c.t = t;
         if (T < 0.03) break;
     }
     float cover = 1.0 - T;
     c.col = acc / max(cover, 1e-3);
+    // Moonlit night: forward scatter through the thin, moon-facing fringes draws a silver lining around
+    // the moon.
+    float cm = dot(d, x.L.moon);
+    float fringe = silver / max(cover, 1e-3) * (1.0 - cover);
+    c.col += float3(0.78, 0.86, 1.0) * x.L.night * hg(cm, 0.9) * 2.0 * fringe;
     c.col *= mix(1.0, 0.9, smoothstep(0.3, 0.5, x.L.sun.y));
     c.a = cover * mix(1.0, 0.7, x.L.night) * exp(-t0 / 3000.0) * smoothstep(7000.0, 2500.0, t0) * smoothstep(0.02, 0.1, d.y);
-    return c;
-}
-
-// The original contour-banded sheet: judged best at night (a woodblock-print echo of the terraces).
-static CloudSample cloudBands(thread const Ctx& x, float3 o, float3 d, float soft) {
-    CloudSample c;
-    c.col = 0; c.a = 0; c.t = 6e4;
-    if (d.y < 0.01) return c;
-    float t = (CLOUD_Y - o.y) / d.y;
-    float2 q = o.xz + d.xz * t + float2(x.origin);
-    float dens = cloudDensity(q, x.seed, x.time, x.cover);
-    // Self-shading: where density falls off toward the sun the band edge faces the light.
-    float densSun = cloudDensity(q + normalize(x.L.sun.xz + 1e-5) * 45.0, x.seed, x.time, x.cover);
-    float toLight = saturate(0.5 + (dens - densSun) * 4.0);
-    float lv = (dens - 0.05) / 0.07;
-    float aa = clamp(t * x.pixelAngle / 40.0, 0.10, 0.5) + soft;
-    float fl = floor(lv), fr = lv - fl;
-    // Coverage steps up one band at a time; each step has an anti-aliased edge.
-    float tier = lv < 0.0 ? 0.0 : fl + smoothstep(1.0 - aa, 1.0, fr);
-    float a = saturate(0.4 * smoothstep(-aa, 0.0, lv) + tier / 2.0) * 0.95;
-    float lowSun = 1.0 - smoothstep(0.02, 0.28, abs(x.L.sun.y));
-    float2 dh = normalize(d.xz + 1e-5), sh2 = normalize(x.L.sun.xz + 1e-5);
-    float toSun = 0.5 + 0.5 * dot(dh, sh2);
-    float3 lit = x.L.keyCol * (0.25 + 0.35 * toSun) * mix(1.0, 0.35, x.L.night) + x.L.zenith * 1.2 + x.L.horizon * 0.4;
-    lit *= (0.78 + 0.08 * min(max(fl, 0.0), 3.0)) * (0.88 + 0.12 * (fl < 3.0 ? saturate(fr) : 1.0));
-    lit *= mix(1.0, mix(0.65, 1.25, toLight), x.L.sunAmt);
-    // Band edges facing the sun catch a thin rim, like the terrain's lips.
-    float rim = (lv >= 0.0 ? 1.0 - smoothstep(0.0, aa * 2.0, fr) : 0.0) * pow(max(dot(d, x.L.sun), 0.0), 4.0) * x.L.sunAmt;
-    lit += x.L.keyCol * rim * 0.5;
-    // Around sunset the undersides glow ember on the sun side.
-    float glowAmt = lowSun * smoothstep(-0.14, -0.02, x.L.sun.y);
-    lit = lit * mix(1.0, 0.6, lowSun) + float3(1.6, 0.55, 0.20) * 1.1 * glowAmt * toSun;
-    // Night: thin cloud lets the moon's glow through and catches it near the moon, instead of
-    // cutting a dark shape out of the halo.
-    lit += float3(0.10, 0.13, 0.22) * pow(max(dot(d, x.L.moon), 0.0), 24.0) * 1.2 * x.L.night;
-    a *= mix(1.0, 0.6, x.L.night);
-    // Noon clouds a touch less paper-white, so the sky reads as blue air with cloud in it.
-    lit *= mix(1.0, 0.88, smoothstep(0.3, 0.5, x.L.sun.y));
-    c.col = lit;
-    c.a = a * exp(-t / 2600.0) * smoothstep(7000.0, 2500.0, t);
-    c.t = t;
-    return c;
-}
-
-// Volumetric clouds won the blind A/B at dawn and noon, banded ones at night; crossfade with the sun.
-static CloudSample clouds(thread const Ctx& x, float3 o, float3 d) {
-    float w = smoothstep(-0.12, 0.02, x.L.sun.y);
-    if (w >= 0.999) return cloudSheet(x, o, d, 0.0);
-    if (w <= 0.001) return cloudBands(x, o, d, 0.0);
-    CloudSample v = cloudSheet(x, o, d, 0.0), bnd = cloudBands(x, o, d, 0.0);
-    CloudSample c;
-    c.a = mix(bnd.a, v.a, w);
-    c.col = (mix(bnd.col * bnd.a, v.col * v.a, w)) / max(c.a, 1e-3);
-    c.t = min(v.t, bnd.t);
     return c;
 }
 
@@ -772,9 +766,10 @@ static float4 skyWithClouds(thread const Ctx& x, float3 o, float3 d) {
     // Forward-scatter glow near the horizon, matching what applyFog adds to fogged land.
     bare += x.L.keyCol * min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night) * smoothstep(0.1, 0.0, d.y);
     float3 discs = skyColor(d, x.L, true, x.seed, x.time) - raw;
-    CloudSample c = clouds(x, o, d);
+    CloudSample c = cloudSheet(x, o, d);
     // Clouds hide the stars, moon and sun behind them.
-    float3 sky = bare + discs * (1.0 - saturate(c.a * 3.0));
+    // At night thin cloud veils the moon instead of hiding it.
+    float3 sky = bare + discs * mix(1.0 - saturate(c.a * 3.0), (1.0 - c.a) * (1.0 - c.a), x.L.night);
     return float4(mix(sky, c.col, c.a), c.a > 0.5 ? c.t : 6e4);
 }
 
@@ -800,7 +795,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     float3 o = f.camPos.xyz;
 
     Ctx x { hm, f.mapInfo.z, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w, f.misc.y,
-            2.0 * tanH * f.resolution.w, f.misc.w, makeLight(f.sunDir.xyz) };
+            2.0 * tanH * f.resolution.w, f.misc.w, makeLight(f.sunDir.xyz),
+            fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))) };
 
     Hit h = trace(hm, o, d, 4000.0, 400, x.globalMax, x.size);
     if (f.misc2.z == 1) return float4(float(h.iters) / 400.0, h.hit ? 0.3 : 0.0, h.iters >= 399 ? 1 : 0, 1);
@@ -842,6 +838,16 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         col = mix(under, refl, fres);
         // Glitter path toward the sun or moon: the main EDR highlight.
         col += x.L.keyCol * 6.0 * pow(max(dot(r, x.L.key), 0.0), mix(900.0, 4000.0, x.L.night)) * fres * (x.L.shadows ? 1.0 : 0.3) * (1.0 + 0.5 * x.L.night);
+        if (x.L.night > 0.0) {
+            // Moon path: the chance that some ripple facet mirrors the moon (a slope distribution, so it is
+            // smooth and TAA-stable), broken into glitter by fine ripples that fade with pixel footprint.
+            float3 hv = normalize(x.L.moon - d);
+            float2 slope = hv.xz / max(hv.y, 0.05);
+            float path = exp(-dot(slope, slope) / 0.03);
+            float fine = perlin3(float3(ww * 1.6, x.time * 0.7), x.seed + 61u);
+            float spark = mix(0.3, smoothstep(0.2, 0.55, fine), saturate(1.0 - tw * x.pixelAngle * 3.0));
+            col += float3(0.75, 0.82, 1.0) * x.L.night * path * (0.12 + 2.5 * spark);
+        }
         tSurf = tw;
     } else if (h.hit) {
         col = shade(x, o, d, h, true);
