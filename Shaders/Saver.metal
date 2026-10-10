@@ -348,14 +348,14 @@ static Light makeLight(float3 sunDir) {
     L.sun = sunDir;
     L.moon = normalize(float3(-sunDir.x, max(-sunDir.y, 0.08), -sunDir.z));
     L.zenith = key5(e, float3(0.018, 0.022, 0.045), float3(0.10, 0.10, 0.22), float3(0.13, 0.16, 0.32),
-                    float3(0.10, 0.20, 0.48), float3(0.08, 0.23, 0.62));
+                    float3(0.10, 0.20, 0.48), float3(0.06, 0.20, 0.62));
     L.horizon = key5(e, float3(0.022, 0.026, 0.045), float3(0.30, 0.24, 0.36), float3(0.80, 0.45, 0.28),
-                     float3(0.95, 0.60, 0.32), float3(0.55, 0.66, 0.82));
+                     float3(0.95, 0.60, 0.32), float3(0.46, 0.62, 0.86));
     L.skyHor = key5(e, float3(0.022, 0.026, 0.045), float3(0.16, 0.10, 0.22), float3(0.50, 0.22, 0.09),
-                    float3(0.80, 0.48, 0.22), float3(0.58, 0.70, 0.86));
+                    float3(0.80, 0.48, 0.22), float3(0.50, 0.66, 0.90));
     L.skyZen = key5(e, float3(0.010, 0.013, 0.028), float3(0.03, 0.04, 0.12), float3(0.07, 0.09, 0.24),
-                    float3(0.10, 0.20, 0.48), float3(0.08, 0.23, 0.62));
-    float3 sunCol = key5(e, float3(0), float3(0), float3(1.8, 0.6, 0.22), float3(3.0, 1.45, 0.55), float3(2.75, 2.5, 2.1));
+                    float3(0.10, 0.20, 0.48), float3(0.06, 0.20, 0.62));
+    float3 sunCol = key5(e, float3(0), float3(0), float3(1.8, 0.6, 0.22), float3(3.0, 1.45, 0.55), float3(3.0, 2.7, 2.2));
     L.sunAmt = smoothstep(-0.02, 0.05, e);
     L.night = smoothstep(-0.04, -0.20, e);
     if (e > -0.02) {
@@ -529,6 +529,24 @@ static float cornerAO(texture2d<float> hm, int size, int3 v, int3 n, float2 uv) 
     return mix(0.6, 1.0, pow(ao, 0.8));
 }
 
+// Fraction of open sky above a face, from how far the surrounding columns rise above it within 6 voxels.
+// One value per voxel face, so it is stable under jitter and camera motion.
+static float skyVisibility(texture2d<float> hm, int size, int3 v, int3 n, float y) {
+    int2 c = v.xz + n.xz;
+    float occ = 0.0;
+    const int2 dirs[8] = { int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1), int2(1, 1), int2(-1, 1), int2(1, -1), int2(-1, -1) };
+    for (int i = 0; i < 8; i++) {
+        float m = 0.0;
+        for (int r = 1; r <= 3; r++) {
+            float dist = float(r * 2) * (i < 4 ? 1.0 : 1.414);
+            float rise = heightAt(hm, c + dirs[i] * (r * 2), size) - y;
+            m = max(m, rise / sqrt(rise * rise + dist * dist));
+        }
+        occ += m;
+    }
+    return 1.0 - occ / 8.0;
+}
+
 static inline float2 faceUV(float3 p, int3 n) {
     float3 f = fract(p);
     if (n.y != 0) return f.xz;
@@ -580,6 +598,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     // Moonlight drains colour.
     alb = mix(alb, float3(dot(alb, float3(0.3, 0.59, 0.11))), 0.4 * x.L.night);
     float ndl = max(dot(nl, x.L.key), 0.0);
+    float hiSun = smoothstep(0.15, 0.45, x.L.key.y) * (1.0 - x.L.night);
     float sh = 1.0;
     if (shadows && ndl > 0.0 && x.L.shadows) {
         // Keep the origin inside the hit voxel's footprint so boundary columns can't self-shadow.
@@ -588,18 +607,20 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
         Hit sHit = trace(x.hm, so, x.L.key, 700.0, x.quality > 0.5 ? 120 : 48, x.globalMax, x.size);
         // Contact shadows from single-voxel steps draw sawtooth noise; keep them faint, cliffs full.
         sh = sHit.hit ? 0.35 * (1.0 - smoothstep(2.0, 8.0, sHit.t)) : 1.0;
-        sh = mix(sh, 0.5 + 0.5 * sh, wf);
+        sh = mix(sh, mix(0.5, 0.25, hiSun) + mix(0.5, 0.75, hiSun) * sh, wf);
         sh = mix(sh, 1.0, 0.75 * x.L.night);
     }
     sh *= mix(1.0, cloudShadow(p, x.L.key, x.origin, x.seed, x.time, x.cover), x.L.sunAmt);
     float lowFill = mix(0.9, 1.0, smoothstep(0.1, 0.4, x.L.key.y));
     // Low light: shadows take the cool zenith, against warm key light.
-    float zw = mix(0.25, 0.55, 1.0 - smoothstep(0.1, 0.45, x.L.key.y));
-    float3 skyFill = mix(x.L.horizon, x.L.zenith, zw + 0.15 * nl.y) * 0.9 * lowFill * mix(1.0, 0.8, smoothstep(0.35, 0.6, x.L.key.y));
+    // High sun: fill is the deep zenith, so shade reads blue against warm key light.
+    float zw = mix(0.55, 0.8, hiSun);
+    float3 skyFill = mix(x.L.horizon, x.L.zenith, saturate(zw + 0.15 * nl.y)) * 0.9 * lowFill * mix(1.0, 0.85, hiSun);
+    skyFill *= mix(1.0, skyVisibility(x.hm, x.size, h.voxel, h.normal, p.y), mix(0.55, 0.85, hiSun));
     float3 bounce = (1.0 - saturate(nl.y)) * 0.35 * alb * x.L.keyCol * max(x.L.key.y, 0.0);
     // High sun: risers sit in cooler shade so terraces keep their modelling at noon.
     float drop = s.H - min(min(s.nh.x, s.nh.y), min(s.nh.z, s.nh.w));
-    float3 riserShade = mix(float3(1.0), float3(0.60, 0.66, 0.80),
+    float3 riserShade = mix(float3(1.0), float3(0.82, 0.86, 0.95),
                             (1.0 - saturate(nl.y)) * smoothstep(0.3, 0.6, x.L.key.y) * smoothstep(1.5, 4.0, drop));
     // Night: no pure-black riser feet; a faint indigo ambient keeps the steps readable as stone, not holes.
     ao = mix(ao, 1.0, 0.5 * x.L.night);
@@ -614,7 +635,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     // Lips facing toward or away from the light glint; lips running along it stay quiet (lost-and-found edges).
     float face = abs(dot(s.lipDir, normalize(x.L.key.xz + 1e-5)));
     float lipLight = mix(mix(0.15, 1.0, smoothstep(0.15, 0.75, face)), 0.35, x.L.night);
-    if (lips) col += s.glint * lipLight * (1.0 - wf) * nightFade * x.L.keyCol * sh * (mix(0.3, 0.75, smoothstep(0.3, 0.45, x.L.key.y) * (1.0 - x.L.night)) + 1.25 * low) * mix(alb, float3(1.0), 0.5);
+    if (lips) col += s.glint * lipLight * (1.0 - wf) * nightFade * x.L.keyCol * sh * (mix(0.3, 0.22, hiSun) + 1.25 * low) * mix(alb, float3(1.0), mix(0.5, 0.15, hiSun));
     // Under a high moon, land sits cool and below the sky so night reads as night (won night A/B);
     // under a low moon it is already dark and keeps its contours (darkening lost the dusk A/B).
     col *= mix(float3(1.0), float3(0.5, 0.56, 0.72), x.L.night * smoothstep(0.32, 0.45, x.L.moon.y));
@@ -651,7 +672,7 @@ static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t) 
     float3 ep = o + d * t;
     float edgeDist = min(min(ep.x, float(x.size) - ep.x), min(ep.z, float(x.size) - ep.z));
     // Clear air under a high sun; haze belongs to the low light.
-    float clear = mix(1.0, 0.15, smoothstep(0.3, 0.6, x.L.sun.y));
+    float clear = mix(1.0, 0.15, smoothstep(0.2, 0.45, x.L.sun.y));
     return exp(-((heightTerm + b * t + c2 * t * t + mist) * clear + 5.0 * smoothstep(110.0, 10.0, edgeDist)));
 }
 
@@ -858,6 +879,32 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
 static inline float3 tmap(float3 v) { return v / (1.0 + max(max(v.r, v.g), v.b)); }
 static inline float3 itmap(float3 v) { return v / max(1.0 - max(max(v.r, v.g), v.b), 1e-4); }
 
+// 9-tap Catmull-Rom via bilinear taps: bilinear history fetches blur edges a little more every frame the
+// camera moves, which TAA then accumulates.
+static float3 sampleCatmullRom(texture2d<float> t, sampler s, float2 uv) {
+    float2 size = float2(t.get_width(), t.get_height());
+    float2 sp = uv * size;
+    float2 tc = floor(sp - 0.5) + 0.5;
+    float2 f = sp - tc;
+    float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    float2 w3 = f * f * (-0.5 + 0.5 * f);
+    float2 w12 = w1 + w2;
+    float2 t0 = (tc - 1.0) / size, t3 = (tc + 2.0) / size, t12 = (tc + w2 / w12) / size;
+    float3 c = 0;
+    c += t.sample(s, float2(t0.x, t0.y)).rgb * w0.x * w0.y;
+    c += t.sample(s, float2(t12.x, t0.y)).rgb * w12.x * w0.y;
+    c += t.sample(s, float2(t3.x, t0.y)).rgb * w3.x * w0.y;
+    c += t.sample(s, float2(t0.x, t12.y)).rgb * w0.x * w12.y;
+    c += t.sample(s, float2(t12.x, t12.y)).rgb * w12.x * w12.y;
+    c += t.sample(s, float2(t3.x, t12.y)).rgb * w3.x * w12.y;
+    c += t.sample(s, float2(t0.x, t3.y)).rgb * w0.x * w3.y;
+    c += t.sample(s, float2(t12.x, t3.y)).rgb * w12.x * w3.y;
+    c += t.sample(s, float2(t3.x, t3.y)).rgb * w3.x * w3.y;
+    return max(c, 0.0);
+}
+
 // Temporal resolve: reproject history through the previous camera (the world is static), clamp it to
 // the current 3x3 neighbourhood, and blend. Alpha carries hit distance.
 fragment float4 taaFragment(VOut in [[stage_in]], texture2d<float> cur [[texture(0)]],
@@ -865,7 +912,7 @@ fragment float4 taaFragment(VOut in [[stage_in]], texture2d<float> cur [[texture
     constexpr sampler lin(filter::linear, address::clamp_to_edge);
     int2 px = int2(in.pos.xy);
     float4 c = cur.read(uint2(px));
-    if (f.prevPos.w < 0.5) return c;
+    if (f.prevPos.w < 0.5 || f.misc2.z == 7) return c;
     float3 mn = tmap(c.rgb), mx = mn;
     int2 lim = int2(cur.get_width() - 1, cur.get_height() - 1);
     for (int j = -1; j <= 1; j++)
@@ -887,7 +934,7 @@ fragment float4 taaFragment(VOut in [[stage_in]], texture2d<float> cur [[texture
     float2 puv = float2(pn.x * 0.5 + 0.5, 0.5 - pn.y * 0.5);
     if (any(puv < 0.0) || any(puv > 1.0)) return c;
     // Clamp and blend in a compressed space so sub-pixel EDR spikes can't smear or flicker.
-    float3 h = clamp(tmap(hist.sample(lin, puv).rgb), mn, mx);
+    float3 h = clamp(tmap(sampleCatmullRom(hist, lin, puv)), mn, mx);
     return float4(itmap(mix(h, tmap(c.rgb), 0.12)), c.a);
 }
 
@@ -911,7 +958,7 @@ fragment float4 postFragment(VOut in [[stage_in]], texture2d<float> scene [[text
     float3 c = acesFit(x);
     // Noon light is the flattest; restore a little chroma the tonemap shoulder takes away.
     float l = dot(c, float3(0.2126, 0.7152, 0.0722));
-    c = max(mix(float3(l), c, 1.0 + 0.18 * smoothstep(0.3, 0.6, f.sunDir.y)), 0.0);
+    c = max(mix(float3(l), c, 1.0 + 0.10 * smoothstep(0.2, 0.45, f.sunDir.y)), 0.0);
     float ign = fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715))));
     float3 enc = linearToSRGB(saturate(c)) + (ign - 0.5) / 255.0;
     float headroom = f.misc2.w;

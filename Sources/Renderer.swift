@@ -312,7 +312,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         simTime += dt * timeScale
         let e = clock.sunDirection.y
-        let target = e > 0 ? 0.62 + 1.0 * max(0, 0.3 - e) / 0.3 - 0.10 * min(1, max(0, (e - 0.3) / 0.2)) : (e > -0.1 ? 2.02 + 0.4 * (-e / 0.1) : 1.6 + 0.4 * max(0, 0.3 + e) / 0.2)
+        let target = e > 0 ? 0.62 + 1.0 * max(0, 0.3 - e) / 0.3 + 0.08 * min(1, max(0, (e - 0.3) / 0.2)) : (e > -0.1 ? 2.02 + 0.4 * (-e / 0.1) : 1.6 + 0.4 * max(0, 0.3 + e) / 0.2)
         exposure += (target - exposure) * min(1, dt * timeScale * 0.2)
     }
 
@@ -456,7 +456,8 @@ enum Snapshot {
             if let phase = settings.phase { r.clock.phase = phase }
             simulated = t
             var times: [Double] = []
-            for _ in 0..<12 {
+            for _ in 0..<(ProcessInfo.processInfo.environment["VR_MOTION"] != nil ? 48 : 12) {
+                if ProcessInfo.processInfo.environment["VR_MOTION"] != nil { r.simulate(1.0 / 60) }
                 let cb = r.queue.makeCommandBuffer()!
                 let t0 = CACurrentMediaTime()
                 r.encode(into: cb, output: tex, outputSize: CGSize(width: w, height: h))
