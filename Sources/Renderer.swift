@@ -225,7 +225,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var gpuTimes: [Double] = []
     private var sceneSize = (width: 0, height: 0)
     static let logTiming = ProcessInfo.processInfo.environment["VR_TIMING"] != nil
-    private var exposure: Double = 1.5
+    fileprivate var exposure: Double = 1.5
+    // Holds the time of day fixed for snapshots, so exposure and the shot director see the rendered sun.
+    var pinnedPhase: Double?
     var renderScale: Double
 
     // Cover drifts between clear and broken skies over tens of minutes.
@@ -298,6 +300,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         var remaining = dt * timeScale
         while remaining > 0 {
             let step = min(remaining, 1.0 / 30.0)
+            if let p = pinnedPhase { clock.phase = p }
             camera.sun = clock.sunDirection
             camera.step(dt: step)
             if Renderer.logTiming, let g = world.height(x: camera.position.x, z: camera.position.z), camera.position.y < g + 2 {
@@ -446,9 +449,9 @@ enum Snapshot {
         td.usage = [.renderTarget, .shaderRead]
         td.storageMode = .shared
         let tex = device.makeTexture(descriptor: td)!
+        r.pinnedPhase = settings.phase
         var simulated = 0.0
         for t in settings.screenshotTimes.sorted() {
-            if let phase = settings.phase { r.clock.phase = phase }
             r.simulate(t - simulated)
             if let phase = settings.phase { r.clock.phase = phase }
             simulated = t
@@ -465,8 +468,8 @@ enum Snapshot {
             tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
             let out = settings.screenshotTimes.count > 1 ? path.replacingOccurrences(of: ".png", with: "_t\(Int(t)).png") : path
             write(bytes: bytes, width: w, height: h, to: out)
-            print(String(format: "t=%.0f phase=%.3f sunY=%.2f cam=(%.0f,%.0f,%.0f) gpu=%.1fms -> %@", t, r.clock.phase,
-                         r.clock.sunDirection.y, r.camera.position.x, r.camera.position.y, r.camera.position.z, times.min()!, out))
+            print(String(format: "t=%.0f phase=%.3f sunY=%.2f exposure=%.2f cam=(%.0f,%.0f,%.0f) gpu=%.1fms -> %@", t, r.clock.phase,
+                         r.clock.sunDirection.y, r.exposure, r.camera.position.x, r.camera.position.y, r.camera.position.z, times.min()!, out))
         }
     }
 
