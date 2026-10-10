@@ -411,6 +411,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     static let fullCoarse = ProcessInfo.processInfo.environment["VR_COARSE_FULL"] != nil
     // VR_CHUNKED: snapshots update the coarse rings a chunk per frame, as live.
     static let chunkedCoarse = ProcessInfo.processInfo.environment["VR_CHUNKED"] != nil
+    // VR_LODSHIFT=v moves the LOD rings' centre v voxels ahead of the camera: frames differing only in it isolate pops.
+    static let lodShift = Float(ProcessInfo.processInfo.environment["VR_LODSHIFT"] ?? "") ?? 0
     fileprivate var exposure: Double = 1.5
     // Holds the time of day fixed for snapshots, so exposure and the shot director see the rendered sun.
     var pinnedPhase: Double?
@@ -556,7 +558,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         while lods.count < 5 { lods.append(lods.last!) }
         (f.lod0, f.lod1, f.lod2, f.lod3, f.lod4) = (lods[0], lods[1], lods[2], lods[3], lods[4])
         let rMax = Float(Clipmap.handoff(levels))
-        f.fade = SIMD4(0.7 * rMax, rMax, Float(levels + 1), 0)
+        f.fade = SIMD4(0.7 * rMax, rMax, Float(levels + 1), Renderer.lodShift)
         return f
     }
 
