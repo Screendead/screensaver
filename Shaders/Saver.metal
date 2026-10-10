@@ -103,7 +103,7 @@ static inline float ridged2(float2 p, int oct, uint s) {
 
 // MARK: - World
 
-struct Climate { float temp; float moist; float fall; };
+struct Climate { float temp; float moist; float fall; float basin; };
 
 static inline float2 seedOffset(uint seed) {
     return float2(hashf(pcg(seed)), hashf(pcg(seed ^ 0x9e3779b9u))) * 50000.0;
@@ -115,6 +115,7 @@ static inline Climate climate(float2 w, uint seed) {
     c.temp = saturate(fbm2(p / 900.0, 2, seed + 11) * 1.6 + 0.5);
     c.moist = saturate(fbm2(p / 800.0 + 91.0, 2, seed + 12) * 1.6 + 0.5);
     c.fall = saturate(perlin2(p / 1000.0 + 213.0, seed + 15) * 2.0 + 0.5);
+    c.basin = saturate(fbm2(p / 1100.0 + 53.0, 2, seed + 15) * 1.6 + 0.5);
     return c;
 }
 
@@ -142,6 +143,18 @@ static inline float lagoonAmount(Climate c) {
     return smoothstep(0.47, 0.65, c.temp) * smoothstep(0.47, 0.65, c.moist);
 }
 
+// Salt pans: dry basins of any temperature. 1 on the open pan, falling through the terraced rims.
+static inline float saltAmount(Climate c) {
+    return smoothstep(0.6, 0.75, c.basin) * smoothstep(0.62, 0.42, c.moist);
+}
+
+// Dry crust stands just above the water plane; pools are one voxel lower, so they hold a skin of water.
+constant float PAN = 20.0;
+
+// Pools fill where this exceeds poolLevel; p is seed-offset world position.
+static inline float poolNoise(float2 p, uint seed) { return fbm2(p / 140.0, 3, seed + 16) + 0.25 * perlin2(p / 35.0, seed + 17); }
+static inline float poolLevel(float salt) { return 0.08 + 0.5 * (1.0 - smoothstep(0.8, 0.95, salt)); }
+
 // Column = (height, gapLo, gapHi): solid where y < height, except inside [gapLo, gapHi).
 static inline float3 terrainColumn(int2 w, uint seed) {
     float2 p = float2(w) + seedOffset(seed);
@@ -163,7 +176,8 @@ static inline float3 terrainColumn(int2 w, uint seed) {
 
     // Canyon country: in hot, dry regions the land steps into flat-topped mesas with sheer risers.
     Climate cl = climate(float2(w), seed);
-    float canyon = smoothstep(0.35, 0.7, desertAmount(cl));
+    float salt = saltAmount(cl);
+    float canyon = smoothstep(0.35, 0.7, desertAmount(cl)) * (1.0 - salt);
     float tier = 13.0 + 4.0 * perlin2(p / 700.0, seed + 7);
     float hn = h / tier;
     float level = floor(hn);
@@ -192,8 +206,19 @@ static inline float3 terrainColumn(int2 w, uint seed) {
         h = mix(h, SEA - 2.5 + bed * 14.0, lagoon);
     }
     h = floor(max(h, 2.0));
+
+    // Salt pans: the land is cut down to old shorelines, low benches climbing out of a dead-flat floor,
+    // and rivers that reach the pan end at its edge.
+    bool pool = false;
+    if (salt > 0.02) {
+        float bench = 3.0;
+        float rim = PAN + floor(70.0 * pow(1.0 - smoothstep(0.1, 0.85, salt), 1.5) / bench) * bench;
+        h = min(h, rim);
+        h = max(h, PAN - floor(6.0 * (1.0 - smoothstep(0.6, 0.85, salt))));
+        if (h == PAN && poolNoise(p, seed) > poolLevel(salt)) { h = PAN - 1.0; pool = true; }
+    }
     // Lake beds are one flat shelf: submerged terraces read as stepping stones under the surface.
-    if (h < SEA) h = floor(mix(floor(SEA) - 2.0, h, lagoon) + 0.5);
+    if (h < SEA && !pool) h = floor(mix(floor(SEA) - 2.0, h, lagoon) + 0.5);
 
     // Arches and undercuts: noise blobs hollow out a band low in each mesa tier.
     float gl = 0, gh = 0;
@@ -255,7 +280,8 @@ static inline float groveDensity(float2 w, float g, uint seed) {
     float grove = fbm2(p / 300.0, 3, seed + 90u) + 0.3 * perlin2(p / 70.0, seed + 91u);
     float painted = paintedAmount(c);
     float autumn = autumnAmount(c);
-    float open = (1.0 - smoothstep(0.2, 0.5, desertAmount(c))) * (1.0 - smoothstep(0.1, 0.4, painted));
+    float open = (1.0 - smoothstep(0.2, 0.5, desertAmount(c))) * (1.0 - smoothstep(0.1, 0.4, painted))
+               * (1.0 - smoothstep(0.15, 0.5, saltAmount(c)));
     float wet = smoothstep(0.25, 0.6, c.moist) * open;
     float snowline = mix(160.0, 92.0, smoothstep(0.42, 0.18, c.temp));
     // Lagoon islets are only a few voxels high, so their groves start right above the sand.
@@ -643,6 +669,7 @@ struct Surface {
     float2 slope;   // heightfield gradient of fine relief on top faces
     float riser;    // drop below this face, for side faces
     float autumn;
+    float level;    // 1 shades the face as dead-level ground: up normal, no corner AO
 };
 
 // Autumn foliage: a slow Perlin hue field runs lingering green, gold, orange, scarlet to crimson;
@@ -733,6 +760,7 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
     Surface s;
     s.slope = 0;
     s.mat = 0;
+    s.level = 0;
     float4 col4 = hm.read(uint2(clamp(v.xz, int2(0), int2(size - 1))), 0);
     float3 col = col4.rgb;
     bool tree = col4.a > 0.0;
@@ -763,8 +791,11 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
     }
     bool underGap = !tree && col.z > col.y && float(v.y) < col.z;
 
+    float salt = saltAmount(c);
+    float rimW = smoothstep(0.05, 0.4, salt);
+
     float snowline = mix(160.0, 92.0, cold) + 5.0 * perlin2(w / 160.0, seed + 21u);
-    float3 stone = strataTone(wy, wq, seed, desert, fpA);
+    float3 stone = strataTone(wy, wq, seed, max(desert, rimW), fpA);
 
     float3 grassWet = float3(0.12, 0.20, 0.13), grassDry = float3(0.40, 0.34, 0.16), grassCold = float3(0.20, 0.23, 0.17);
     float3 grass = mix(mix(grassDry, grassWet, smoothstep(0.3, 0.7, c.moist)), grassCold, cold);
@@ -779,6 +810,9 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
     float3 sand = mix(float3(0.47, 0.41, 0.29), float3(0.60, 0.53, 0.39), lagoon);
     float3 desertTop = float3(0.54, 0.34, 0.19);
     float3 tread = mix(grass, desertTop, desert) * (0.95 + 0.1 * perlin2(wq / 40.0, seed + 30u));
+    // Shoreline benches alternate rust and ochre with height, drifting slowly along the rim.
+    float benchK = saturate(0.5 + 0.9 * perlin2(float2(H * 0.23 + w.x / 400.0, w.y / 400.0), seed + 18u));
+    tread = mix(tread, mix(float3(0.48, 0.25, 0.15), float3(0.62, 0.46, 0.25), benchK), rimW);
     // Broad, soft mottling: a little warmer and drier in one drift, cooler and lusher in the next.
     float mott = perlin2(wq / 13.0, seed + 31u) * (1.0 - smoothstep(0.6, 2.0, fpA));
     tread *= 1.0 + mott * float3(0.05, 0.035, -0.01);
@@ -804,16 +838,38 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
     int drops = int(H - hx0 >= 3.0) + int(H - hx1 >= 3.0) + int(H - hz0 >= 3.0) + int(H - hz1 >= 3.0);
     bool beach = H <= SEA + 1.2;
     if (beach) tread = sand;
+    // Salt crust: cream with slow Perlin drifts, and a faint polygon net from two crossing sets of
+    // Perlin zero-lines that fades long before it could alias.
+    float crustW = beach ? smoothstep(0.3, 0.6, salt) : 0.0;
+    if (crustW > 0.0) {
+        float3 crust = mix(float3(0.66, 0.63, 0.56), float3(0.68, 0.60, 0.56), saturate(perlin2(wq / 210.0, seed + 23u) + 0.5))
+                     * (1.0 + 0.07 * perlin2(wq / 60.0, seed + 19u) + 0.04 * perlin2(wq / 17.0, seed + 20u));
+        float lw = 0.06 + fpA * 0.6;
+        float net = max(1.0 - smoothstep(0.0, lw, abs(perlin2(wq / 2.4, seed + 21u))),
+                        1.0 - smoothstep(0.0, lw, abs(perlin2(OCT_ROT * wq / 2.4 + 13.7, seed + 22u))));
+        crust *= 1.0 - 0.045 * net * (1.0 - smoothstep(0.05, 0.2, fpA));
+        // Broader pressure ridges carry the net into the middle distance.
+        float ridge = 1.0 - smoothstep(0.0, 0.04 + fpA * 0.08, abs(perlin2(wq / 15.0, seed + 24u)));
+        crust *= 1.0 - 0.035 * ridge * (1.0 - smoothstep(0.3, 0.8, fpA));
+        // Wet salt is greyer: pool floors, and a damp margin that shades into each pool.
+        float lvl = poolLevel(salt);
+        float damp = H < PAN ? 1.0 : smoothstep(lvl - 0.14, lvl, poolNoise(wq + seedOffset(seed), seed));
+        crust *= mix(float3(1.0), float3(0.80, 0.82, 0.85), damp);
+        tread = mix(tread, crust, crustW);
+        // The pan is dead level: lit by the smoothed heightfield, or with the lip and pool floor lit as
+        // walls and corners, every pool would be outlined.
+        s.level = crustW;
+    }
     s.tread = tread;
     bool snowy = float(int(H)) > snowline;
     if (snowy) s.riser = 0.0;
 
     if (n.y > 0 && !underGap) {
         if (float(v.y + 1) > snowline) s.albedo = float3(0.63, 0.66, 0.71);
-        else if (beach) s.albedo = sand;
+        else if (beach) s.albedo = tread;
         else if (drops >= 2) s.albedo = stone;
         else s.albedo = tread;
-        float sandy = float(v.y + 1) > snowline || (drops >= 2 && !beach) ? 0.0 : beach ? 1.0 : smoothstep(0.35, 0.7, desert);
+        float sandy = float(v.y + 1) > snowline || (drops >= 2 && !beach) ? 0.0 : beach ? 1.0 - crustW : smoothstep(0.35, 0.7, desert);
         if (painted > 0.0 && !beach && !snowy) s.albedo = mix(s.albedo, tread, painted);
         if (sandy > 0.0) {
             float3 rp = sandRipples(v.xz + mapOrigin, uv, w, fpA, time, seed) * sandy;
@@ -821,7 +877,7 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
             s.slope = rp.yz;
         }
     } else if (n.y == 0 && !underGap) {
-        if (beach) s.albedo = sand * 0.85;
+        if (beach) s.albedo = tread * 0.85;
         else if (slope < 4.0 && !snowy) s.albedo = mix(mix(tread, stone, 0.5) * 0.9, stone * 0.95, painted);
         else s.albedo = snowy ? mix(stone, float3(0.63, 0.66, 0.71), 0.45) : stone;
     } else {
@@ -948,7 +1004,8 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     float wf = smoothstep(0.025, 0.20, fp);
     float3 nS = normalize(float3(s.nh.x - s.nh.y, 2.0, s.nh.z - s.nh.w));
     float3 nl = normalize(mix(normalize(n - float3(s.slope.x, 0.0, s.slope.y)), nS, wf));
-    float ao = mix(cornerAO(x.hm, x.size, h.voxel, h.normal, uv), 0.85, wf) * s.canopy;
+    nl = normalize(mix(nl, float3(0, 1, 0), s.level));
+    float ao = mix(mix(cornerAO(x.hm, x.size, h.voxel, h.normal, uv), 0.85, wf), 1.0, s.level) * s.canopy;
     // Cliffs several pixels tall keep their strata; only sub-pixel stairs take the tread colour.
     float keep = smoothstep(6.0, 14.0, s.riser / fp) * smoothstep(3.0, 5.0, s.riser);
     float3 alb = h.normal.y == 0 ? mix(s.albedo, s.tread, wf * (1.0 - keep)) : s.albedo;
@@ -1174,7 +1231,9 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         float ex = perlin3(float3((ww + float2(0.05, 0)) * 0.3, x.time * 0.25), x.seed + 60u);
         float ez = perlin3(float3((ww + float2(0, 0.05)) * 0.3, x.time * 0.25), x.seed + 60u);
         float lagoon = smoothstep(0.0, 0.35, lagoonAmount(climate(ww, x.seed)));
-        float rs = max(0.35 * saturate(1.0 - tw * x.pixelAngle * 4.0) * (1.0 - 0.6 * lagoon), 0.08 * x.L.night);
+        // Pools on a salt pan are a still skin over pale crust: a near-perfect mirror.
+        float salt = saltAmount(climate(ww, x.seed));
+        float rs = max(0.35 * saturate(1.0 - tw * x.pixelAngle * 4.0) * (1.0 - 0.6 * lagoon), 0.08 * x.L.night) * (1.0 - 0.7 * salt);
         float3 n = normalize(float3(-(ex - e0) * rs, 1.0, -(ez - e0) * rs));
         float3 r = reflect(d, n);
         r.y = abs(r.y);
@@ -1199,7 +1258,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             xr.L.key = normalize(mix(x.L.key, kr, lagoon));
             xr.L.keyCol *= mix(1.0, ky / kr.y * (0.98 - 0.98 * pow(1.0 - ky, 5.0)), lagoon);
             float3 lit = shade(xr, o, d, h, false);
-            under = mix(deep, lit * float3(0.55, 0.8, 0.85), exp(-path * 0.35));
+            under = mix(deep, lit * mix(float3(0.55, 0.8, 0.85), float3(0.9, 0.95, 0.97), salt), exp(-path * mix(0.35, 0.08, salt)));
             if (lagoon > 0.0) {
                 // Clear water over sand: red is absorbed first, so the bed turns aquamarine, then teal, then blue.
                 // Light crosses the water twice: down to the bed, then up along the view path.
