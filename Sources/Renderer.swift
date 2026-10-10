@@ -34,14 +34,21 @@ struct SkyClock {
     var phase: Double = -0.035 // just before sunrise: open on blue hour
     static let dayLength: Double = 24 * 60
 
+    // Peak day is held to a long-afternoon sun (flat high noon judged weakest); night keeps its full depth
+    // (a shallower night judged worse). Both halves meet at the horizon.
+    static func elevation(_ phase: Double) -> Double {
+        let w = sin(2 * .pi * phase)
+        return w * (w > 0 ? 0.42 : 0.56) + 0.07
+    }
+
     var sunDirection: SIMD3<Double> {
-        let el = asin(sin(2 * .pi * phase) * 0.56 + 0.08)
+        let el = asin(SkyClock.elevation(phase))
         let az = 2 * .pi * phase * 0.5 + 0.9
         return SIMD3(cos(el) * sin(az), sin(el), cos(el) * cos(az))
     }
 
     mutating func advance(_ dt: Double) {
-        let y = sin(2 * .pi * phase) * 0.56 + 0.08
+        let y = SkyClock.elevation(phase)
         let s = min(max((abs(y) - 0.22) / 0.35, 0), 1)
         // Linger in golden and blue hour, hurry through midday and deep night.
         let warp = y < -0.25 ? 5.0 : 0.5 + 1.5 * s * s * (3 - 2 * s)
