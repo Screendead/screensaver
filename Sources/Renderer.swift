@@ -82,6 +82,7 @@ final class World {
         let tex: MTLTexture
         let levels: [MTLTexture]
         let climate: MTLTexture
+        let structTex: MTLTexture
         let sites: MTLBuffer
         var origin = SIMD2<Int32>(Int32.min, Int32.min)
         var globalMax: Float = 255
@@ -95,10 +96,14 @@ final class World {
             let cd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: World.size, height: World.size, mipmapped: false)
             cd.usage = [.shaderRead, .shaderWrite]
             cd.storageMode = .private
-            guard let t = device.makeTexture(descriptor: td), let c = device.makeTexture(descriptor: cd),
+            let sd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Uint, width: World.size, height: World.size, mipmapped: false)
+            sd.usage = [.shaderRead, .shaderWrite]
+            sd.storageMode = .private
+            guard let t = device.makeTexture(descriptor: td), let c = device.makeTexture(descriptor: cd), let st = device.makeTexture(descriptor: sd),
                   let sb = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.siteStride, options: .storageModeShared) else { return nil }
             tex = t
             climate = c
+            structTex = st
             sites = sb
             levels = (0..<t.mipmapLevelCount).map {
                 t.makeTextureView(pixelFormat: .rgba16Float, textureType: .type2D, levels: $0..<($0 + 1), slices: 0..<1)!
@@ -116,6 +121,7 @@ final class World {
     private let plantPipeline: MTLComputePipelineState
     private let climatePipeline: MTLComputePipelineState
     private let sitePipeline: MTLComputePipelineState
+    private let stampPipeline: MTLComputePipelineState
     private let scratch: [MTLTexture]
     private var buffers: [Buffer]
     private var active = 0
@@ -127,6 +133,7 @@ final class World {
     var origin: SIMD2<Int32> { buffers[active].origin }
     var globalMax: Float { buffers[active].globalMax }
     var siteBuffer: MTLBuffer { buffers[active].sites }
+    var structTex: MTLTexture { buffers[active].structTex }
     var sites: [SiteInfo] { buffers[active].siteList }
 
     init?(device: MTLDevice, library: MTLLibrary, seed: UInt32) {
@@ -137,7 +144,7 @@ final class World {
         sd.usage = [.shaderRead, .shaderWrite]
         sd.storageMode = .private
         guard let gen = pipeline("generateHeight"), let red = pipeline("reduceMax"), let clean = pipeline("cleanupColumns"),
-              let plant = pipeline("plantTrees"), let clim = pipeline("bakeClimate"), let place = pipeline("placeSites"),
+              let plant = pipeline("plantTrees"), let clim = pipeline("bakeClimate"), let place = pipeline("placeSites"), let stamp = pipeline("stampStructures"),
               let s0 = device.makeTexture(descriptor: sd), let s1 = device.makeTexture(descriptor: sd), let q = device.makeCommandQueue(),
               let a = Buffer(device: device), let b = Buffer(device: device) else { return nil }
         self.device = device
@@ -149,6 +156,7 @@ final class World {
         plantPipeline = plant
         climatePipeline = clim
         sitePipeline = place
+        stampPipeline = stamp
         scratch = [s0, s1]
         buffers = [a, b]
     }
@@ -188,9 +196,15 @@ final class World {
         enc.setBuffer(buf.sites, offset: 0, index: 0)
         enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 1)
         enc.dispatchThreads(MTLSize(width: World.siteGrid, height: World.siteGrid, depth: 1), threadsPerThreadgroup: MTLSize(width: 6, height: 6, depth: 1))
+        // Stamping follows cleanup, which would strip lintel and eave gaps, and precedes planting, so trees avoid it.
+        enc.setComputePipelineState(stampPipeline)
+        enc.setTexture(scratch[1], index: 0)
+        enc.setTexture(scratch[0], index: 1)
+        enc.setTexture(buf.structTex, index: 2)
+        enc.dispatchThreads(full, threadsPerThreadgroup: tg)
         enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
         enc.setComputePipelineState(plantPipeline)
-        enc.setTexture(scratch[1], index: 0)
+        enc.setTexture(scratch[0], index: 0)
         enc.setTexture(buf.levels[0], index: 1)
         enc.dispatchThreads(full, threadsPerThreadgroup: tg)
         enc.setComputePipelineState(climatePipeline)
@@ -473,6 +487,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentTexture(cloudTex, index: 1)
             enc.setFragmentTexture(world.climateTex, index: 2)
             enc.setFragmentBuffer(world.siteBuffer, offset: 0, index: 1)
+            enc.setFragmentTexture(world.structTex, index: 3)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
         }

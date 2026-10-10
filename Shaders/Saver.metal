@@ -332,7 +332,7 @@ static Tree treeInCell(texture2d<float, access::read> src, int2 cell, int2 origi
     if (any(t.c < 1) || any(t.c >= n - 1)) return t;
     float4 col = src.read(uint2(t.c));
     t.g = col.r;
-    if (col.b > col.g) return t;
+    if (col.b > col.g || col.a < 0.0) return t;
     float g0 = src.read(uint2(t.c + int2(1, 0))).r, g1 = src.read(uint2(t.c - int2(1, 0))).r;
     float g2 = src.read(uint2(t.c + int2(0, 1))).r, g3 = src.read(uint2(t.c - int2(0, 1))).r;
     if (max(max(abs(g0 - t.g), abs(g1 - t.g)), max(abs(g2 - t.g), abs(g3 - t.g))) > 1.0) return t;
@@ -383,8 +383,10 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
     uint n = src.get_width();
     if (gid.x >= n || gid.y >= n) return;
     float4 col = src.read(gid);
-    col.a = 0;
-    if (col.b > col.g || col.r < SEA + 2.0) { dst.write(col, gid); return; }
+    // Structures pass through; a clearing keeps its mark unless a canopy spreads over it.
+    col.a = min(col.a, 0.0);
+    bool built = col.a < 0.0 && -col.a < col.r;
+    if (built || col.b > col.g || col.r < SEA + 2.0) { dst.write(col, gid); return; }
     int2 p = int2(gid);
     int2 wc = p + info.xy;
     int2 home = int2(floor(float2(wc) / float(TREE_CELL)));
@@ -438,7 +440,7 @@ struct Site {
 };
 
 constant int T_HENGE = 1, T_CAIRN = 2, T_RUINS = 3, T_HAMLET = 4, T_JETTY = 5, T_CAMP = 6;
-constant int P_BOX = 1, P_HOUSE = 2, P_DECK = 3, P_BOAT = 4, P_HENGE = 5, P_WALL = 6, P_RING = 7, P_FIRE = 8;
+constant int P_BOX = 1, P_HOUSE = 2, P_DECK = 3, P_BOAT = 4, P_HENGE = 5, P_WALL = 6, P_RING = 7, P_FIRE = 8, P_CLEAR = 9;
 // Part flags; bits 8-11 hold a lamp index + 1, bits 12-13 the house variant (0 thatch, 1 adobe, 2 slate, 3 stilt).
 constant int F_REL = 1, F_AXISZ = 2, F_FLAT = 4, F_STILT = 8, F_TENT = 16, F_CHIMNEY = 32, F_WATER = 64;
 constant int M_STONE = 4, M_TIMBER = 5, M_ROOF = 6, M_PLASTER = 7, M_PLANK = 8, M_CLOTH = 9, M_FIRE = 10;
@@ -775,7 +777,7 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
             float shift = (hashf(rh >> 9) - 0.5) * 8.0;
             int2 a = int2(round(up * off + along * (shift - len * 0.5)));
             int2 b = int2(round(up * off + along * (shift + len * 0.5)));
-            addPart(G, makePart(P_WALL, M_STONE, a, int2(0), b.x, b.y, 3, int(rh & 0xfu) << 12), length(float2(max(abs(a), abs(b)))) + 2.0);
+            addPart(G, makePart(P_WALL, M_STONE, a, int2(0), b.x, b.y, 4, int(rh & 0xfu) << 12), length(float2(max(abs(a), abs(b)))) + 2.0);
         }
         if (((hb >> 8) & 1u) != 0u) {
             int2 tc = int2(round(along * (12.0 + hashf(hb >> 10) * 6.0) * (((hb >> 9) & 1u) != 0u ? 1.0 : -1.0)));
@@ -828,11 +830,12 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
             float a = a0 + float(i) * 2.3;
             int2 tc = int2(round(float2(cos(a), sin(a)) * 4.5));
             float tl, th;
-            if (!flatPatch(hm, c + tc, 1, 0.0, tl, th) || tl < SEA + 2.0) continue;
+            if (!flatPatch(hm, c + tc, 1, 1.0, tl, th) || tl < SEA + 2.0) continue;
             int axis = ((hb >> (8 + i)) & 1u) != 0u ? F_AXISZ : 0;
             addPart(G, makePart(P_HOUSE, M_CLOTH, tc - 1, int2(3), int(tl), int(tl), int(pcg(hb + uint(i)) & 0x7fffu), F_TENT | axis),
                     length(float2(tc)) + 3.0);
         }
+        addPart(G, makePart(P_CLEAR, 0, int2(0), int2(8, 0), 0, 0, 0, 0), 9.0);
         age = 0.1;
         ok = true;
     }
@@ -847,6 +850,235 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
     G.s.head.z = type;
     G.s.info = float4(min(G.r, 125.0), age, float(G.np), float(G.nl));
     sites[idx] = G.s;
+}
+
+// structTex bits: 0-3 material, 4-6 roof plane (1 -x, 2 +x, 3 -z, 4 +z, 5 level ridge), 7 flat top, 8 clearing,
+// 9-12 part, 13-21 site, 22-25 window on side (-x, +x, -z, +z), 26-28 door side + 1, 29 chimney.
+constant uint S_FLAT = 1u << 7, S_CLEAR = 1u << 8, S_CHIMNEY = 1u << 29;
+
+struct Claim { bool hit; float H, gl, gh, base; uint bits; };
+
+static inline Claim noClaim() { Claim c; c.hit = false; c.H = 0; c.gl = 0; c.gh = 0; c.base = 0; c.bits = 0; return c; }
+static inline Claim solidClaim(float H, float base, uint bits) {
+    Claim c; c.hit = true; c.H = H; c.gl = 0; c.gh = 0; c.base = base; c.bits = bits; return c;
+}
+// Solid below gl and from gh to H: lintels, eaves, decks and hulls over open ground or water.
+static inline Claim gapClaim(float gl, float gh, float H, uint bits) {
+    Claim c; c.hit = true; c.H = H; c.gl = gl; c.gh = gh; c.base = gh; c.bits = bits; return c;
+}
+
+// One part's column at q (map-local), on ground g; `near` collects the clearing around it.
+static Claim stampPart(Part P, int2 q, int2 c, float g, texture2d<float, access::read> hm, uint hash, thread bool& near) {
+    int2 r0 = c + P.o, r1 = r0 + P.sz;
+    uint mat = uint(P.mat);
+    bool inRect = all(q >= r0) && all(q < r1);
+    bool wetOK = (P.flags & F_WATER) != 0;
+    if (P.kind == P_BOX || P.kind == P_FIRE) {
+        if (all(q >= r0 - 2) && all(q < r1 + 2)) near = true;
+        if (!inRect || (!wetOK && g < SEA + 1.0)) return noClaim();
+        float top = P.kind == P_FIRE ? g + 1.0 + float(P.y0) : (P.flags & F_REL) != 0 ? g + float(P.y0) : float(P.y0);
+        if (top <= g) return noClaim();
+        return solidClaim(top, g, mat | S_FLAT);
+    }
+    if (P.kind == P_HOUSE) {
+        if (all(q >= r0 - 2) && all(q < r1 + 2)) near = true;
+        if (!inRect) return noClaim();
+        bool axisZ = (P.flags & F_AXISZ) != 0;
+        int i = axisZ ? q.y - r0.y : q.x - r0.x;   // along the ridge
+        int j = axisZ ? q.x - r0.x : q.y - r0.y;   // across it
+        int L = axisZ ? P.sz.y : P.sz.x, Dt = axisZ ? P.sz.x : P.sz.y;
+        int e = min(j, Dt - 1 - j);
+        uint hh = uint(P.y2);
+        bool flat = (P.flags & F_FLAT) != 0, tent = (P.flags & F_TENT) != 0, stilt = (P.flags & F_STILT) != 0;
+        // Sides 0 -x, 1 +x, 2 -z, 3 +z: the long walls face across, the gables along.
+        uint sLo = axisZ ? 0u : 2u, sHi = axisZ ? 1u : 3u, gLo = axisZ ? 2u : 0u, gHi = axisZ ? 3u : 1u;
+        uint win = 0u, door = 0u;
+        int wallJ0 = flat ? 0 : 1, wallJ1 = flat ? Dt - 1 : Dt - 2;
+        if (!tent && (j == wallJ0 || j == wallJ1)) {
+            uint side = j == wallJ0 ? sLo : sHi;
+            int doorI = L / 2;
+            bool doorHi = (hh & 4u) != 0u;
+            bool doorWall = (j == wallJ1) == doorHi;
+            if (i == doorI && doorWall) door = side + 1u;
+            else if ((i == 1 && ((hh >> (doorWall ? 0 : 1)) & 1u) != 0u) || (i == L - 2 && ((hh >> (doorWall ? 1 : 3)) & 1u) != 0u)
+                     || (i == doorI && !doorWall && ((hh >> 6) & 1u) != 0u)) win |= 1u << side;
+        }
+        if (!tent && (i == 0 || i == L - 1) && e == (Dt - 1) / 2 && ((hh >> 5) & 1u) != 0u) win |= 1u << (i == 0 ? gLo : gHi);
+        uint bits = (win << 22) | (door << 26);
+        if (flat) {
+            if (g < SEA + 1.0) return noClaim();
+            return solidClaim(float(P.y1), g, mat | S_FLAT | bits);
+        }
+        uint plane = j * 2 < Dt - 1 ? (axisZ ? 1u : 3u) : j * 2 > Dt - 1 ? (axisZ ? 2u : 4u) : 5u;
+        if (tent) {
+            if (g < SEA + 1.0) return noClaim();
+            return solidClaim(g + (e == 0 ? 1.0 : 2.0), g, mat | (plane << 4));
+        }
+        float floorY = float(P.y0), eave = float(P.y1);
+        if (e == 0) {
+            // Eave overhang: a roof course on air.
+            if (eave > g + 0.5) return gapClaim(g, eave, eave + 1.0, uint(M_ROOF) | (plane << 4));
+            return solidClaim(max(eave, g) + 1.0, g, uint(M_ROOF) | (plane << 4));
+        }
+        float H = eave + float(e) + 1.0;
+        if ((P.flags & F_CHIMNEY) != 0 && i == 1 && e == (Dt - 1) / 2) { H += 1.0; bits |= S_CHIMNEY; }
+        bits |= mat | (plane << 4);
+        bool pile = (i == 0 || i == L - 1) && e == 1;
+        if (stilt && g < floorY - 0.5 && !pile) return gapClaim(g, floorY, H, bits);
+        if (!stilt && g < SEA + 1.0) return noClaim();
+        return solidClaim(H, g, bits);
+    }
+    if (P.kind == P_DECK) {
+        if (all(q >= r0 - 2) && all(q < r1 + 2)) near = true;
+        float T = float(P.y0);
+        if (!inRect || g >= T) return noClaim();
+        bool axisZ = (P.flags & F_AXISZ) != 0;
+        int i = axisZ ? q.y - r0.y : q.x - r0.x;
+        int j = axisZ ? q.x - r0.x : q.y - r0.y;
+        int W = max(axisZ ? P.sz.x : P.sz.y, 1);
+        // Pilings every third plank, on alternate sides of a wide deck.
+        if (g < SEA && i % 3 == 1 && j == (i / 3) % W) return solidClaim(T, g, uint(M_TIMBER) | S_FLAT);
+        if (g >= T - 1.0) return solidClaim(T, g, mat | S_FLAT);
+        return gapClaim(g, T - 1.0, T, mat | S_FLAT);
+    }
+    if (P.kind == P_BOAT) {
+        if (all(q >= r0 - 1) && all(q < r1 + 1)) near = true;
+        if (!inRect) return noClaim();
+        if (g < SEA - 1.0) return gapClaim(g, 19.0, 21.0, mat);
+        return solidClaim(max(g + 1.0, 21.0), g, mat);
+    }
+    if (P.kind == P_HENGE) {
+        float2 cc = float2(c + P.o) + 0.5;
+        float R = float(P.y0) * 0.25;
+        int N = max(P.y1, 1);
+        float2 dq = float2(q) + 0.5 - cc;
+        float r = length(dq);
+        if (r > R + 4.0) return noClaim();
+        near = true;
+        if (r < R - 3.0) return noClaim();
+        if (g < SEA + 1.0) return noClaim();
+        float stepA = 6.2831853 / float(N);
+        int k = int(round(atan2(dq.y, dq.x) / stepA));
+        k = (k % N + N) % N;
+        float ang = float(k) * stepA;
+        float2 dir = float2(cos(ang), sin(ang));
+        int2 sc = int2(floor(cc + dir * R));
+        // The tangent runs along z where the radius runs along x.
+        bool alongZ = abs(dir.x) >= abs(dir.y);
+        int2 tv = alongZ ? int2(0, 1) : int2(1, 0);
+        int2 rd = alongZ ? int2(dir.x > 0.0 ? 1 : -1, 0) : int2(0, dir.y > 0.0 ? 1 : -1);
+        uint kh = pcg(hash + uint(P.y2) * 31u + uint(k) * 977u);
+        float u = hashf(kh);
+        float T = colH(hm, sc) + 3.0 + float((kh >> 8) % 3u);
+        if (u < 0.2) return noClaim();
+        if (u < 0.34) {
+            // Fallen outward.
+            for (int m = 0; m < 3; m++) if (all(q == sc + rd * m)) return solidClaim(g + 1.0, g, mat | S_FLAT);
+            return noClaim();
+        }
+        if (u > 0.8) {
+            // Trilithon: two uprights and a lintel over the gap between them.
+            if (all(q == sc - tv) || all(q == sc + tv)) return solidClaim(max(T, g + 2.0), g, mat | S_FLAT);
+            if (all(q == sc) && T - 1.0 > g + 1.5) return gapClaim(g, T - 1.0, T, mat | S_FLAT);
+            return noClaim();
+        }
+        if (all(q == sc) || (((kh >> 12) & 1u) != 0u && all(q == sc + tv))) return solidClaim(max(T - 1.0, g + 2.0), g, mat | S_FLAT);
+        return noClaim();
+    }
+    if (P.kind == P_WALL) {
+        int2 a = c + P.o, b = c + int2(P.y0, P.y1);
+        int2 lo = min(a, b), hi = max(a, b);
+        if (any(q < lo - 2) || any(q > hi + 2)) return noClaim();
+        float2 dv = float2(b - a);
+        float s;
+        bool on;
+        if (abs(dv.x) >= abs(dv.y)) {
+            float zl = float(a.y) + float(q.x - a.x) * (dv.x != 0.0 ? dv.y / dv.x : 0.0);
+            on = q.x >= lo.x && q.x <= hi.x && int(round(zl)) == q.y;
+            if (abs(zl - float(q.y)) < 2.5) near = true;
+            s = abs(float(q.x - a.x));
+        } else {
+            float xl = float(a.x) + float(q.y - a.y) * dv.x / dv.y;
+            on = q.y >= lo.y && q.y <= hi.y && int(round(xl)) == q.x;
+            if (abs(xl - float(q.x)) < 2.5) near = true;
+            s = abs(float(q.y - a.y));
+        }
+        if (!on || g < SEA + 1.0) return noClaim();
+        // Eroded: the run breaks where the noise dips, and its broken top rises and falls.
+        float nz = perlin2(float2(s / 5.0, float(P.flags >> 12) * 7.3 + 0.5), hash + 300u);
+        if (nz < -0.22) return noClaim();
+        float hgt = max(1.0, round(float(P.y2) * (0.6 + nz)));
+        return solidClaim(g + hgt, g, mat | S_FLAT);
+    }
+    if (P.kind == P_CLEAR) {
+        // A glade: no trunk within sz.x of o, so canopies keep off the camp.
+        float2 dq = float2(q - c - P.o);
+        if (dot(dq, dq) < float(P.sz.x * P.sz.x)) near = true;
+        return noClaim();
+    }
+    if (P.kind == P_RING) {
+        float2 cc = float2(c + P.o) + 0.5;
+        float2 dq = float2(q) + 0.5 - cc;
+        float r = length(dq);
+        if (r < float(P.sz.y) + 3.0) near = true;
+        if (r < float(P.sz.x) - 0.3 || r > float(P.sz.y) + 0.3 || g < SEA + 1.0) return noClaim();
+        // A toppled tower: a ring of wall whose broken top falls from one side to the other.
+        float th0 = hashf(uint(P.y1)) * 6.2831853;
+        float k = 0.5 + 0.5 * cos(atan2(dq.y, dq.x) - th0);
+        float hgt = 1.0 + round(float(P.y2) * k * k + perlin2(dq * 0.7, hash + 301u));
+        return solidClaim(g + max(hgt, 1.0), g, mat | S_FLAT);
+    }
+    return noClaim();
+}
+
+// Raises each site's parts into the cleaned columns, and marks the clearing around them, where no tree takes a
+// trunk. A structure column holds -base in alpha (base: its first structure voxel) and its detail in `st`; a
+// clearing column holds -H, which reads as no structure.
+kernel void stampStructures(texture2d<float, access::read> src [[texture(0)]],
+                            texture2d<float, access::write> dst [[texture(1)]],
+                            texture2d<uint, access::write> st [[texture(2)]],
+                            device const Site* sites [[buffer(0)]],
+                            constant int4& info [[buffer(1)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+    uint n = src.get_width();
+    if (gid.x >= n || gid.y >= n) return;
+    float4 col = src.read(gid);
+    int2 q = int2(gid);
+    // Arches keep their single gap.
+    if (col.b <= col.g) {
+        int2 home = int2(floor(float2(q + info.xy) / float(SITE_CELL))) - siteCell0(info.xy);
+        bool near = false;
+        int nearSite = 0;
+        for (int jj = -1; jj <= 1; jj++)
+            for (int ii = -1; ii <= 1; ii++) {
+                int2 gi = home + int2(ii, jj);
+                if (any(gi < 0) || any(gi >= SITE_GRID)) continue;
+                int si = gi.y * SITE_GRID + gi.x;
+                device const Site& s = sites[si];
+                if (s.head.z == 0) continue;
+                int2 c = s.head.xy - info.xy;
+                float2 dd = float2(q - c);
+                if (dot(dd, dd) > (s.info.x + 4.0) * (s.info.x + 4.0)) continue;
+                int np = int(s.info.z);
+                for (int k = 0; k < np; k++) {
+                    bool nk = false;
+                    Claim cl = stampPart(unpackPart(s.parts[k]), q, c, col.r, src, uint(s.head.w), nk);
+                    if (cl.hit) {
+                        dst.write(float4(cl.H, cl.gl, cl.gh, -cl.base), gid);
+                        st.write(uint4(cl.bits | (uint(k) << 9) | (uint(si) << 13), 0, 0, 0), gid);
+                        return;
+                    }
+                    if (nk && !near) { near = true; nearSite = si; }
+                }
+            }
+        if (near) {
+            dst.write(float4(col.rgb, -col.r), gid);
+            st.write(uint4(S_CLEAR | (uint(nearSite) << 13), 0, 0, 0), gid);
+            return;
+        }
+    }
+    dst.write(float4(col.rgb, 0), gid);
+    st.write(uint4(0), gid);
 }
 
 // MARK: - Traversal
@@ -1132,6 +1364,8 @@ struct Surface {
     float autumn;
     float level;    // 1 shades the face as dead-level ground: up normal, no corner AO
     float pale;     // sand, salt crust or snow
+    float3 nrm;     // structures: the plane a roof voxel shades as (zero: the face normal)
+    float3 emit;    // fire, lanterns and lit windows
 };
 
 // Autumn foliage: a slow Perlin hue field runs lingering green, gold, orange, scarlet to crimson;
@@ -1219,16 +1453,22 @@ static inline float3 sandRipples(int2 v, float2 uv, float2 w, float fp, float ti
     return float3(0.045 * amp * r + 0.035 * swell + 0.05 * streak, 0.018 * amp * dr * wind);
 }
 
-static Surface surfaceAt(texture2d<float> hm, texture2d<float> clim, int size, int3 v, int3 n, float2 uv, float fp, float fpA, int2 mapOrigin, uint seed, float time) {
+static Surface surfaceAt(texture2d<float> hm, texture2d<float> clim, texture2d<uint> st, device const Site* sites,
+                         int size, int3 v, int3 n, float2 uv, float fp, float fpA, int2 mapOrigin, uint seed, float time) {
     Surface s;
     s.slope = 0;
     s.mat = 0;
     s.level = 0;
     s.pale = 0;
+    s.nrm = 0;
+    s.emit = 0;
     float4 col4 = hm.read(uint2(clamp(v.xz, int2(0), int2(size - 1))), 0);
     float3 col = col4.rgb;
     bool tree = col4.a > 0.0;
-    float H = tree ? col.y : col.x;
+    // A structure stands on this column from voxel `base` up; below it (or below its gap) is the terrain.
+    float base = -col4.a;
+    bool built = col4.a < 0.0 && base < col.x;
+    float H = tree ? col.y : built ? (col.z > col.y ? col.y : base) : col.x;
     s.canopy = tree ? 0.55 : 1.0;
     s.H = H;
     float hx0 = groundAt(hm, v.xz + int2(-1, 0), size), hx1 = groundAt(hm, v.xz + int2(1, 0), size);
@@ -1253,7 +1493,7 @@ static Surface surfaceAt(texture2d<float> hm, texture2d<float> clim, int size, i
         birch = birchAmount(w, seed);
         fallLeaf = autumnLeaf(w, birch, seed);
     }
-    bool underGap = !tree && col.z > col.y && float(v.y) < col.z;
+    bool underGap = !tree && !built && col.z > col.y && float(v.y) < col.z;
 
     float salt = saltAmount(c);
     float rimW = smoothstep(0.05, 0.4, salt);
@@ -1393,6 +1633,102 @@ static Surface surfaceAt(texture2d<float> hm, texture2d<float> clim, int size, i
         s.tread = s.albedo;
         s.canopy = 1.0;
     }
+    if (built && float(v.y) >= base) {
+        uint sb = st.read(uint2(clamp(v.xz, int2(0), int2(size - 1)))).r;
+        int mat = int(sb & 15u);
+        uint plane = (sb >> 4) & 7u;
+        device const Site& site = sites[(sb >> 13) & 511u];
+        Part P = unpackPart(site.parts[(sb >> 9) & 15u]);
+        uint sh = uint(site.head.w);
+        float age = site.info.y;
+        float Ht = col.x;
+        int variant = (P.flags >> 12) & 3;
+        bool chim = (sb & S_CHIMNEY) != 0u;
+        bool house = P.kind == P_HOUSE && (P.flags & F_TENT) == 0;
+        // This voxel's material: a house column is wall below its top roof course, plinth (or stilts) below the floor.
+        int vm = mat;
+        bool roof = (mat == M_ROOF || mat == M_CLOTH) && plane != 0u;
+        if (house && mat != M_ROOF) {
+            if (chim && float(v.y) >= Ht - 1.0) vm = M_STONE;
+            else if (plane != 0u && float(v.y) >= Ht - (chim ? 2.0 : 1.0)) { roof = true; vm = M_ROOF; }
+            else if (float(v.y) < float(P.y0)) vm = (P.flags & F_STILT) != 0 ? M_TIMBER : M_STONE;
+        }
+        if (P.kind == P_FIRE && float(v.y) < Ht - 1.0) vm = M_STONE;
+        float3 a;
+        if (vm == M_STONE) {
+            // The hill's own rock, lichened with age.
+            a = strataTone(wy, wq, seed, desert, fpA) * 0.8;
+            if (painted > 0.0) a = mix(a, paintedTone(wy, paintedLateral(w, seed), seed, fpA) * 0.85, painted);
+            float3 lichen = mix(mix(float3(0.17, 0.19, 0.14), float3(0.26, 0.15, 0.07), autumn), float3(0.26, 0.27, 0.27), cold);
+            float ln = fp < 0.15 ? perlin3(float3(wq.x, wy * 1.3, wq.y) / 1.4, seed + 310u) : 0.0;
+            float cov = smoothstep(0.0, 0.3, ln + 0.45 * age - 0.3 + (n.y > 0 ? 0.15 : 0.0));
+            cov = mix(cov, 0.35 * age, smoothstep(0.04, 0.15, fp));
+            a = mix(a, lichen, cov * (1.0 - desert) * 0.55);
+            // Built stone (walls and houses, not the standing stones) is laid in courses, darker at the joints.
+            if (P.kind != P_HENGE && P.kind != P_BOX && fp < 0.08) {
+                float jy = abs(fract(wy * 2.0) - 0.5), jx = abs(fract((n.x != 0 ? wq.y : wq.x) * 1.5 + floor(wy * 2.0) * 0.5) - 0.5);
+                float joint = max(smoothstep(0.42, 0.48, jy), n.y == 0 ? smoothstep(0.44, 0.49, jx) : 0.0);
+                a *= 1.0 - 0.25 * joint * (1.0 - smoothstep(0.03, 0.08, fp));
+            }
+            a *= P.kind == P_HENGE || P.kind == P_BOX ? 1.0 : 0.85;
+        } else if (vm == M_TIMBER) {
+            a = float3(0.10, 0.075, 0.055) * (1.0 + 0.15 * sin(wy * 9.0 + perlin2(wq * 3.0, seed + 311u) * 3.0) * (1.0 - smoothstep(0.02, 0.06, fp)));
+        } else if (vm == M_ROOF) {
+            float k = hashf(pcg(sh + uint(P.y2)));
+            if (variant == 2) a = float3(0.13, 0.135, 0.15) * (0.9 + 0.2 * k);
+            else if (variant == 3) a = float3(0.27, 0.23, 0.14) * (0.9 + 0.15 * k);
+            else {
+                a = mix(float3(0.22, 0.17, 0.09), float3(0.15, 0.14, 0.10), k);
+                a = mix(a, float3(0.13, 0.13, 0.07), 0.5 * autumn);
+            }
+            // Straw and slate courses run down the slope.
+            float along = plane == 1u || plane == 2u ? wq.y : wq.x;
+            a *= 1.0 + 0.12 * perlin2(float2(along * 3.0, wy * 0.7), seed + 312u) * (1.0 - smoothstep(0.02, 0.07, fp));
+            if (float(v.y + 1) > snowline) a = float3(0.29, 0.30, 0.33);
+        } else if (vm == M_PLASTER) {
+            float3 lime = float3(0.22, 0.205, 0.18), adobe = float3(0.44, 0.28, 0.16);
+            a = mix(lime, adobe, max(desert, painted)) * (0.95 + 0.08 * perlin2(wq / 3.0 + wy, seed + 313u));
+        } else if (vm == M_PLANK) {
+            float seam = n.y > 0 ? 1.0 - smoothstep(0.0, 0.08, abs(fract(((P.flags & F_AXISZ) != 0 ? wq.y : wq.x) * 3.0) - 0.5) - 0.42) : 0.0;
+            a = float3(0.12, 0.10, 0.08) * (1.0 - 0.3 * seam * (1.0 - smoothstep(0.02, 0.06, fp)));
+        } else if (vm == M_CLOTH) {
+            uint ch = pcg(sh + uint(P.y2)) % 3u;
+            a = ch == 0u ? float3(0.22, 0.20, 0.17) : ch == 1u ? float3(0.24, 0.16, 0.08) : float3(0.10, 0.11, 0.15);
+        } else {
+            a = float3(0.05, 0.04, 0.03);
+        }
+        if (P.kind == P_BOAT && n.y > 0) a *= 0.55;
+        // Windows and doors on the wall faces of houses.
+        if (house && n.y == 0 && !roof) {
+            uint side = n.x < 0 ? 0u : n.x > 0 ? 1u : n.z < 0 ? 2u : 3u;
+            float fy = wy - float(P.y0);
+            float e = clamp(fpA * 0.6, 0.03, 0.25);
+            if (((sb >> (22u + side)) & 1u) != 0u) {
+                float m = smoothstep(0.28 - e, 0.28 + e, uv.x) * smoothstep(0.72 + e, 0.72 - e, uv.x)
+                        * smoothstep(0.55 - e, 0.55 + e, fy) * smoothstep(1.45 + e, 1.45 - e, fy);
+                m = mix(m, 0.2, smoothstep(0.05, 0.3, fpA));
+                a = mix(a, float3(0.025, 0.025, 0.03), m);
+            }
+            if (((sb >> 26) & 7u) == side + 1u) {
+                float m = smoothstep(0.25 - e, 0.25 + e, uv.x) * smoothstep(0.75 + e, 0.75 - e, uv.x) * smoothstep(1.6 + e, 1.6 - e, fy);
+                a = mix(a, float3(0.045, 0.035, 0.028), mix(m, 0.4, smoothstep(0.05, 0.3, fpA)));
+            }
+        }
+        s.albedo = a;
+        s.tread = a;
+        s.mat = max(vm, 4);
+        s.canopy = 1.0;
+        s.H = Ht;
+        s.pale = 0;
+        s.slope = 0;
+        s.riser = n.y == 0 ? Ht - nb : 0.0;
+        s.level = (sb & S_FLAT) != 0u && n.y > 0 ? 1.0 : 0.0;
+        if (roof) {
+            const float3 planes[6] = { float3(0, 1, 0), float3(-0.7071, 0.7071, 0), float3(0.7071, 0.7071, 0),
+                                       float3(0, 0.7071, -0.7071), float3(0, 0.7071, 0.7071), float3(0, 1, 0) };
+            s.nrm = planes[plane];
+        }
+    }
     return s;
 }
 
@@ -1483,6 +1819,8 @@ struct Ctx {
     texture2d<float> cloudTex;
     float3 cloudInfo; // as Frame.cloud
     texture2d<float> clim;
+    texture2d<uint> st;
+    device const Site* sites;
 };
 
 // Baked fine cloud field where it covers q, else evaluated.
@@ -1543,7 +1881,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     float fp = h.t * x.pixelAngle; // voxels per pixel
     // Footprint stretched across a grazing face, for detail that must fade before it aliases along the view.
     float fpA = fp / max(abs(dot(n, d)), 0.15);
-    Surface s = surfaceAt(x.hm, x.clim, x.size, h.voxel, h.normal, uv, fp, fpA, x.origin, x.seed, x.time);
+    Surface s = surfaceAt(x.hm, x.clim, x.st, x.sites, x.size, h.voxel, h.normal, uv, fp, fpA, x.origin, x.seed, x.time);
     // Prefilter: from ~1/10 voxel per pixel, relax AO and shadows and give risers their tread colour, so
     // distant stairs read as contour bands, not moire.
     float wf = smoothstep(0.025, 0.20, fp);
@@ -1551,13 +1889,15 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     // Below ~2 pixels per voxel step shadows and sky visibility alias into a hatch that crawls under motion;
     // shade the continuous slope under the stairs instead.
     float wf2 = s.mat == 0 ? smoothstep(0.2, 0.5, fp) : 0.0;
+    bool built = s.mat >= 4;
     // Tops a few pixels wide keep their exact normal: a column's central difference tilts only the tops at a
     // ledge, so they would shade unlike the rest of their plane. Toward 2 pixels per voxel the slope under the
     // stairs takes over, smooth across ledges. Side faces blend with their tread colour (wf), toward the column
     // normal until that slope takes over: a riser in tread colour lit as a wall reads as a veil over the hill
     // behind it. Canopies keep their column normal blend.
     float wt = smoothstep(0.33, 0.6, fp);
-    float wn = s.mat == 0 && h.normal.y != 0 ? wt : wf;
+    // Structures keep their own planes: a column-difference normal would tilt a house's edge columns.
+    float wn = built ? 0.0 : s.mat == 0 && h.normal.y != 0 ? wt : wf;
     if (s.mat == 0 && wt > 0.0 && s.level < 1.0) {
         float R = max(2.0, 1.5 * fp);
         float2 grad = float2(groundSmooth(x.hm, p.xz + float2(R, 0), x.size) - groundSmooth(x.hm, p.xz - float2(R, 0), x.size),
@@ -1566,6 +1906,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
         nS = h.normal.y != 0 ? g : normalize(mix(nS, g, wt));
     }
     float3 nl = normalize(mix(normalize(n - float3(s.slope.x, 0.0, s.slope.y)), nS, wn));
+    if (any(s.nrm != 0.0)) nl = s.nrm;
     nl = normalize(mix(nl, float3(0, 1, 0), s.level));
     float ao = (s.level < 1.0 ? mix(mix(cornerAO(x.hm, x.size, h.voxel, h.normal, uv), 0.85, wf), 1.0, s.level) : 1.0) * s.canopy;
     float drop = s.H - min(min(s.nh.x, s.nh.y), min(s.nh.z, s.nh.w));
@@ -1605,6 +1946,8 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     // A low moon lights a step's riser several times brighter than its tread, drawing a highlight line along
     // every step; under the moon only cliffs outshine the ground they stand in.
     if (h.normal.y == 0 && s.mat == 0) ndl = mix(ndl, min(ndl, max(x.L.key.y, 0.0)), x.L.night * (1.0 - keep));
+    // Low structure faces (cairns, boats, deck edges, fallen stones) are steps too; uprights and house walls stay walls.
+    if (h.normal.y == 0 && built && drop <= 2.0 && !any(s.nrm != 0.0)) ndl = mix(ndl, min(ndl, max(x.L.key.y, 0.0)), x.L.night);
     float hiSun = smoothstep(0.15, 0.45, x.L.key.y) * (1.0 - x.L.night);
     float sh = 1.0;
     if (shadows && ndl > 0.0 && x.L.shadows) {
@@ -1829,7 +2172,8 @@ static float3 softCloudSky(thread const Ctx& x, float3 o, float3 r) {
 
 fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0)]],
                               texture2d<float> hm [[texture(0)]], texture2d<float> cloudTex [[texture(1)]],
-                              texture2d<float> clim [[texture(2)]], device const Site* sites [[buffer(1)]]) {
+                              texture2d<float> clim [[texture(2)]], texture2d<uint> st [[texture(3)]],
+                              device const Site* sites [[buffer(1)]]) {
     float2 ndc = in.uv * 2.0 - 1.0;
     ndc.y = -ndc.y;
     ndc += f.jitter.xy;
@@ -1840,7 +2184,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     Ctx x { hm, f.mapInfo.z, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w, f.misc.y,
             2.0 * tanH * f.resolution.w, f.misc.w, makeLight(f.sunDir.xyz),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
-            cloudTex, f.cloud.xyz, clim };
+            cloudTex, f.cloud.xyz, clim, st, sites };
 
     Hit h = trace(hm, o, d, 4000.0, 400, x.globalMax, x.size);
     if (f.misc2.z == 1) return float4(float(h.iters) / 400.0, h.hit ? 0.3 : 0.0, h.iters >= 399 ? 1 : 0, 1);
