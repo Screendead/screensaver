@@ -21,6 +21,8 @@ struct Frame {
     float4 lights;     // x sun elevation, y night progress (0 dusk .. 1 dawn), z day index, w lamp light on the land (0 by day)
     int4   refs;       // x lamps in the haze list, y smoke plumes
     float4 birds;      // x bird flock count
+    float4 lod[5];     // per level: x morph band start, y handoff radius (the last level's is the world's edge), z morph end, w column width
+    float4 fade;       // x fog fade start, y world radius, z level count, w ring centre's offset ahead of the camera (tests)
 };
 
 constant float SEA = 19.85;
@@ -127,7 +129,9 @@ static inline Climate climate(float2 w, uint seed) {
 // Climate is smooth over hundreds of voxels but costs seven noise octaves, so each map bakes it per column.
 kernel void bakeClimate(texture2d<float, access::write> out [[texture(0)]],
                         constant int4& info [[buffer(0)]],
-                        uint2 gid [[thread_position_in_grid]]) {
+                        constant uint& row0 [[buffer(1)]],
+                        uint2 g [[thread_position_in_grid]]) {
+    uint2 gid = g + uint2(0, row0);
     if (gid.x >= uint(info.z) || gid.y >= uint(info.z)) return;
     Climate c = climate(float2(int2(gid) + info.xy), uint(info.w));
     out.write(float4(c.temp, c.moist, c.fall, c.basin), gid);
@@ -265,7 +269,9 @@ static inline float3 terrainColumn(int2 w, uint seed) {
 
 kernel void generateHeight(texture2d<float, access::write> out [[texture(0)]],
                            constant int4& info [[buffer(0)]],
-                           uint2 gid [[thread_position_in_grid]]) {
+                           constant uint& row0 [[buffer(1)]],
+                           uint2 g [[thread_position_in_grid]]) {
+    uint2 gid = g + uint2(0, row0);
     if (gid.x >= uint(info.z) || gid.y >= uint(info.z)) return;
     int2 w = int2(gid) + info.xy;
     out.write(float4(terrainColumn(w, uint(info.w)), 0), gid);
@@ -274,7 +280,9 @@ kernel void generateHeight(texture2d<float, access::write> out [[texture(0)]],
 // Clamps each column into its 4-neighbour height range: removes single-voxel spikes and pits.
 kernel void cleanupColumns(texture2d<float, access::read> src [[texture(0)]],
                            texture2d<float, access::write> dst [[texture(1)]],
-                           uint2 gid [[thread_position_in_grid]]) {
+                           constant uint& row0 [[buffer(1)]],
+                           uint2 g [[thread_position_in_grid]]) {
+    uint2 gid = g + uint2(0, row0);
     uint n = src.get_width();
     if (gid.x >= n || gid.y >= n) return;
     float4 c = src.read(gid);
@@ -382,7 +390,9 @@ static inline int2 canopySpan(Tree t, int2 o) {
 kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
                        texture2d<float, access::write> dst [[texture(1)]],
                        constant int4& info [[buffer(0)]],
-                       uint2 gid [[thread_position_in_grid]]) {
+                       constant uint& row0 [[buffer(1)]],
+                       uint2 g [[thread_position_in_grid]]) {
+    uint2 gid = g + uint2(0, row0);
     uint n = src.get_width();
     if (gid.x >= n || gid.y >= n) return;
     float4 col = src.read(gid);
@@ -424,8 +434,18 @@ static inline float solidFloor(float4 c) {
     return c.b > c.g ? c.g : c.r;
 }
 
-// r: the highest column below (the tracer's skip levels); g: the lowest solid floor below (the CPU's sightline test).
 kernel void reduceMax(texture2d<float, access::read> src [[texture(0)]],
+                      texture2d<float, access::write> dst [[texture(1)]],
+                      uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
+    uint2 s = gid * 2;
+    float m = max(max(src.read(s).r, src.read(s + uint2(1, 0)).r), max(src.read(s + uint2(0, 1)).r, src.read(s + uint2(1, 1)).r));
+    dst.write(float4(m, 0, 0, 0), gid);
+}
+
+// The CPU readback's mips. r: the highest column below (the camera steers by it); g: the lowest solid floor below
+// (the birds' sightline test).
+kernel void reduceCpu(texture2d<float, access::read> src [[texture(0)]],
                       texture2d<float, access::write> dst [[texture(1)]],
                       constant int& fromColumns [[buffer(0)]],
                       uint2 gid [[thread_position_in_grid]]) {
@@ -1054,7 +1074,9 @@ kernel void stampStructures(texture2d<float, access::read> src [[texture(0)]],
                             texture2d<uint, access::write> st [[texture(2)]],
                             device const Site* sites [[buffer(0)]],
                             constant int4& info [[buffer(1)]],
-                            uint2 gid [[thread_position_in_grid]]) {
+                            constant uint& row0 [[buffer(2)]],
+                            uint2 g [[thread_position_in_grid]]) {
+    uint2 gid = g + uint2(0, row0);
     uint n = src.get_width();
     if (gid.x >= n || gid.y >= n) return;
     float4 col = src.read(gid);
@@ -1154,8 +1176,11 @@ kernel void updateLamps(device const Site* sites [[buffer(0)]],
     float k = kind == L_WINDOW ? 1.0 + (fl - 1.0) * 0.3 : kind == L_LANTERN ? 1.0 + (fl - 1.0) * 0.25 : fl;
     float sunAmt = smoothstep(-0.02, 0.05, f.lights.x);
     float day = kind == L_WINDOW || kind == L_LANTERN ? 1.0 : mix(1.0, 0.02, sunAmt);
+    // Past the 1-voxel map's morph band the land is coarse and carries no structures: lamps fade out with them.
+    float2 ringCam = f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w;
+    float far = 1.0 - smoothstep(f.lod[0].x, f.lod[0].y, length(p.xz - ringCam));
     pos[id] = float4(p, float(kind));
-    state[id] = float4(LAMP_COL[kind] * lvl * k * day, LAMP_R[kind]);
+    state[id] = float4(LAMP_COL[kind] * lvl * k * day * far, LAMP_R[kind]);
 }
 
 // Light from every lamp on a 4-voxel grid over the map: rgb irradiance, and the lamp position weighted by it
@@ -1199,31 +1224,84 @@ kernel void bakeLights(texture2d<float, access::write> lm [[texture(0)]],
     ld.write(P, gid);
 }
 
-// In-scatter of the nearest lamps' light along a ray to tEnd: the closed-form integral of 1/(r^2 + 4) - 1/(Rh^2 + 4)
-// over the ray's chord through a sphere of radius Rh = 3 reach, so a hamlet or a fire hangs in a soft glow of its
-// own haze that ends at zero a few reaches out, and the glow stops at whatever hides it. Without the sphere the
-// integral falls off only as 1/distance and distant lamps tint the whole night.
-static float3 lampHaze(device const float4* pos, device const float4* state, constant int4* refs, int count,
-                       float3 o, float3 d, float tEnd) {
-    float3 sum = 0;
-    for (int i = 0; i < count; i++) {
-        int li = refs[i / 4][i % 4];
-        float4 ls = state[li];
-        if (all(ls.rgb == 0.0)) continue;
-        float4 lp = pos[li];
-        float3 v = lp.xyz - o;
-        float tc = dot(v, d);
-        float p2 = max(dot(v, v) - tc * tc, 0.0);
-        float Rh = 3.0 * ls.w;
-        if (p2 >= Rh * Rh) continue;
-        float c = sqrt(Rh * Rh - p2);
-        float t0 = max(tc - c, 0.0), t1 = min(tc + c, tEnd);
-        if (t1 <= t0) continue;
-        float hh = sqrt(p2 + 4.0);
-        float I = (atan((t1 - tc) / hh) - atan((t0 - tc) / hh)) / hh - (t1 - t0) / (Rh * Rh + 4.0);
-        sum += ls.rgb * LAMP_I[int(lp.w)] * max(I, 0.0);
+// Mip 1 of the 1-voxel map also bounds the level-1 column over it, which the morph band slides toward: the
+// rounded mean of the four raw columns, as coarseHeight takes it.
+kernel void reduceMaxBase(texture2d<float, access::read> src [[texture(0)]],
+                          texture2d<float, access::read> raw [[texture(1)]],
+                          texture2d<float, access::write> dst [[texture(2)]],
+                          uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
+    uint2 s = gid * 2;
+    float m = max(max(src.read(s).r, src.read(s + uint2(1, 0)).r), max(src.read(s + uint2(0, 1)).r, src.read(s + uint2(1, 1)).r));
+    float parent = floor((raw.read(s).r + raw.read(s + uint2(1, 0)).r + raw.read(s + uint2(0, 1)).r + raw.read(s + uint2(1, 1)).r) * 0.25 + 0.5);
+    dst.write(float4(max(m, parent), 0, 0, 0), gid);
+}
+
+// MARK: - Coarse levels
+
+// Coarse level k (1...4) has columns s = 2^k voxels wide, built from the same terrainColumn field: the mean of
+// four point samples, one per child column, so no coarse level carries trees or arches.
+constant int COARSE_N = 2048;
+// Seen at a grazing angle, trees standing several voxels tall hide far more ground than their footprint covers.
+constant float COVER_GAIN = 2.5;
+
+static inline float coarseHeight(int2 cw, int k, uint seed) {
+    int s = 1 << k, off = s >> 2, hs = s >> 1;
+    int2 b = cw * s + off;
+    float sum = terrainColumn(b, seed).x + terrainColumn(b + int2(hs, 0), seed).x
+              + terrainColumn(b + int2(0, hs), seed).x + terrainColumn(b + int2(hs, hs), seed).x;
+    return floor(sum * 0.25 + 0.5);
+}
+
+// Writes the world cells region.xy + [0, region.zw) of level info.x into its toroidal slice (texel = cell & 2047):
+// height and canopy cover, and every second cell also the half-resolution climate texel it starts.
+kernel void generateCoarse(texture2d<float, access::write> hOut [[texture(0)]],
+                           texture2d<float, access::write> cOut [[texture(1)]],
+                           texture2d<float, access::write> vOut [[texture(2)]],
+                           constant int4& region [[buffer(0)]],
+                           constant int4& info [[buffer(1)]],
+                           uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= uint(region.z) || gid.y >= uint(region.w)) return;
+    int k = info.x, s = 1 << k;
+    uint seed = uint(info.y);
+    int2 cw = region.xy + int2(gid);
+    float H = coarseHeight(cw, k, seed);
+    float2 centre = float2(cw * s) + 0.5 * float(s);
+    // Expected share of the column under leaves: planting chance per tree cell times a mean canopy of ~13 columns.
+    float cover = saturate(groveDensity(centre, H, seed) * 13.0 / float(TREE_CELL * TREE_CELL));
+    hOut.write(float4(H), uint2(cw & (COARSE_N - 1)));
+    vOut.write(float4(cover), uint2(cw & (COARSE_N - 1)));
+    if (all((cw & 1) == 0)) {
+        int2 cj = cw >> 1;
+        Climate c = climate((float2(cj) + 0.5) * float(2 * s), seed);
+        cOut.write(float4(c.temp, c.moist, c.fall, c.basin), uint2(cj & (COARSE_N / 2 - 1)));
     }
-    return sum;
+}
+
+// Mip 1 of level info.x over world mip-1 cells region.xy + [0, region.zw): each is one column of the next level,
+// whose height the morph band slides toward, so it bounds that too.
+kernel void reduceMaxParent(texture2d<float, access::read> src [[texture(0)]],
+                            texture2d<float, access::write> dst [[texture(1)]],
+                            constant int4& region [[buffer(0)]],
+                            constant int4& info [[buffer(1)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= uint(region.z) || gid.y >= uint(region.w)) return;
+    int2 c = region.xy + int2(gid);
+    int2 s = c * 2;
+    float m = max(max(src.read(uint2(s & (COARSE_N - 1))).r, src.read(uint2((s + int2(1, 0)) & (COARSE_N - 1))).r),
+                  max(src.read(uint2((s + int2(0, 1)) & (COARSE_N - 1))).r, src.read(uint2((s + int2(1, 1)) & (COARSE_N - 1))).r));
+    dst.write(float4(max(m, coarseHeight(c, info.x + 1, uint(info.y)))), uint2(c & (COARSE_N / 2 - 1)));
+}
+
+kernel void reduceMaxRegion(texture2d<float, access::read> src [[texture(0)]],
+                            texture2d<float, access::write> dst [[texture(1)]],
+                            constant int4& region [[buffer(0)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= uint(region.z) || gid.y >= uint(region.w)) return;
+    uint2 g = gid + uint2(region.xy);
+    uint2 s = g * 2;
+    float m = max(max(src.read(s).r, src.read(s + uint2(1, 0)).r), max(src.read(s + uint2(0, 1)).r, src.read(s + uint2(1, 1)).r));
+    dst.write(float4(m, 0, 0, 0), g);
 }
 
 // MARK: - Traversal
@@ -1231,9 +1309,10 @@ static float3 lampHaze(device const float4* pos, device const float4* state, con
 struct Hit {
     bool hit;
     float t;
-    int3 voxel;
+    int3 voxel;     // xz in frame-local cells of `level`, y in voxels
     int3 normal;
     int iters;
+    int level;
 };
 
 // Terrain height under any tree.
@@ -1262,56 +1341,181 @@ static inline bool solid(texture2d<float> hm, int3 v, int size) {
     return y < col.x && !(y >= col.y && y < col.z);
 }
 
-// Max-mip quadtree walk over the column heightfield; columns are stacks of unit voxels.
-static Hit trace(texture2d<float> hm, float3 o, float3 d, float tMax, int maxIter, float globalMax, int size) {
+// The LOD rings. Level 0 is the 1-voxel map (texel = frame-local column); level k >= 1 is slice k - 1 of the coarse
+// array, columns 2^k wide, addressed by world cell & 2047. Positions are frame-local (relative to the map origin,
+// a multiple of 64), so a level's cells and max mips are world-aligned and the origin in level cells is exact.
+struct Terrain {
+    texture2d<float> hm;
+    texture2d_array<float> ch;   // coarse height, with max mips that also bound the next level (its morph target)
+    texture2d_array<float> cv;   // coarse canopy cover
+    texture2d_array<float> cc;   // coarse climate, half resolution
+    texture2d<float> clim;
+    constant float4* lod;        // Frame.lod
+    int2 origin;
+    int size;
+    int levels;
+    float2 cam;                  // camera xz, frame-local
+    float rmax;                  // the world's edge: a circle around the camera
+    float fadeStart;             // where the haze starts closing in on that edge
+    float globalMax;
+};
+
+static inline int2 levelOrigin(thread const Terrain& tr, int k) { return k == 0 ? int2(0) : tr.origin >> k; }
+
+// Max height of mip-m cell mc (in the level's own aligned cell index).
+static inline float maxAt(thread const Terrain& tr, int k, int2 mc, int m) {
+    if (k == 0) return tr.hm.read(uint2(clamp(mc, int2(0), int2((tr.size >> m) - 1))), m).r;
+    return tr.ch.read(uint2(mc & ((COARSE_N >> m) - 1)), uint(k - 1), uint(m)).r;
+}
+
+// Column (H, gapLo, gapHi, first leaf) of frame-local level cell c, unmorphed.
+static inline float4 columnL(thread const Terrain& tr, int k, int2 c) {
+    if (k == 0) return tr.hm.read(uint2(clamp(c, int2(0), int2(tr.size - 1))), 0);
+    return float4(tr.ch.read(uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1)), uint(k - 1), 0).r, 0, 0, 0);
+}
+
+static inline float groundL(thread const Terrain& tr, int k, int2 c) {
+    if (k == 0) return groundAt(tr.hm, c, tr.size);
+    return tr.ch.read(uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1)), uint(k - 1), 0).r;
+}
+
+static inline float groundSmoothL(thread const Terrain& tr, int k, float2 p) {
+    if (k == 0) return groundSmooth(tr.hm, p, tr.size);
+    float2 q = p / tr.lod[k].w - 0.5, f = fract(q);
+    int2 i = int2(floor(q));
+    return mix(mix(groundL(tr, k, i), groundL(tr, k, i + int2(1, 0)), f.x),
+               mix(groundL(tr, k, i + int2(0, 1)), groundL(tr, k, i + int2(1, 1)), f.x), f.y);
+}
+
+static inline float coverL(thread const Terrain& tr, int k, int2 c) {
+    if (k == 0) return 0.0;
+    return tr.cv.read(uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1)), uint(k - 1), 0).r;
+}
+
+// Height of the next level's column over level-k cell c.
+static inline float parentH(thread const Terrain& tr, int k, int2 c) {
+    int2 w = c + (k == 0 ? tr.origin : tr.origin >> k);
+    return tr.ch.read(uint2((w >> 1) & (COARSE_N - 1)), uint(k), 0).r;
+}
+
+// Morph weight toward the next level at frame-local xz p: 0 inside the band, 1 from 1.5 parent columns before the
+// handoff circle on, so every parent cell the circle cuts is already fully morphed on the inner side.
+static inline float morphAt(thread const Terrain& tr, int k, float2 p) {
+    if (k >= tr.levels - 1) return 0.0;
+    return smoothstep(tr.lod[k].x, tr.lod[k].z, length(p - tr.cam));
+}
+
+// Morphed (H, gapLo, gapHi): across the band a column slides to its parent's height and gaps close from the top,
+// so at the handoff the level equals the next one exactly.
+static inline float3 columnMorph(thread const Terrain& tr, int k, int2 c) {
+    float3 col = columnL(tr, k, c).rgb;
+    float w = morphAt(tr, k, (float2(c) + 0.5) * tr.lod[k].w);
+    if (w > 0.0) {
+        col.x = mix(col.x, parentH(tr, k, c), w);
+        col.z = mix(col.z, col.y, w);
+    }
+    return col;
+}
+
+static inline Climate climateL(thread const Terrain& tr, int k, float2 p) {
+    if (k == 0) return climateAt(tr.clim, p);
+    constexpr sampler bl(filter::linear, address::repeat);
+    float2 u = (p / (2.0 * tr.lod[k].w) + float2((tr.origin >> (k + 1)) & (COARSE_N / 2 - 1))) / float(COARSE_N / 2);
+    float4 v = tr.cc.sample(bl, u, uint(k - 1), level(0));
+    Climate c;
+    c.temp = v.x; c.moist = v.y; c.fall = v.z; c.basin = v.w;
+    return c;
+}
+
+// The level a point at distance r from the camera belongs to (levels: past the world's edge).
+static inline int levelAt(thread const Terrain& tr, float r) {
+    int k = 0;
+    while (k < tr.levels && r >= tr.lod[k].y) k++;
+    return k;
+}
+
+// Ray parameter at which o + d t leaves the circle of radius R around the camera in xz (0 if never inside).
+static inline float circleExit(float2 o, float2 dxz, float2 cam, float R) {
+    float2 q = o - cam;
+    float a = dot(dxz, dxz), b = dot(q, dxz), c = dot(q, q) - R * R;
+    if (a < 1e-12) return c < 0.0 ? 1e30 : 0.0;
+    float disc = b * b - a * c;
+    return disc <= 0.0 ? 0.0 : (-b + sqrt(disc)) / a;
+}
+
+// Max-mip quadtree walk over the column heightfields; columns are stacks of unit voxels. A ray never moves to a
+// finer level: it starts at the coarser of startLevel and its origin's ring, and steps out a level exactly where
+// it leaves each handoff circle. Every level covers the whole disc inside its circle, so a ray turning back toward
+// the camera still has data under it.
+static Hit trace(thread const Terrain& tr, float3 o, float3 d, float tMax, int maxIter, int startLevel) {
     Hit h;
     h.hit = false;
     h.t = tMax;
     h.iters = -1;
+    h.level = 0;
     float3 inv = 1.0 / select(d, copysign(float3(1e-6), d), abs(d) < 1e-6);
 
-    // Clip to the map box in xz and to [0, globalMax] in y.
-    float3 lo = float3(0, -1, 0), hi = float3(size, globalMax, size);
-    float3 t0 = (lo - o) * inv, t1 = (hi - o) * inv;
-    float3 tn = min(t0, t1), tf = max(t0, t1);
-    float tEnter = max(max(tn.x, tn.y), max(tn.z, 0.0));
-    float tExit = min(min(tf.x, tf.y), min(tf.z, tMax));
+    // Clip to [-1, globalMax] in y and to the world's circle.
+    float ty0 = (-1.0 - o.y) * inv.y, ty1 = (tr.globalMax - o.y) * inv.y;
+    float tEnter = max(min(ty0, ty1), 0.0);
+    float tExit = min(min(max(ty0, ty1), tMax), circleExit(o.xz, d.xz, tr.cam, tr.rmax));
     if (tEnter >= tExit) return h;
 
     float t = tEnter;
+    int k = max(startLevel, levelAt(tr, length(o.xz + d.xz * t - tr.cam)));
+    if (k >= tr.levels) return h;
+    float tSwitch = k < tr.levels - 1 ? circleExit(o.xz, d.xz, tr.cam, tr.lod[k].y) : 1e30;
+    float s = tr.lod[k].w, invS = 1.0 / s;
+    int2 fo = levelOrigin(tr, k);
     int level = MAX_LEVEL;
-    int lastAxis = (tn.x > tn.z) ? 0 : 2;
+    // A ray that starts inside a column hits the side it last crossed into.
+    float2 tbox = min((0.0 - o.xz) * inv.xz, (float(tr.size) - o.xz) * inv.xz);
+    int lastAxis = (tbox.x > tbox.y) ? 0 : 2;
     // Spatial nudge across the boundary just crossed; a t-epsilon vanishes at large map coords.
     float2 nudge = float2(0);
     for (int i = 0; i < maxIter; i++) {
         h.iters = i;
         if (t >= tExit) return h;
-        float3 p = o + d * t;
-        int sz = 1 << level;
-        int2 cell = int2(floor((p.xz + nudge) / float(sz)));
-        float2 cLo = float2(cell * sz), cHi = cLo + float(sz);
-        float2 tb = (select(cLo, cHi, d.xz > 0.0) - o.xz) * inv.xz;
-        float tCell = min(min(tb.x, tb.y), tExit);
-        float hmax = hm.read(uint2(clamp(cell, int2(0), int2((size >> level) - 1))), level).r;
-        float yA = o.y + d.y * t, yB = o.y + d.y * tCell;
-        if (min(yA, yB) >= hmax) {
-            lastAxis = tb.x < tb.y ? 0 : 2;
-            nudge = select(float2(0), sign(d.xz) * 0.01, tb <= tCell + 1e-4);
-            t = tCell;
-            level = min(level + 1, MAX_LEVEL);
+        if (t >= tSwitch) {
+            k++;
+            tSwitch = k < tr.levels - 1 ? circleExit(o.xz, d.xz, tr.cam, tr.lod[k].y) : 1e30;
+            s = tr.lod[k].w;
+            invS = 1.0 / s;
+            fo = levelOrigin(tr, k);
+            level = MAX_LEVEL;
+            nudge = float2(0);
             continue;
         }
-        if (level > 0) { level--; continue; }
+        float3 p = o + d * t;
+        int2 mc = (int2(floor((p.xz + nudge) * invS)) + fo) >> level;
+        int2 lc = (mc << level) - fo;
+        float2 cLo = float2(lc) * s, cHi = cLo + s * float(1 << level);
+        float2 tb = (select(cLo, cHi, d.xz > 0.0) - o.xz) * inv.xz;
+        float tCell = min(min(tb.x, tb.y), min(tExit, tSwitch));
+        float yA = o.y + d.y * t, yB = o.y + d.y * tCell;
+        if (level > 0) {
+            // Mips from 1 up also bound the next level's columns, which morph-band columns rise or sink toward.
+            if (min(yA, yB) >= maxAt(tr, k, mc, level)) {
+                lastAxis = tb.x < tb.y ? 0 : 2;
+                nudge = select(float2(0), sign(d.xz) * 0.01, tb <= tCell + 1e-4);
+                t = tCell;
+                level = min(level + 1, MAX_LEVEL);
+                continue;
+            }
+            level--;
+            continue;
+        }
 
-        // Level 0: one column, solid in [0, gl) and [gh, H).
-        float3 col = hm.read(uint2(clamp(cell, int2(0), int2(size - 1))), 0).rgb;
+        // One column, solid in [0, gl) and [gh, H); a ray passing over it moves on as a skip would.
+        float3 col = columnMorph(tr, k, lc);
         float H = col.x, gl = col.y, gh = col.z;
         bool inGap = yA >= gl && yA < gh;
+        h.level = k;
         if (yA < H && !inGap) {
             h.hit = true;
             h.t = t;
             h.normal = lastAxis == 0 ? int3(d.x > 0 ? -1 : 1, 0, 0) : int3(0, 0, d.z > 0 ? -1 : 1);
-            h.voxel = int3(cell.x, int(floor(yA)), cell.y);
+            h.voxel = int3(lc.x, int(floor(yA)), lc.y);
             return h;
         }
         float floorY = inGap ? gl : H;
@@ -1319,14 +1523,14 @@ static Hit trace(texture2d<float> hm, float3 o, float3 d, float tMax, int maxIte
             h.hit = true;
             h.t = (floorY - o.y) * inv.y;
             h.normal = int3(0, 1, 0);
-            h.voxel = int3(cell.x, int(floorY) - 1, cell.y);
+            h.voxel = int3(lc.x, int(ceil(floorY)) - 1, lc.y);
             return h;
         }
         if (inGap && d.y > 0 && yB > gh) {
             h.hit = true;
             h.t = (gh - o.y) * inv.y;
             h.normal = int3(0, -1, 0);
-            h.voxel = int3(cell.x, int(gh), cell.y);
+            h.voxel = int3(lc.x, int(gh), lc.y);
             return h;
         }
         lastAxis = tb.x < tb.y ? 0 : 2;
@@ -1334,6 +1538,8 @@ static Hit trace(texture2d<float> hm, float3 o, float3 d, float tMax, int maxIte
         t = tCell;
         level = 1;
     }
+    // Out of steps, not out of the world.
+    h.iters = maxIter;
     return h;
 }
 
@@ -1598,8 +1804,10 @@ static inline float3 sandRipples(int2 v, float2 uv, float2 w, float fp, float ti
     return float3(0.045 * amp * r + 0.035 * swell + 0.05 * streak, 0.018 * amp * dr * wind);
 }
 
-static Surface surfaceAt(texture2d<float> hm, texture2d<float> clim, texture2d<uint> st, device const Site* sites,
-                         device const float4* lampState, int size, int3 v, int3 n, float2 uv, float fp, float fpA, int2 mapOrigin, uint seed, float time) {
+// Surface of level k's column v (xz in level cells) on face n; uv is the face position in [0, 1) of the column.
+// Coarse columns are s voxels wide but still unit voxels tall, and carry no structures.
+static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device const Site* sites, device const float4* lampState,
+                         int k, int3 v, int3 n, float2 uv, float fp, float fpA, float3 p, uint seed, float time) {
     Surface s;
     s.slope = 0;
     s.mat = 0;
@@ -1607,7 +1815,9 @@ static Surface surfaceAt(texture2d<float> hm, texture2d<float> clim, texture2d<u
     s.pale = 0;
     s.nrm = 0;
     s.emit = 0;
-    float4 col4 = hm.read(uint2(clamp(v.xz, int2(0), int2(size - 1))), 0);
+    int2 mapOrigin = tr.origin;
+    float cs = tr.lod[k].w;
+    float4 col4 = columnL(tr, k, v.xz);
     float3 col = col4.rgb;
     bool tree = col4.a > 0.0;
     // A structure stands on this column from voxel `base` up; below it (or below its gap) is the terrain.
@@ -1616,17 +1826,17 @@ static Surface surfaceAt(texture2d<float> hm, texture2d<float> clim, texture2d<u
     float H = tree ? col.y : built ? (col.z > col.y ? col.y : base) : col.x;
     s.canopy = tree ? 0.55 : 1.0;
     s.H = H;
-    float hx0 = groundAt(hm, v.xz + int2(-1, 0), size), hx1 = groundAt(hm, v.xz + int2(1, 0), size);
-    float hz0 = groundAt(hm, v.xz + int2(0, -1), size), hz1 = groundAt(hm, v.xz + int2(0, 1), size);
+    float hx0 = groundL(tr, k, v.xz + int2(-1, 0)), hx1 = groundL(tr, k, v.xz + int2(1, 0));
+    float hz0 = groundL(tr, k, v.xz + int2(0, -1)), hz1 = groundL(tr, k, v.xz + int2(0, 1));
     s.nh = float4(hx0, hx1, hz0, hz1);
     float slope = max(max(H - hx0, H - hx1), max(H - hz0, H - hz1));
-    float2 w = float2(v.xz + mapOrigin);
+    float2 w = float2(v.xz * int(cs) + mapOrigin);
     // Continuous world position on the face, so tonal detail flows across block edges.
-    float2 wq = w + (n.y != 0 ? uv : n.x != 0 ? float2(n.x > 0 ? 1.0 : 0.0, uv.x) : float2(uv.x, n.z > 0 ? 1.0 : 0.0));
+    float2 wq = w + (n.y != 0 ? uv : n.x != 0 ? float2(n.x > 0 ? 1.0 : 0.0, uv.x) : float2(uv.x, n.z > 0 ? 1.0 : 0.0)) * cs;
     float wy = n.y != 0 ? float(v.y + max(n.y, 0)) : float(v.y) + uv.y;
     float nb = n.x < 0 ? hx0 : n.x > 0 ? hx1 : n.z < 0 ? hz0 : hz1;
     s.riser = n.y == 0 ? H - nb : 0.0;
-    Climate c = climateAt(clim, float2(v.xz) + 0.5);
+    Climate c = climateL(tr, k, (float2(v.xz) + 0.5) * cs);
     float desert = desertAmount(c);
     float painted = smoothstep(0.0, 0.6, paintedAmount(c));
     float cold = smoothstep(0.42, 0.18, c.temp);
@@ -1719,6 +1929,18 @@ static Surface surfaceAt(texture2d<float> hm, texture2d<float> clim, texture2d<u
         // walls and corners, every pool would be outlined.
         s.level = crustW;
     }
+    // Coarse levels carry no trees: the share of a column under canopy tints its ground with their leaves.
+    if (k > 0) {
+        float cov = saturate(coverL(tr, k, v.xz) * COVER_GAIN);
+        if (cov > 0.0) {
+            float conifer = smoothstep(0.50, 0.32, c.temp);
+            float3 leaf = mix(float3(0.05, 0.08, 0.0375), float3(0.025, 0.055, 0.045), conifer);
+            leaf = mix(leaf, float3(0.11, 0.125, 0.09), painted);
+            leaf = mix(leaf, fallLeaf, autumn * (1.0 - conifer * 0.5)) * 0.92;
+            tread = mix(tread, leaf, cov);
+            s.canopy = mix(1.0, 0.7, cov);
+        }
+    }
     s.tread = tread;
     bool snowy = float(int(H)) > snowline;
     if (snowy) s.riser = 0.0;
@@ -1731,7 +1953,8 @@ static Surface surfaceAt(texture2d<float> hm, texture2d<float> clim, texture2d<u
         float sandy = float(v.y + 1) > snowline ? 0.0 : beach ? 1.0 - crustW : smoothstep(0.35, 0.7, desert);
         s.pale = float(v.y + 1) > snowline || beach ? 1.0 : sandy;
         if (sandy > 0.0) {
-            float3 rp = sandRipples(v.xz + mapOrigin, uv, w, fpA, time, seed) * sandy;
+            float3 rp = (k == 0 ? sandRipples(v.xz + mapOrigin, uv, w, fpA, time, seed)
+                                : sandRipples(int2(floor(p.xz)) + mapOrigin, fract(p.xz), float2(int2(floor(p.xz)) + mapOrigin), fpA, time, seed)) * sandy;
             s.albedo *= 1.0 + rp.x;
             s.slope = rp.yz;
         }
@@ -1779,7 +2002,7 @@ static Surface surfaceAt(texture2d<float> hm, texture2d<float> clim, texture2d<u
         s.canopy = 1.0;
     }
     if (built && float(v.y) >= base) {
-        uint sb = st.read(uint2(clamp(v.xz, int2(0), int2(size - 1)))).r;
+        uint sb = st.read(uint2(clamp(v.xz, int2(0), int2(tr.size - 1)))).r;
         int mat = int(sb & 15u);
         uint plane = (sb >> 4) & 7u;
         device const Site& site = sites[(sb >> 13) & 511u];
@@ -1917,16 +2140,22 @@ static float cornerAO(texture2d<float> hm, int size, int3 v, int3 n, float2 uv) 
 
 // Fraction of open sky above a point, from how far the surrounding columns rise above y within 6 voxels.
 // Heights are filtered, so a c on a column centre reads exact columns.
-static float skyVisibility(texture2d<float> hm, float2 c, float y) {
+// Coarse levels sample their own slice at the same world radii.
+static float skyVisibility(thread const Terrain& tr, int k, float2 c, float y) {
     constexpr sampler bl(filter::linear, address::clamp_to_edge);
-    float2 inv = 1.0 / float2(hm.get_width(), hm.get_height());
+    constexpr sampler blr(filter::linear, address::repeat);
+    float2 inv = 1.0 / float2(tr.hm.get_width(), tr.hm.get_height());
+    float cs = tr.lod[k].w;
+    float2 fo = float2(levelOrigin(tr, k) & (COARSE_N - 1));
     float occ = 0.0;
     const int2 dirs[8] = { int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1), int2(1, 1), int2(-1, 1), int2(1, -1), int2(-1, -1) };
     for (int i = 0; i < 8; i++) {
         float m = 0.0;
         for (int r = 1; r <= 3; r++) {
             float dist = float(r * 2) * (i < 4 ? 1.0 : 1.414);
-            float rise = hm.sample(bl, (c + float2(dirs[i] * (r * 2))) * inv, level(0)).r - y;
+            float2 q = c + float2(dirs[i] * (r * 2));
+            float rise = (k == 0 ? tr.hm.sample(bl, q * inv, level(0)).r
+                                 : tr.ch.sample(blr, (q / cs + fo) / float(COARSE_N), uint(k - 1), level(0)).r) - y;
             m = max(m, rise / sqrt(rise * rise + dist * dist));
         }
         occ += m;
@@ -1934,8 +2163,9 @@ static float skyVisibility(texture2d<float> hm, float2 c, float y) {
     return 1.0 - occ / 8.0;
 }
 
-static inline float2 faceUV(float3 p, int3 n) {
-    float3 f = fract(p);
+// Position on the face in [0, 1) of a column s voxels wide (y stays in unit voxels).
+static inline float2 faceUV(float3 p, int3 n, float s) {
+    float3 f = fract(p / float3(s, 1.0, s));
     if (n.y != 0) return f.xz;
     if (n.x != 0) return float2(f.z, f.y);
     return float2(f.x, f.y);
@@ -1972,20 +2202,17 @@ static inline float cloudDensity(float2 q, uint seed, float time, float cover) {
 
 
 struct Ctx {
-    texture2d<float> hm;
-    int size;
+    Terrain tr;
     int2 origin;
     uint seed;
     float time;
     float quality;
-    float globalMax;
     float pixelAngle;
     float cover;
     Light L;
     float dither; // per-pixel, per-frame in [0, 1); TAA resolves it
     texture2d<float> cloudTex;
     float3 cloudInfo; // as Frame.cloud
-    texture2d<float> clim;
     texture2d<uint> st;
     device const Site* sites;
     device const float4* lampPos;
@@ -2015,31 +2242,32 @@ static inline float cloudShadow(thread const Ctx& x, float3 p, float3 L) {
 // columns: a higher neighbour toward the light shades a strip of a column's tread (to contact level ct), and
 // risers sit at contact level cr, as the traced shadow had them: its origin, kept inside the hit column, starts
 // a side face's ray inside the solid.
-static float stairShadow(texture2d<float> hm, int size, float2 p, float3 L, float3 d, float ct, float cr) {
-    float2 q = p - 0.5, f = fract(q);
+static float stairShadow(thread const Terrain& tr, int k, float2 p, float3 L, float3 d, float ct, float cr) {
+    float cs = tr.lod[k].w;
+    float2 q = p / cs - 0.5, f = fract(q);
     int2 c0 = int2(floor(q));
     int2 sx = int2(L.x > 0.0 ? 1 : -1, 0), sz = int2(0, L.z > 0.0 ? 1 : -1);
     int2 vx = int2(d.x > 0.0 ? 1 : -1, 0), vz = int2(0, d.z > 0.0 ? 1 : -1);
     // Horizontal reach of a unit step's shadow along each axis, in columns.
-    float2 reach = abs(L.xz) / max(L.y, 0.02);
+    float2 reach = abs(L.xz) / max(L.y, 0.02) / cs;
     float lit = 0.0, area = 0.0;
     for (int j = 0; j <= 1; j++)
         for (int i = 0; i <= 1; i++) {
             int2 c = c0 + int2(i, j);
             float w = (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y);
-            float h = groundAt(hm, c, size);
-            // A step k columns toward the light covers what its shadow has left after crossing k - 1 columns.
+            float h = groundL(tr, k, c);
+            // A step j columns toward the light covers what its shadow has left after crossing j - 1 columns.
             float fx = 0.0, fz = 0.0;
-            for (int k = 1; k <= 2; k++) {
-                fx = max(fx, (groundAt(hm, c + sx * k, size) - h) * reach.x - float(k - 1));
-                fz = max(fz, (groundAt(hm, c + sz * k, size) - h) * reach.y - float(k - 1));
+            for (int j = 1; j <= 2; j++) {
+                fx = max(fx, (groundL(tr, k, c + sx * j) - h) * reach.x - float(j - 1));
+                fz = max(fz, (groundL(tr, k, c + sz * j) - h) * reach.y - float(j - 1));
             }
             fx = saturate(fx);
             fz = saturate(fz);
             float tread = 1.0 - (1.0 - (1.0 - fx) * (1.0 - fz)) * (1.0 - ct);
             // Risers on the camera's side of the column, by visible area.
-            float rx = max(h - groundAt(hm, c - vx, size), 0.0) * abs(d.x);
-            float rz = max(h - groundAt(hm, c - vz, size), 0.0) * abs(d.z);
+            float rx = max(h - groundL(tr, k, c - vx), 0.0) * abs(d.x);
+            float rz = max(h - groundL(tr, k, c - vz), 0.0) * abs(d.z);
             lit += w * (abs(d.y) * tread + (rx + rz) * cr);
             area += w * (abs(d.y) + rx + rz);
         }
@@ -2049,15 +2277,17 @@ static float stairShadow(texture2d<float> hm, int size, float2 p, float3 L, floa
 static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows) {
     float3 p = o + d * h.t;
     float3 n = float3(h.normal);
-    float2 uv = faceUV(p, h.normal);
+    int k = h.level;
+    float cs = x.tr.lod[k].w;
+    float2 uv = faceUV(p, h.normal, cs);
     float fp = h.t * x.pixelAngle; // voxels per pixel
     // Footprint stretched across a grazing face, for detail that must fade before it aliases along the view.
     float fpA = fp / max(abs(dot(n, d)), 0.15);
-    Surface s = surfaceAt(x.hm, x.clim, x.st, x.sites, x.lampState, x.size, h.voxel, h.normal, uv, fp, fpA, x.origin, x.seed, x.time);
+    Surface s = surfaceAt(x.tr, x.st, x.sites, x.lampState, k, h.voxel, h.normal, uv, fp, fpA, p, x.seed, x.time);
     // Prefilter: from ~1/10 voxel per pixel, relax AO and shadows and give risers their tread colour, so
     // distant stairs read as contour bands, not moire.
     float wf = smoothstep(0.025, 0.20, fp);
-    float3 nS = normalize(float3(s.nh.x - s.nh.y, 2.0, s.nh.z - s.nh.w));
+    float3 nS = normalize(float3(s.nh.x - s.nh.y, 2.0 * cs, s.nh.z - s.nh.w));
     // Below ~2 pixels per voxel step shadows and sky visibility alias into a hatch that crawls under motion;
     // shade the continuous slope under the stairs instead.
     float wf2 = s.mat == 0 ? smoothstep(0.2, 0.5, fp) : 0.0;
@@ -2071,16 +2301,17 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     // Structures keep their own planes: a column-difference normal would tilt a house's edge columns.
     float wn = built ? 0.0 : s.mat == 0 && h.normal.y != 0 ? wt : wf;
     if (s.mat == 0 && wt > 0.0 && s.level < 1.0) {
-        float R = max(2.0, 1.5 * fp);
-        float2 grad = float2(groundSmooth(x.hm, p.xz + float2(R, 0), x.size) - groundSmooth(x.hm, p.xz - float2(R, 0), x.size),
-                             groundSmooth(x.hm, p.xz + float2(0, R), x.size) - groundSmooth(x.hm, p.xz - float2(0, R), x.size)) / (2.0 * R);
+        float R = max(max(2.0, 1.5 * fp), cs);
+        float2 grad = float2(groundSmoothL(x.tr, k, p.xz + float2(R, 0)) - groundSmoothL(x.tr, k, p.xz - float2(R, 0)),
+                             groundSmoothL(x.tr, k, p.xz + float2(0, R)) - groundSmoothL(x.tr, k, p.xz - float2(0, R))) / (2.0 * R);
         float3 g = normalize(float3(-grad.x, 1.0, -grad.y));
         nS = h.normal.y != 0 ? g : normalize(mix(nS, g, wt));
     }
     float3 nl = normalize(mix(normalize(n - float3(s.slope.x, 0.0, s.slope.y)), nS, wn));
     if (any(s.nrm != 0.0)) nl = s.nrm;
     nl = normalize(mix(nl, float3(0, 1, 0), s.level));
-    float ao = (s.level < 1.0 ? mix(mix(cornerAO(x.hm, x.size, h.voxel, h.normal, uv), 0.85, wf), 1.0, s.level) : 1.0) * s.canopy;
+    // Coarse levels are always past the footprint where corner AO is fully replaced.
+    float ao = (s.level < 1.0 ? mix(k == 0 ? mix(cornerAO(x.tr.hm, x.tr.size, h.voxel, h.normal, uv), 0.85, wf) : 0.85, 1.0, s.level) : 1.0) * s.canopy;
     float drop = s.H - min(min(s.nh.x, s.nh.y), min(s.nh.z, s.nh.w));
     // Cliffs several pixels tall keep their strata; only sub-pixel stairs take the tread colour. Keyed to the
     // column's deepest drop, not this face's: the faces of a wall running diagonal to the grid alternate
@@ -2094,8 +2325,8 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     float lone = 0.0;
     if (h.normal.y == 0 && s.mat == 0 && wn < 1.0) {
         int2 t = h.normal.x != 0 ? int2(0, 1) : int2(1, 0), o = h.normal.xz;
-        float run = float(groundAt(x.hm, h.voxel.xz + t, x.size) > groundAt(x.hm, h.voxel.xz + t + o, x.size) + 0.5)
-                  + float(groundAt(x.hm, h.voxel.xz - t, x.size) > groundAt(x.hm, h.voxel.xz - t + o, x.size) + 0.5);
+        float run = float(groundL(x.tr, k, h.voxel.xz + t) > groundL(x.tr, k, h.voxel.xz + t + o) + 0.5)
+                  + float(groundL(x.tr, k, h.voxel.xz - t) > groundL(x.tr, k, h.voxel.xz - t + o) + 0.5);
         lone = (1.0 - 0.5 * run) * smoothstep(0.01, 0.05, fp) * (1.0 - wn) * (1.0 - keep);
     }
     float3 alb = h.normal.y == 0 ? mix(s.albedo, s.tread, max(wf * (1.0 - keep), lone)) : s.albedo;
@@ -2125,16 +2356,20 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     if (shadows && ndl > 0.0 && x.L.shadows) {
         // Keep the origin inside the hit voxel's footprint so boundary columns can't self-shadow.
         float3 so = p + n * 0.02;
-        so.xz = clamp(so.xz, float2(h.voxel.xz) + 0.002, float2(h.voxel.xz) + 0.998);
+        so.xz = clamp(so.xz, float2(h.voxel.xz) * cs + 0.002, float2(h.voxel.xz) * cs + (cs - 0.002));
         // Prefiltered, the ray starts a step above the column, and single steps shade by their expected cover.
         so.y = mix(so.y, max(so.y, s.H) + 1.0, wf2);
-        Hit sHit = trace(x.hm, so, x.L.key, 700.0, x.quality > 0.5 ? 120 : 48, x.globalMax, x.size);
+        int shadowIters = x.quality > 0.5 ? 120 : 48;
+        Hit sHit = trace(x.tr, so, x.L.key, 700.0, shadowIters, k);
+        // A ray that runs out of steps is still threading terrain toward the sun: count it as blocked there, so a
+        // shaded spot never comes out lit.
+        sHit.hit = sHit.hit || sHit.iters >= shadowIters;
         // Contact shadows from single-voxel steps draw sawtooth noise; keep them faint, cliffs full.
         float contact = 0.35 * (1.0 - smoothstep(2.0, 8.0, 0.5 / x.L.key.y));
         // The lift moves the ray's start about 1 / L.y along it; contact reach moves with it.
         float reach = wf2 / max(x.L.key.y, 0.05);
         sh = sHit.hit ? 0.35 * (1.0 - smoothstep(2.0 + reach, 8.0 + reach, sHit.t)) : 1.0;
-        if (wf2 > 0.0) sh = mix(sh, min(sh, stairShadow(x.hm, x.size, p.xz, x.L.key, d, contact, 0.35)), wf2);
+        if (wf2 > 0.0) sh = mix(sh, min(sh, stairShadow(x.tr, k, p.xz, x.L.key, d, contact, 0.35)), wf2);
         float floorSh = mix(mix(0.5, 0.25, hiSun), 0.32, x.L.gold);
         sh = mix(sh, floorSh + (1.0 - floorSh) * sh, wf);
         sh = mix(sh, 1.0, 0.3 * x.L.night);
@@ -2147,9 +2382,9 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     float3 skyFill = mix(x.L.horizon, x.L.zenith, saturate(zw + 0.15 * nl.y)) * 0.9 * lowFill * mix(1.0, 0.85, hiSun);
     // Golden hour: shade is the violet dome opposite the sun, well below the key, so hillsides keep dark values.
     skyFill *= mix(float3(1.0), float3(0.62, 0.58, 0.85), x.L.gold * x.L.sunAmt);
-    float2 svAt = mix(float2(h.voxel.xz + h.normal.xz) + 0.5, p.xz, wf2);
-    float svY = wf2 > 0.0 ? mix(p.y, groundSmooth(x.hm, p.xz, x.size), wf2) : p.y;
-    skyFill *= mix(1.0, skyVisibility(x.hm, svAt, svY), mix(0.55, 0.85, hiSun));
+    float2 svAt = mix((float2(h.voxel.xz + h.normal.xz) + 0.5) * cs, p.xz, wf2);
+    float svY = wf2 > 0.0 ? mix(p.y, groundSmoothL(x.tr, k, p.xz), wf2) : p.y;
+    skyFill *= mix(1.0, skyVisibility(x.tr, k, svAt, svY), mix(0.55, 0.85, hiSun));
     // A wall sees half the dome, and the half it sees is the dimmer horizon side; without this a riser in shade
     // outshines the sunlit tread above it under a low sun.
     skyFill *= 0.5 + 0.5 * saturate(nl.y);
@@ -2176,8 +2411,9 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     // Lamplight is added in absolute terms, outside the moonlight grade, so firelit ground stays warm in a blue night.
     if (x.lights.w > 0.0) {
         constexpr sampler bl(filter::linear, address::clamp_to_edge);
-        float2 mu = p.xz / float(x.size);
-        float3 Lm = x.lightMap.sample(bl, mu, level(0)).rgb;
+        float2 mu = p.xz / float(x.tr.size);
+        // The light map spans the 1-voxel map; coarse ground past it would take its clamped edge.
+        float3 Lm = all(mu > 0.0) && all(mu < 1.0) ? x.lightMap.sample(bl, mu, level(0)).rgb : float3(0);
         if (any(Lm > 1e-4)) {
             float4 Ld = x.lightDir.sample(bl, mu, level(0));
             float3 lp = Ld.xyz / max(Ld.w, 1e-6);
@@ -2189,6 +2425,23 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
         }
     }
     return col + s.emit;
+}
+
+// In a morph band the shading also slides to the next level's, reaching it where the geometry does, so the switch
+// at the handoff circle is seamless in colour and light as well as in shape.
+static float3 shadeL(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows) {
+    float3 p = o + d * h.t;
+    float w = morphAt(x.tr, h.level, p.xz);
+    // One shading per pixel: the next level's with probability w, varying per pixel and frame for TAA to blend.
+    if (w > 0.0 && x.dither < w) {
+        Hit h2 = h;
+        h2.level = h.level + 1;
+        int2 c = int2(floor((p.xz - float2(h.normal.xz) * 0.01) / x.tr.lod[h2.level].w));
+        h2.voxel = int3(c.x, h.voxel.y, c.y);
+        // Each shading traces its own level's shadow: the outer one must match the next level's hits past the circle.
+        return shade(x, o, d, h2, shadows);
+    }
+    return shade(x, o, d, h, shadows);
 }
 
 // Converges on the actual sky colour as fog thickens (T -> 0), so fogged land meets the sky with no seam.
@@ -2203,14 +2456,17 @@ static inline float3 fogColor(thread const Ctx& x, float3 d, float T) {
 }
 
 // Exponential height fog plus a slow-drifting noise modulation that pools mist in valleys.
-static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, float edgeFog = 1.0) {
+// mistSamples < 0 takes the quality's count; 0 leaves out the valley mist (the closed-form terms only).
+static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, int mistSamples = -1) {
     float hf = 30.0;
-    float a = 0.0009, b = 0.0, c2 = 1.3e-6;
+    float a = 0.0009, c2 = 1.3e-6;
+    // Air: the near haze saturates into a thin linear tail, so far ranges read as layered haze rather than vanish.
+    const float K = 1.6, lambda = 6e-5;
     float k = exp(-(o.y - SEA) / hf);
     float dy = abs(d.y) < 1e-4 ? 1e-4 : d.y;
     float heightTerm = a * hf * k * (1.0 - exp(-dy * t / hf)) / dy;
     float mist = 0;
-    int samples = x.quality > 0.5 ? 4 : 2;
+    int samples = mistSamples >= 0 ? mistSamples : x.quality > 0.5 ? 4 : 2;
     for (int i = 0; i < samples; i++) {
         float st = min(t, 400.0) * (float(i) + 0.5) / float(samples);
         float3 sp = o + d * st;
@@ -2218,22 +2474,55 @@ static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, 
         mist += saturate(perlin3(wp * float3(0.012, 0.03, 0.012) + float3(x.time * 0.01, 0, x.time * 0.006), x.seed + 50u) + 0.2)
               * exp(-max(sp.y - SEA, 0.0) / 10.0);
     }
-    mist = mist / float(samples) * min(t, 400.0) * 0.0014 * mix(0.7, 0.3, smoothstep(0.15, 0.45, x.L.sun.y));
-    // Hide the map edge by distance to the edge itself, not to the camera.
-    float3 ep = o + d * t;
-    float edgeDist = min(min(ep.x, float(x.size) - ep.x), min(ep.z, float(x.size) - ep.z));
+    mist = mist / float(max(samples, 1)) * min(t, 400.0) * 0.0014 * mix(0.7, 0.3, smoothstep(0.15, 0.45, x.L.sun.y));
+    // The world ends in a circle around the camera (not around o: reflections start elsewhere), fully hazed at its edge.
+    float r = length((o + d * t).xz - x.tr.cam);
+    if (r >= x.tr.rmax) return 0.0;
     // Clear air under a high sun; haze belongs to the low light.
     float clear = mix(1.0, 0.15, smoothstep(0.2, 0.45, x.L.sun.y));
     // Night air is crisp: moonlit ridges stay legible to the horizon.
     clear *= mix(1.0, 0.35, x.L.night);
-    return exp(-((heightTerm + b * t + c2 * t * t + mist) * clear + 5.0 * edgeFog * smoothstep(mix(110.0, 180.0, x.L.night), 10.0, edgeDist)));
+    // The tail eases in, leaving the haze within a few percent of the old quadratic out to ~600.
+    float air = K * (1.0 - exp(-c2 * t * t / K)) + lambda * t * t / (t + 1500.0);
+    return exp(-((heightTerm + air + mist) * clear + 6.0 * smoothstep(x.tr.fadeStart, x.tr.rmax, r)));
 }
 
-static float3 applyFog(thread const Ctx& x, float3 col, float3 o, float3 d, float t, float edgeFog = 1.0) {
-    float T = fogTransmittance(x, o, d, t, edgeFog);
+static float3 applyFog(thread const Ctx& x, float3 col, float3 o, float3 d, float t) {
+    float T = fogTransmittance(x, o, d, t);
     // Thin haze in-scatters less than the full horizon radiance; only thick fog converges on the sky.
-    float3 f = (fogColor(x, d, T) + x.L.keyCol * min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night)) * mix(mix(0.3, 0.12, x.L.gold), 1.0, smoothstep(0.1, 0.9, 1.0 - T));
+    // Forward scatter fades out above the horizon as the sky's does, so fully hazed land matches the sky behind it.
+    float scatter = min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night) * mix(1.0, smoothstep(0.1, 0.0, d.y), smoothstep(0.5, 0.0, T));
+    float3 f = (fogColor(x, d, T) + x.L.keyCol * scatter) * mix(mix(0.3, 0.12, x.L.gold), 1.0, smoothstep(0.1, 0.9, 1.0 - T));
     return mix(f, col, T);
+}
+
+// In-scatter of the nearest lamps' light along a ray to tEnd: the closed-form integral of 1/(r^2 + 4) - 1/(Rh^2 + 4)
+// over the ray's chord through a sphere of radius Rh = 3 reach, so a hamlet or a fire hangs in a soft glow of its
+// own haze that ends at zero a few reaches out, and the glow stops at whatever hides it. Without the sphere the
+// integral falls off only as 1/distance and distant lamps tint the whole night.
+// Each lamp's glow is seen through the air between, as the land around it is.
+static float3 lampHaze(thread const Ctx& x, device const float4* pos, device const float4* state, constant int4* refs, int count,
+                       float3 o, float3 d, float tEnd) {
+    float3 sum = 0;
+    for (int i = 0; i < count; i++) {
+        int li = refs[i / 4][i % 4];
+        float4 ls = state[li];
+        if (all(ls.rgb == 0.0)) continue;
+        float4 lp = pos[li];
+        float3 v = lp.xyz - o;
+        float tc = dot(v, d);
+        float p2 = max(dot(v, v) - tc * tc, 0.0);
+        float Rh = 3.0 * ls.w;
+        if (p2 >= Rh * Rh) continue;
+        float c = sqrt(Rh * Rh - p2);
+        float t0 = max(tc - c, 0.0), t1 = min(tc + c, tEnd);
+        if (t1 <= t0) continue;
+        float hh = sqrt(p2 + 4.0);
+        float I = (atan((t1 - tc) / hh) - atan((t0 - tc) / hh)) / hh - (t1 - t0) / (Rh * Rh + 4.0);
+        if (I <= 0.0) continue;
+        sum += ls.rgb * LAMP_I[int(lp.w)] * I * fogTransmittance(x, o, d, clamp(tc, t0, t1), 0);
+    }
+    return sum;
 }
 
 struct CloudSample { float3 col; float a; float t; };
@@ -2560,7 +2849,7 @@ static float3 shadeBird(thread const Ctx& x, float3 p, BirdHit b) {
 // Lamp haze and smoke between the eye and a fogged surface at tSurf.
 static float3 hazeAndSmoke(thread const Ctx& x, float3 col, device const Site* sites, device const float4* lampPos,
                            device const float4* lampState, constant int4* refs, int4 counts, float3 o, float3 d, float tSurf) {
-    if (x.lights.w > 0.0 && counts.x > 0) col += lampHaze(lampPos, lampState, refs, counts.x, o, d, tSurf) * 0.05 * x.lights.w;
+    if (x.lights.w > 0.0 && counts.x > 0) col += lampHaze(x, lampPos, lampState, refs, counts.x, o, d, tSurf) * 0.05 * x.lights.w;
     if (counts.y > 0) {
         float4 sm = smoke(x, sites, lampPos, lampState, refs, counts.y, o, d, tSurf);
         if (sm.a > 0.0) {
@@ -2575,6 +2864,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
                               texture2d<float> hm [[texture(0)]], texture2d<float> cloudTex [[texture(1)]],
                               texture2d<float> clim [[texture(2)]], texture2d<uint> st [[texture(3)]],
                               texture2d<float> lightMap [[texture(4)]], texture2d<float> lightDir [[texture(5)]],
+                              texture2d_array<float> coarse [[texture(6)]], texture2d_array<float> coarseClim [[texture(7)]],
+                              texture2d_array<float> coarseCover [[texture(8)]],
                               device const Site* sites [[buffer(1)]], device const float4* lampPos [[buffer(2)]],
                               device const float4* lampState [[buffer(3)]], constant int4* refs [[buffer(4)]],
                               device const float4* birds [[buffer(5)]]) {
@@ -2585,18 +2876,24 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     float3 d = normalize(f.camFwd.xyz + f.camRight.xyz * ndc.x * tanH * f.camFwd.w + f.camUp.xyz * ndc.y * tanH);
     float3 o = f.camPos.xyz;
 
-    Ctx x { hm, f.mapInfo.z, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w, f.misc.y,
+    int levels = int(f.fade.z);
+    float gmax = f.misc.y;
+    for (int k = 1; k < levels; k++) gmax = max(gmax, coarse.read(uint2(0), uint(k - 1), coarse.get_num_mip_levels() - 1).r + 1.0);
+    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax };
+    Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
             2.0 * tanH * f.resolution.w, f.misc.w, makeLight(f.sunDir.xyz),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
-            cloudTex, f.cloud.xyz, clim, st, sites, lampPos, lampState, lightMap, lightDir, f.lights };
+            cloudTex, f.cloud.xyz, st, sites, lampPos, lampState, lightMap, lightDir, f.lights };
 
-    Hit h = trace(hm, o, d, 4000.0, 400, x.globalMax, x.size);
-    if (f.misc2.z == 1) return float4(float(h.iters) / 400.0, h.hit ? 0.3 : 0.0, h.iters >= 399 ? 1 : 0, 1);
+    const int primaryIters = 520;
+    Hit h = trace(x.tr, o, d, x.tr.rmax, primaryIters, 0);
+    if (f.misc2.z == 1) return float4(float(h.iters) / float(primaryIters), h.hit ? 0.3 : 0.0, h.iters >= primaryIters - 1 ? 1 : 0, 1);
     if (f.misc2.z == 5) return float4(skyColor(d, x.L, false, x.seed, x.time), 1);
     if (f.misc2.z == 6) return float4(skyWithClouds(x, o, d).rgb, 1);
 
     float tw = d.y < 0 ? (SEA - o.y) / d.y : 1e9;
     bool water = d.y < 0 && tw > 0 && (!h.hit || tw < h.t);
+    if (f.misc2.z == 9 && (water || !h.hit)) return float4(0, 0, 0, water ? tw : 6e4);
     int nFlocks = int(f.birds.x);
     // Birds in front of land, water and sky. Their pixels carry negative depth, which tells the temporal resolve
     // that they move.
@@ -2610,6 +2907,12 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             return float4(bc, -bh.t);
         }
     }
+    // Sea past the world's edge is fully hazed: it takes the fog colour alone, with no ring of ocean around the land.
+    if (water && length((o + d * tw).xz - x.tr.cam) >= x.tr.rmax) {
+        if (f.misc2.z == 3) return float4(0, 0, 0, 1);
+        float3 fogged = hazeAndSmoke(x, applyFog(x, float3(0), o, d, tw), sites, lampPos, lampState, refs, f.refs, o, d, tw);
+        return float4(fogged, min(tw, 6e4));
+    }
     bool birdRefl = false;
     float3 col;
     float tSurf;
@@ -2619,7 +2922,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         float e0 = perlin3(float3(ww * 0.3, x.time * 0.25), x.seed + 60u);
         float ex = perlin3(float3((ww + float2(0.05, 0)) * 0.3, x.time * 0.25), x.seed + 60u);
         float ez = perlin3(float3((ww + float2(0, 0.05)) * 0.3, x.time * 0.25), x.seed + 60u);
-        Climate wc = climateAt(x.clim, wp.xz);
+        int wl = levelAt(x.tr, length(wp.xz - x.tr.cam));
+        Climate wc = climateL(x.tr, wl, wp.xz);
         float lagoon = smoothstep(0.0, 0.35, lagoonAmount(wc));
         // Pools on a salt pan are a still skin over pale crust: a near-perfect mirror.
         float salt = saltAmount(wc);
@@ -2629,14 +2933,14 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         r.y = abs(r.y);
         float3 refl;
         if (x.quality > 0.5) {
-            Hit rh = trace(hm, wp + float3(0, 0.02, 0), r, 1500.0, 220, x.globalMax, x.size);
+            Hit rh = trace(x.tr, wp + float3(0, 0.02, 0), r, x.tr.rmax, 260, wl);
             // Shadowed: unshadowed, a sun-facing wall in the shade of the far rim mirrors as a pale streak.
-            refl = rh.hit ? applyFog(x, shade(x, wp, r, rh, true), wp, r, rh.t)
+            refl = rh.hit ? applyFog(x, shadeL(x, wp, r, rh, true), wp, r, rh.t)
                            : softCloudSky(x, wp, r);
             if (nFlocks > 0) {
-                float tr = rh.hit ? rh.t : 3000.0;
-                BirdHit bh = traceBirds(birds, nFlocks, wp, r, tr, x.pixelAngle, tw);
-                if (bh.t < tr) { refl = applyFog(x, shadeBird(x, wp + r * bh.t, bh), wp, r, bh.t); birdRefl = true; }
+                float tB = rh.hit ? rh.t : 3000.0;
+                BirdHit bh = traceBirds(birds, nFlocks, wp, r, tB, x.pixelAngle, tw);
+                if (bh.t < tB) { refl = applyFog(x, shadeBird(x, wp + r * bh.t, bh), wp, r, bh.t); birdRefl = true; }
             }
         } else {
             refl = softCloudSky(x, wp, r);
@@ -2660,7 +2964,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             float ky = max(x.L.key.y, 0.0);
             xr.L.key = normalize(mix(x.L.key, kr, lagoon));
             xr.L.keyCol *= mix(1.0, ky / kr.y * (0.98 - 0.98 * pow(1.0 - ky, 5.0)), lagoon);
-            float3 lit = bedShows > 0.003 ? shade(xr, o, d, h, false) : float3(0);
+            float3 lit = bedShows > 0.003 ? shadeL(xr, o, d, h, false) : float3(0);
             under = mix(deep, lit * mix(float3(0.55, 0.8, 0.85), float3(0.9, 0.95, 0.97), salt), exp(-path * mix(0.35, 0.08, salt)));
             if (lagoon > 0.0) {
                 // Clear water over sand: red is absorbed first, so the bed turns aquamarine, then teal, then blue.
@@ -2703,12 +3007,13 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             float glint = mix(cover, smoothstep(thr - 0.07, thr + 0.07, rip), saturate(1.0 - fpv * 0.04));
             col += float3(0.75, 0.82, 1.0) * x.L.night * (0.05 * cover + 0.55 * glint);
         }
-        if (x.lights.w > 0.0) {
+        // Water past the 1-voxel map lies beyond the light map, which would clamp its edge onto it.
+        if (x.lights.w > 0.0 && all(wp.xz > 0.0) && all(wp.xz < float(x.tr.size))) {
             // Lamplight on the water: a soft pool, and a broken streak drawn toward the viewer as ripples
             // stretch the moon's path.
             constexpr sampler bl(filter::linear, address::clamp_to_edge);
             float2 vh = normalize(d.xz + 1e-5);
-            float inv = 1.0 / float(x.size);
+            float inv = 1.0 / float(x.tr.size);
             float3 E = x.lightMap.sample(bl, wp.xz * inv, level(0)).rgb * 0.5 + x.lightMap.sample(bl, (wp.xz + vh * 4.0) * inv, level(0)).rgb * 0.3
                      + x.lightMap.sample(bl, (wp.xz + vh * 10.0) * inv, level(0)).rgb * 0.2;
             if (any(E > 1e-4)) {
@@ -2724,18 +3029,30 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         }
         tSurf = tw;
     } else if (h.hit) {
-        col = shade(x, o, d, h, true);
+        col = shadeL(x, o, d, h, true);
         tSurf = h.t;
+        // Debug: flat level colours, morph bands white.
+        if (f.misc2.z == 9) {
+            const float3 flat[5] = { float3(1, 0, 0), float3(0, 1, 0), float3(0, 0, 1), float3(1, 1, 0), float3(1, 0, 1) };
+            return float4(morphAt(x.tr, h.level, (o + d * h.t).xz) > 0.0 ? float3(1) : flat[h.level], h.t);
+        }
+        // Debug: levels tinted, morph bands striped toward the next level's tint.
+        if (f.misc2.z == 8) {
+            const float3 tint[5] = { float3(1, 0.3, 0.3), float3(0.3, 1, 0.3), float3(0.3, 0.5, 1), float3(1, 1, 0.3), float3(1, 0.3, 1) };
+            float w = morphAt(x.tr, h.level, (o + d * h.t).xz);
+            float l = dot(col, float3(0.3, 0.59, 0.11));
+            return float4(mix(tint[h.level], tint[min(h.level + 1, 4)], w) * (0.15 + l), h.t);
+        }
     } else {
         float4 sky = skyWithClouds(x, o, d);
-        if (x.lights.w > 0.0 && f.refs.x > 0) sky.rgb += lampHaze(lampPos, lampState, refs, f.refs.x, o, d, 2500.0) * 0.05 * x.lights.w;
+        if (x.lights.w > 0.0 && f.refs.x > 0) sky.rgb += lampHaze(x, lampPos, lampState, refs, f.refs.x, o, d, 2500.0) * 0.05 * x.lights.w;
         if (f.refs.y > 0) {
             float4 sm = smoke(x, sites, lampPos, lampState, refs, f.refs.y, o, d, 1e9);
             sky.rgb = sky.rgb * (1.0 - sm.a) + sm.rgb;
         }
         return sky;
     }
-    if (f.misc2.z == 8) {
+    if (f.misc2.z == 10) {
         // Site footprints tinted by type.
         float3 sp = o + d * tSurf;
         int2 q = int2(floor(sp.xz));
@@ -2753,8 +3070,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             }
     }
     if (f.misc2.z == 3) return float4(float3(fogTransmittance(x, o, d, tSurf)), 1);
-    // The sea runs on past the map, so by night it reflects the sky out to the horizon.
-    if (f.misc2.z != 2) col = applyFog(x, col, o, d, tSurf, water ? 1.0 - x.L.night : 1.0);
+    if (f.misc2.z != 2) col = applyFog(x, col, o, d, tSurf);
     col = hazeAndSmoke(x, col, sites, lampPos, lampState, refs, f.refs, o, d, tSurf);
     return float4(col, birdRefl ? -tSurf : tSurf);
 }

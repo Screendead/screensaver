@@ -21,6 +21,13 @@ struct Frame {
     var lights = SIMD4<Float>()
     var refs = SIMD4<Int32>()
     var birds = SIMD4<Float>()
+    // lod0...lod4 are `lod[5]` in the shader.
+    var lod0 = SIMD4<Float>()
+    var lod1 = SIMD4<Float>()
+    var lod2 = SIMD4<Float>()
+    var lod3 = SIMD4<Float>()
+    var lod4 = SIMD4<Float>()
+    var fade = SIMD4<Float>()
 }
 
 enum GPU {
@@ -86,6 +93,11 @@ final class World {
     // Must match SITE_GRID, MAX_LAMPS and MAX_PARTS (the Site struct) in Shaders/Saver.metal.
     static let siteGrid = 18, siteCell = 128, maxLamps = 8, maxParts = 16
     static let siteStride = 32 + 16 * maxLamps + 16 * maxParts
+    // Recentred once the camera drifts this far from the map centre. The LOD handoff (Renderer.makeFrame) relies
+    // on the map reaching 1024 - 8 - (this + the drift while a regeneration is in flight) around the camera.
+    static let recentre = 100.0
+    // Background regeneration runs a band of rows of one pass per frame, so no frame carries a whole map's work.
+    static let bandRows = 256
 
     // One generated map: the column texture with its max-mip chain, and the CPU copy the camera steers by.
     private final class Buffer {
@@ -128,14 +140,20 @@ final class World {
     private let genQueue: MTLCommandQueue
     private let genPipeline: MTLComputePipelineState
     private let reducePipeline: MTLComputePipelineState
+    private let reduceBasePipeline: MTLComputePipelineState
+    private let cpuReducePipeline: MTLComputePipelineState
     private let cleanupPipeline: MTLComputePipelineState
     private let plantPipeline: MTLComputePipelineState
     private let climatePipeline: MTLComputePipelineState
     private let sitePipeline: MTLComputePipelineState
     private let stampPipeline: MTLComputePipelineState
     private let scratch: [MTLTexture]
+    // Max mips 1 and 2 of the plain heights (r) and solid floors (g) for the CPU readback: the map's own mips from 1 up also bound the
+    // level-1 columns, which the camera must not steer by.
+    private let cpuMips: [MTLTexture]
     private var buffers: [Buffer]
     private var active = 0
+    private var job: (index: Int, origin: SIMD2<Int32>, next: Int, t0: CFTimeInterval)?
     private var pending = false
     var synchronous = false
 
@@ -154,15 +172,27 @@ final class World {
         let sd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: World.size, height: World.size, mipmapped: false)
         sd.usage = [.shaderRead, .shaderWrite]
         sd.storageMode = .private
-        guard let gen = pipeline("generateHeight"), let red = pipeline("reduceMax"), let clean = pipeline("cleanupColumns"),
+        guard let gen = pipeline("generateHeight"), let red = pipeline("reduceMax"), let redBase = pipeline("reduceMaxBase"), let redCpu = pipeline("reduceCpu"),
+              let clean = pipeline("cleanupColumns"),
               let plant = pipeline("plantTrees"), let clim = pipeline("bakeClimate"), let place = pipeline("placeSites"), let stamp = pipeline("stampStructures"),
               let s0 = device.makeTexture(descriptor: sd), let s1 = device.makeTexture(descriptor: sd), let q = device.makeCommandQueue(),
               let a = Buffer(device: device), let b = Buffer(device: device) else { return nil }
+        var mips: [MTLTexture] = []
+        for l in 1...World.cpuLevel {
+            let md = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Float, width: World.size >> l, height: World.size >> l, mipmapped: false)
+            md.usage = [.shaderRead, .shaderWrite]
+            md.storageMode = l == World.cpuLevel ? .shared : .private
+            guard let t = device.makeTexture(descriptor: md) else { return nil }
+            mips.append(t)
+        }
+        cpuMips = mips
         self.device = device
         self.seed = seed
         genQueue = q
         genPipeline = gen
         reducePipeline = red
+        reduceBasePipeline = redBase
+        cpuReducePipeline = redCpu
         cleanupPipeline = clean
         plantPipeline = plant
         climatePipeline = clim
@@ -180,59 +210,111 @@ final class World {
         let local = center - SIMD2(Double(cur.origin.x), Double(cur.origin.y))
         let drift = max(abs(local.x - half), abs(local.y - half))
         let o = SIMD2<Int32>(Int32(floor((center.x - half) / 64)) * 64, Int32(floor((center.y - half) / 64)) * 64)
-        if cur.origin.x == Int32.min || drift > 340 || (synchronous && drift > 220) {
+        if cur.origin.x == Int32.min || drift > 340 || (synchronous && drift > World.recentre) {
+            if job != nil { advance(pieces: Int.max, wait: true); return }
             if pending { return } // the in-flight job will land momentarily
-            generate(into: active, origin: o, wait: true)
-        } else if drift > 220 && !pending {
+            job = (active, o, 0, CACurrentMediaTime())
+            advance(pieces: Int.max, wait: true)
+        } else if job != nil {
+            advance(pieces: 1, wait: false)
+        } else if drift > World.recentre && !pending {
             pending = true
-            generate(into: 1 - active, origin: o, wait: false)
+            job = (1 - active, o, 0, CACurrentMediaTime())
+            advance(pieces: 1, wait: false)
         }
     }
 
-    private func generate(into index: Int, origin o: SIMD2<Int32>, wait: Bool) {
-        let buf = buffers[index]
-        guard let cb = genQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { pending = false; return }
-        var info = SIMD4<Int32>(o.x, o.y, Int32(World.size), Int32(bitPattern: seed))
-        let full = MTLSize(width: World.size, height: World.size, depth: 1), tg = MTLSize(width: 16, height: 16, depth: 1)
-        enc.setComputePipelineState(genPipeline)
-        enc.setTexture(scratch[0], index: 0)
-        enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
-        enc.dispatchThreads(full, threadsPerThreadgroup: tg)
-        enc.setComputePipelineState(cleanupPipeline)
-        enc.setTexture(scratch[0], index: 0)
-        enc.setTexture(scratch[1], index: 1)
-        enc.dispatchThreads(full, threadsPerThreadgroup: tg)
-        enc.setComputePipelineState(sitePipeline)
-        enc.setTexture(scratch[1], index: 0)
-        enc.setBuffer(buf.sites, offset: 0, index: 0)
-        enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 1)
-        enc.dispatchThreads(MTLSize(width: World.siteGrid, height: World.siteGrid, depth: 1), threadsPerThreadgroup: MTLSize(width: 6, height: 6, depth: 1))
-        // Stamping follows cleanup, which would strip lintel and eave gaps, and precedes planting, so trees avoid it.
-        enc.setComputePipelineState(stampPipeline)
-        enc.setTexture(scratch[1], index: 0)
-        enc.setTexture(scratch[0], index: 1)
-        enc.setTexture(buf.structTex, index: 2)
-        enc.dispatchThreads(full, threadsPerThreadgroup: tg)
-        enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
-        enc.setComputePipelineState(plantPipeline)
-        enc.setTexture(scratch[0], index: 0)
-        enc.setTexture(buf.levels[0], index: 1)
-        enc.dispatchThreads(full, threadsPerThreadgroup: tg)
-        enc.setComputePipelineState(climatePipeline)
-        enc.setTexture(buf.climate, index: 0)
-        enc.dispatchThreads(full, threadsPerThreadgroup: tg)
-        enc.setComputePipelineState(reducePipeline)
-        for l in 1..<buf.levels.count {
-            var fromColumns: Int32 = l == 1 ? 1 : 0
-            enc.setBytes(&fromColumns, length: 4, index: 0)
-            enc.setTexture(buf.levels[l - 1], index: 0)
-            enc.setTexture(buf.levels[l], index: 1)
-            let s = max(1, World.size >> l)
-            enc.dispatchThreads(MTLSize(width: s, height: s, depth: 1), threadsPerThreadgroup: MTLSize(width: min(16, s), height: min(16, s), depth: 1))
+    private static let passes = 5
+    private static var pieceCount: Int { passes * (size / bandRows) + 1 }
+
+    // Encodes the next `pieces` pieces of the job: each pass (heights, cleanup, structures, trees, climate) a band of
+    // rows at a time, finishing every band of a pass before the next pass reads its neighbours, then the max mips.
+    // Sites are placed once, ahead of the first structure band: they read the cleaned map, and every band stamps them.
+    private func advance(pieces: Int, wait: Bool) {
+        guard var j = job, let cb = genQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return }
+        let buf = buffers[j.index]
+        var info = SIMD4<Int32>(j.origin.x, j.origin.y, Int32(World.size), Int32(bitPattern: seed))
+        let bands = World.size / World.bandRows, tg = MTLSize(width: 16, height: 16, depth: 1)
+        var n = pieces
+        while n > 0 && j.next < World.pieceCount {
+            let pass = j.next / bands, band = j.next % bands
+            if pass < World.passes {
+                var row0 = UInt32(band * World.bandRows)
+                switch pass {
+                case 0:
+                    enc.setComputePipelineState(genPipeline)
+                    enc.setTexture(scratch[0], index: 0)
+                case 1:
+                    enc.setComputePipelineState(cleanupPipeline)
+                    enc.setTexture(scratch[0], index: 0)
+                    enc.setTexture(scratch[1], index: 1)
+                case 2:
+                    if band == 0 {
+                        enc.setComputePipelineState(sitePipeline)
+                        enc.setTexture(scratch[1], index: 0)
+                        enc.setBuffer(buf.sites, offset: 0, index: 0)
+                        enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 1)
+                        enc.dispatchThreads(MTLSize(width: World.siteGrid, height: World.siteGrid, depth: 1),
+                                            threadsPerThreadgroup: MTLSize(width: 6, height: 6, depth: 1))
+                    }
+                    // Stamping follows cleanup, which would strip lintel and eave gaps, and precedes planting, so
+                    // trees avoid it. It writes into the climate texture, free until the climate pass: scratch 0 must
+                    // keep the raw columns for the max mips.
+                    enc.setComputePipelineState(stampPipeline)
+                    enc.setTexture(scratch[1], index: 0)
+                    enc.setTexture(buf.climate, index: 1)
+                    enc.setTexture(buf.structTex, index: 2)
+                    enc.setBuffer(buf.sites, offset: 0, index: 0)
+                    enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 1)
+                    enc.setBytes(&row0, length: MemoryLayout<UInt32>.stride, index: 2)
+                    enc.dispatchThreads(MTLSize(width: World.size, height: World.bandRows, depth: 1), threadsPerThreadgroup: tg)
+                    j.next += 1
+                    n -= 1
+                    continue
+                case 3:
+                    enc.setComputePipelineState(plantPipeline)
+                    enc.setTexture(buf.climate, index: 0)
+                    enc.setTexture(buf.levels[0], index: 1)
+                default:
+                    enc.setComputePipelineState(climatePipeline)
+                    enc.setTexture(buf.climate, index: 0)
+                }
+                enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
+                enc.setBytes(&row0, length: MemoryLayout<UInt32>.stride, index: 1)
+                enc.dispatchThreads(MTLSize(width: World.size, height: World.bandRows, depth: 1), threadsPerThreadgroup: tg)
+            } else {
+                enc.setComputePipelineState(cpuReducePipeline)
+                for (l, t) in cpuMips.enumerated() {
+                    var fromColumns: Int32 = l == 0 ? 1 : 0
+                    enc.setBytes(&fromColumns, length: 4, index: 0)
+                    enc.setTexture(l == 0 ? buf.levels[0] : cpuMips[l - 1], index: 0)
+                    enc.setTexture(t, index: 1)
+                    enc.dispatchThreads(MTLSize(width: t.width, height: t.height, depth: 1), threadsPerThreadgroup: tg)
+                }
+                // Scratch 0 still holds the raw columns that level 1 averages.
+                enc.setComputePipelineState(reduceBasePipeline)
+                enc.setTexture(buf.levels[0], index: 0)
+                enc.setTexture(scratch[0], index: 1)
+                enc.setTexture(buf.levels[1], index: 2)
+                let s1 = World.size >> 1
+                enc.dispatchThreads(MTLSize(width: s1, height: s1, depth: 1), threadsPerThreadgroup: tg)
+                enc.setComputePipelineState(reducePipeline)
+                for l in 2..<buf.levels.count {
+                    enc.setTexture(buf.levels[l - 1], index: 0)
+                    enc.setTexture(buf.levels[l], index: 1)
+                    let s = max(1, World.size >> l)
+                    enc.dispatchThreads(MTLSize(width: s, height: s, depth: 1), threadsPerThreadgroup: MTLSize(width: min(16, s), height: min(16, s), depth: 1))
+                }
+            }
+            j.next += 1
+            n -= 1
         }
         enc.endEncoding()
+        let done = j.next == World.pieceCount
+        job = done ? nil : j
+        guard done else { cb.commit(); return }
 
-        let t0 = CACurrentMediaTime()
+        let index = j.index, o = j.origin, t0 = j.t0
         let finish = { [weak self] (heights: [Float], floors: [Float], top: Float) in
             guard let self else { return }
             buf.origin = o
@@ -255,12 +337,13 @@ final class World {
         if wait {
             cb.commit()
             cb.waitUntilCompleted()
-            let r = World.readBack(buf.tex)
+            let r = World.readBack(buf.tex, cpuMips.last!)
             finish(r.0, r.1, r.2)
         } else {
             cb.addCompletedHandler { [weak self] cb in
                 guard cb.status == .completed else { DispatchQueue.main.async { self?.pending = false }; return }
-                let r = World.readBack(buf.tex)
+                guard let self else { return }
+                let r = World.readBack(buf.tex, self.cpuMips.last!)
                 DispatchQueue.main.async { finish(r.0, r.1, r.2) }
             }
             cb.commit()
@@ -289,13 +372,13 @@ final class World {
         return list
     }
 
-    private static func readBack(_ tex: MTLTexture) -> ([Float], [Float], Float) {
+    private static func readBack(_ tex: MTLTexture, _ cpu: MTLTexture) -> ([Float], [Float], Float) {
         let s = World.size >> World.cpuLevel
-        var raw = [Float16](repeating: 0, count: s * s * 4)
-        tex.getBytes(&raw, bytesPerRow: s * 8, from: MTLRegionMake2D(0, 0, s, s), mipmapLevel: World.cpuLevel)
+        var raw = [Float16](repeating: 0, count: s * s * 2)
+        cpu.getBytes(&raw, bytesPerRow: s * 4, from: MTLRegionMake2D(0, 0, s, s), mipmapLevel: 0)
         var top = [Float16](repeating: 0, count: 4)
         tex.getBytes(&top, bytesPerRow: 8, from: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: tex.mipmapLevelCount - 1)
-        return ((0..<(s * s)).map { Float(raw[$0 * 4]) }, (0..<(s * s)).map { Float(raw[$0 * 4 + 1]) }, Float(top[0]))
+        return ((0..<(s * s)).map { Float(raw[$0 * 2]) }, (0..<(s * s)).map { Float(raw[$0 * 2 + 1]) }, Float(top[0]))
     }
 
     // Conservative (4x4 max) height in world coords.
@@ -316,6 +399,188 @@ final class World {
         let cz = Int(floor((z - Double(b.origin.y)) / Double(1 << World.cpuLevel)))
         guard cx >= 0, cz >= 0, cx < s, cz < s, !b.cpuFloors.isEmpty else { return nil }
         return Double(b.cpuFloors[cz * s + cx])
+    }
+}
+
+// Coarse LOD rings beyond the 1-voxel map. Level k (1...4) has columns 2^k voxels wide, 2048 to a side, kept
+// toroidally (texel = world cell & 2047) around the camera, so re-centring rewrites only the 64-cell strip that
+// enters the window, a chunk per frame inside the frame's own command buffer.
+final class Clipmap {
+    static let levels = 4, size = 2048, snap = 64, chunk = 128
+    // Columns of a whole-window build per piece, so other queues' frames interleave between its dispatches.
+    static let fullChunk = 32
+    // Must match Frame.lod in Shaders/Saver.metal: a level hands off to the next at 860 of its own columns,
+    // which keeps every read inside the window while a strip is rewritten.
+    static func handoff(_ k: Int) -> Double { 860.0 * Double(1 << k) }
+
+    let height: MTLTexture   // r16Float array: height; max mips (from mip 1 also bounding the next level)
+    let cover: MTLTexture    // r8Unorm array: canopy cover
+    let climate: MTLTexture  // rgba16Float array at half resolution
+    private let heightViews: [[MTLTexture]]
+    private let coverViews: [MTLTexture]
+    private let climateViews: [MTLTexture]
+    private let genPipeline: MTLComputePipelineState
+    private let reducePipeline: MTLComputePipelineState
+    private let parentPipeline: MTLComputePipelineState
+    private let seed: UInt32
+    private var lo: [SIMD2<Int32>?] = Array(repeating: nil, count: Clipmap.levels)
+    private struct Job { var level: Int; var x0: Int32; var z0: Int32; var w: Int32; var h: Int32; var done: Int32; var newLo: SIMD2<Int32> }
+    private var job: Job?
+
+    init?(device: MTLDevice, library: MTLLibrary, seed: UInt32) {
+        func pipeline(_ name: String) -> MTLComputePipelineState? {
+            library.makeFunction(name: name).flatMap { try? device.makeComputePipelineState(function: $0) }
+        }
+        func array(_ format: MTLPixelFormat, _ n: Int, mips: Bool) -> MTLTexture? {
+            let d = MTLTextureDescriptor()
+            d.textureType = .type2DArray
+            d.pixelFormat = format
+            d.width = n
+            d.height = n
+            d.arrayLength = Clipmap.levels
+            d.mipmapLevelCount = mips ? Int(log2(Double(n))) + 1 : 1
+            d.usage = [.shaderRead, .shaderWrite, .pixelFormatView]
+            d.storageMode = .private
+            return device.makeTexture(descriptor: d)
+        }
+        guard let h = array(.r16Float, Clipmap.size, mips: true), let v = array(.r8Unorm, Clipmap.size, mips: false),
+              let c = array(.rgba16Float, Clipmap.size / 2, mips: false),
+              let gen = pipeline("generateCoarse"), let red = pipeline("reduceMaxRegion"), let par = pipeline("reduceMaxParent") else { return nil }
+        func slice(_ t: MTLTexture, _ k: Int, _ m: Int) -> MTLTexture? {
+            t.makeTextureView(pixelFormat: t.pixelFormat, textureType: .type2D, levels: m..<(m + 1), slices: k..<(k + 1))
+        }
+        var hv: [[MTLTexture]] = [], vv: [MTLTexture] = [], cv: [MTLTexture] = []
+        for k in 0..<Clipmap.levels {
+            var mips: [MTLTexture] = []
+            for m in 0..<h.mipmapLevelCount {
+                guard let t = slice(h, k, m) else { return nil }
+                mips.append(t)
+            }
+            hv.append(mips)
+            guard let tv = slice(v, k, 0), let tc = slice(c, k, 0) else { return nil }
+            vv.append(tv)
+            cv.append(tc)
+        }
+        height = h
+        cover = v
+        climate = c
+        heightViews = hv
+        coverViews = vv
+        climateViews = cv
+        genPipeline = gen
+        reducePipeline = red
+        parentPipeline = par
+        self.seed = seed
+    }
+
+    // Window origin (in level cells) that centres level k on world xz `center`.
+    private static func target(_ center: SIMD2<Double>, level k: Int) -> SIMD2<Int32> {
+        let s = Double(1 << k)
+        func f(_ v: Double) -> Int32 { Int32(((floor(v / s) - Double(size / 2)) / Double(snap)).rounded(.down)) * Int32(snap) }
+        return SIMD2(f(center.x), f(center.y))
+    }
+
+    var idle: Bool { job == nil }
+
+    // Level k (1...levels) holds a whole window.
+    func ready(_ k: Int) -> Bool { lo[k - 1] != nil }
+
+    // Forgets the windows, so the next encode rebuilds every level whole (VR_COARSE_FULL: checks strips against it).
+    func invalidate() { lo = Array(repeating: nil, count: Clipmap.levels); job = nil }
+
+    private func nextJob(_ center: SIMD2<Double>, active: Int) -> Job? {
+        let n = Int32(Clipmap.size), step = Int32(Clipmap.snap)
+        for i in 0..<active {
+            let t = Clipmap.target(center, level: i + 1)
+            guard let cur = lo[i], abs(t.x - cur.x) <= 8 * step, abs(t.y - cur.y) <= 8 * step else {
+                lo[i] = nil
+                return Job(level: i, x0: t.x, z0: t.y, w: n, h: n, done: 0, newLo: t)
+            }
+            if t.x != cur.x {
+                let dir: Int32 = t.x > cur.x ? 1 : -1
+                return Job(level: i, x0: dir > 0 ? cur.x + n : cur.x - step, z0: cur.y, w: step, h: n, done: 0,
+                           newLo: SIMD2(cur.x + dir * step, cur.y))
+            }
+            if t.y != cur.y {
+                let dir: Int32 = t.y > cur.y ? 1 : -1
+                return Job(level: i, x0: cur.x, z0: dir > 0 ? cur.y + n : cur.y - step, w: n, h: step, done: 0,
+                           newLo: SIMD2(cur.x, cur.y + dir * step))
+            }
+        }
+        return nil
+    }
+
+    // Encodes pending generation for levels 1...active: one piece, or with `drain` everything the camera position
+    // needs. Levels past `active` are dropped, to be rebuilt whole once they are active again.
+    func encode(into cb: MTLCommandBuffer, center: SIMD2<Double>, drain: Bool, active: Int) {
+        for i in active..<Clipmap.levels { lo[i] = nil }
+        if let j = job, j.level >= active { job = nil }
+        // A level more than a strip behind the camera could soon be read past its window: catch it up at once. In
+        // flight that never happens: at 15 voxels/s a level-1 strip falls due at most every 8.5 s and takes 17
+        // frames. Only the outermost level, which the edge waits for, is ever built whole in pieces.
+        let lagging = (0..<active).contains { i in
+            let t = Clipmap.target(center, level: i + 1)
+            return lo[i].map { abs($0.x - t.x) > Int32(Clipmap.snap) || abs($0.y - t.y) > Int32(Clipmap.snap) } ?? (i < active - 1)
+        }
+        var budget = drain || lagging ? Int.max : 1
+        if job == nil { job = nextJob(center, active: active) }
+        guard job != nil, let enc = cb.makeComputeCommandEncoder() else { return }
+        defer { enc.endEncoding() }
+        while budget > 0 {
+            if job == nil { job = nextJob(center, active: active) }
+            guard var j = job else { return }
+            let full = j.w == Int32(Clipmap.size) && j.h == Int32(Clipmap.size)
+            let long = max(j.w, j.h)
+            let piece = min(Int32(full ? Clipmap.fullChunk : Clipmap.chunk), long - j.done)
+            var region = j.w >= j.h ? SIMD4<Int32>(j.x0 + j.done, j.z0, piece, j.h) : SIMD4<Int32>(j.x0, j.z0 + j.done, j.w, piece)
+            var info = SIMD4<Int32>(Int32(j.level + 1), Int32(bitPattern: seed), 0, 0)
+            enc.setComputePipelineState(genPipeline)
+            enc.setTexture(heightViews[j.level][0], index: 0)
+            enc.setTexture(climateViews[j.level], index: 1)
+            enc.setTexture(coverViews[j.level], index: 2)
+            enc.setBytes(&region, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
+            enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 1)
+            enc.dispatchThreads(MTLSize(width: Int(region.z), height: Int(region.w), depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+            j.done += piece
+            budget -= 1
+            if j.done < long { job = j; continue }
+            let views = heightViews[j.level]
+            // Mip 1 over the rewritten region, in world mip-1 cells: each is one column of the next level, whose
+            // height it also bounds. The top level has no next level to morph toward.
+            var r1 = SIMD4<Int32>(j.x0 >> 1, j.z0 >> 1, j.w >> 1, j.h >> 1)
+            enc.setComputePipelineState(j.level + 1 < Clipmap.levels ? parentPipeline : reducePipeline)
+            enc.setTexture(views[0], index: 0)
+            enc.setTexture(views[1], index: 1)
+            if j.level + 1 < Clipmap.levels {
+                enc.setBytes(&r1, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
+                enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 1)
+            } else {
+                let mask = Int32(Clipmap.size / 2 - 1)
+                var t1 = SIMD4<Int32>(j.w == Int32(Clipmap.size) ? 0 : r1.x & mask, j.h == Int32(Clipmap.size) ? 0 : r1.y & mask, r1.z, r1.w)
+                enc.setBytes(&t1, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
+            }
+            enc.dispatchThreads(MTLSize(width: Int(r1.z), height: Int(r1.w), depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+            // Coarser mips: the window is 64-aligned, so the region is contiguous in storage unless it spans the
+            // whole axis.
+            let n = Int32(Clipmap.size), mask = n - 1
+            let sx = j.w == n ? 0 : j.x0 & mask, sz = j.h == n ? 0 : j.z0 & mask
+            enc.setComputePipelineState(reducePipeline)
+            for m in 2..<views.count {
+                let dim = Int32(Clipmap.size >> m)
+                // Coarser than the strip: rebuild the whole (tiny) mip. Only the top one is read past mip 6 (the
+                // trace's MAX_LEVEL), for the global height bound; the rest cost a few tiny dispatches.
+                var r = m <= 6 ? SIMD4<Int32>(sx >> Int32(m), sz >> Int32(m), max(j.w >> Int32(m), 1), max(j.h >> Int32(m), 1))
+                               : SIMD4<Int32>(0, 0, dim, dim)
+                enc.setTexture(views[m - 1], index: 0)
+                enc.setTexture(views[m], index: 1)
+                enc.setBytes(&r, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
+                enc.dispatchThreads(MTLSize(width: Int(r.z), height: Int(r.w), depth: 1),
+                                    threadsPerThreadgroup: MTLSize(width: min(16, Int(r.z)), height: min(16, Int(r.w)), depth: 1))
+            }
+            lo[j.level] = j.newLo
+            if Renderer.logTiming { print("coarse level \(j.level + 1) window \(j.newLo) (\(j.w)x\(j.h))") }
+            job = nil
+        }
     }
 }
 
@@ -348,6 +613,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var historyIndex = 0
     private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
     let world: World
+    let clipmap: Clipmap
     let camera: FlightCamera
     let wildlife: Wildlife
     // Ring of bird buffers, one per frame in flight; the semaphore keeps the CPU from overwriting one the GPU reads.
@@ -355,7 +621,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var birdIndex = 0
     private let birdSlots = DispatchSemaphore(value: 3)
     var clock = SkyClock()
-    private(set) var battery: Bool
+    var battery: Bool
+    // The world's edge, a circle around the camera: it eases between the battery and AC radii rather than snapping
+    // when the power source changes.
+    private var edgeRadius: Double
     var timeScale: Double = 1
     var debugMode: Float = 0
     var headroom: Float = 0
@@ -368,6 +637,11 @@ final class Renderer: NSObject, MTKViewDelegate {
     let popLog: PopLog? = PopLog.enabled ? PopLog() : nil
     private(set) var aspect: Float = 16.0 / 10.0
     static let logTiming = ProcessInfo.processInfo.environment["VR_TIMING"] != nil
+    static let fullCoarse = ProcessInfo.processInfo.environment["VR_COARSE_FULL"] != nil
+    // VR_CHUNKED: snapshots update the coarse rings a chunk per frame, as live.
+    static let chunkedCoarse = ProcessInfo.processInfo.environment["VR_CHUNKED"] != nil
+    // VR_LODSHIFT=v moves the LOD rings' centre v voxels ahead of the camera: frames differing only in it isolate pops.
+    static let lodShift = Float(ProcessInfo.processInfo.environment["VR_LODSHIFT"] ?? "") ?? 0
     fileprivate var exposure: Double = 1.5
     // Holds the time of day fixed for snapshots, so exposure and the shot director see the rendered sun.
     var pinnedPhase: Double?
@@ -400,7 +674,8 @@ final class Renderer: NSObject, MTKViewDelegate {
               let lightP = lib.makeFunction(name: "bakeLights").flatMap({ try? device.makeComputePipelineState(function: $0) }),
               let lpos = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.maxLamps * 16, options: .storageModePrivate),
               let lstate = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.maxLamps * 16, options: .storageModePrivate),
-              let world = World(device: device, library: lib, seed: seed) else { return nil }
+              let world = World(device: device, library: lib, seed: seed),
+              let clipmap = Clipmap(device: device, library: lib, seed: seed) else { return nil }
         self.device = device
         self.queue = queue
         scenePipeline = sp
@@ -418,6 +693,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         lightMap = lmT
         lightDir = ldT
         self.world = world
+        self.clipmap = clipmap
         // Spec offset displays by 90 s of the same flight; steering reads GPU heights, so displays
         // instead start at different places in the same world.
         camera = FlightCamera(seed: seed &+ UInt32(screenIndex) &* 7919)
@@ -426,12 +702,30 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard birdBuffers.count == 3 else { return nil }
         self.battery = battery
         renderScale = battery ? 0.7 : 1.0
+        edgeRadius = Clipmap.handoff(battery ? Clipmap.levels - 1 : Clipmap.levels)
         super.init()
         camera.heightAt = { [unowned world] x, z in world.height(x: x, z: z) }
         camera.sitesAt = { [unowned world] in world.sites }
         wildlife.heightAt = camera.heightAt
         world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
         camera.placeAtStart()
+        // The coarse rings are built ahead of the first frame on the same queue, which orders that frame after them;
+        // nothing waits on the CPU. Afterwards only strips are rewritten.
+        if let cb = queue.makeCommandBuffer() {
+            let t0 = CACurrentMediaTime()
+            clipmap.encode(into: cb, center: SIMD2(camera.position.x, camera.position.z), drain: true, active: activeLevels)
+            if Renderer.logTiming {
+                cb.addCompletedHandler { cb in
+                    print(String(format: "coarse build %.1f ms (gpu %.1f)", (CACurrentMediaTime() - t0) * 1000, (cb.gpuEndTime - cb.gpuStartTime) * 1000))
+                }
+            }
+            cb.commit()
+        }
+    }
+
+    // Coarse levels kept up to date: on battery the outermost is dropped once the edge has eased inside it.
+    private var activeLevels: Int {
+        battery && edgeRadius <= Clipmap.handoff(Clipmap.levels - 1) ? Clipmap.levels - 1 : Clipmap.levels
     }
 
     convenience init?(view: MTKView, screen: NSScreen, seed: UInt32, screenIndex: Int, battery: Bool) {
@@ -480,6 +774,11 @@ final class Renderer: NSObject, MTKViewDelegate {
             remaining -= step
         }
         simTime += dt * timeScale
+        // Out to the AC edge only once its level is built (after battery mode it is rebuilt in pieces).
+        let full = Clipmap.handoff(Clipmap.levels), part = Clipmap.handoff(Clipmap.levels - 1)
+        let edgeTarget = battery || !clipmap.ready(Clipmap.levels) ? part : full
+        let edgeStep = (full - part) / 4 * dt * timeScale
+        edgeRadius = edgeRadius < edgeTarget ? min(edgeTarget, edgeRadius + edgeStep) : max(edgeTarget, edgeRadius - edgeStep)
         let e = clock.sunDirection.y
         let target = e > 0 ? 0.62 + 1.0 * max(0, 0.3 - e) / 0.3 + 0.08 * min(1, max(0, (e - 0.3) / 0.2)) : (e > -0.1 ? 2.02 + 0.4 * (-e / 0.1) : 1.6 + 0.4 * max(0, 0.3 + e) / 0.2)
         exposure += (target - exposure) * min(1, dt * timeScale * 0.2)
@@ -547,6 +846,32 @@ final class Renderer: NSObject, MTKViewDelegate {
         let k = Int(frameIndex) % phases + 1
         func halton(_ i: Int, _ b: Int) -> Double { var f = 1.0, r = 0.0, i = i; while i > 0 { f /= Double(b); r += f * Double(i % b); i /= b }; return r }
         f.jitter = SIMD4(Float((halton(k, 2) - 0.5) * 2 / size.width), Float((halton(k, 3) - 0.5) * 2 / size.height), 0, 0)
+        // LOD rings. The 1-voxel map hands off at 880, inside the 1024 - 8 (neighbour reads) - 100 (recentre drift)
+        // - ~21 (drift while a regeneration is in flight: 41 pieces at 30 fps) it covers; nearer its edge only if the camera outran
+        // regeneration. Each level morphs toward the next over a band, reaching it 1.5 parent columns before the
+        // handoff circle.
+        let half = Double(World.size / 2)
+        let edge = half - 8 - max(abs(p.x - half), abs(p.z - half)) - abs(Double(Renderer.lodShift))
+        let b01 = min(880, edge)
+        var lods = [SIMD4<Float>(Float(b01 - 140), Float(b01), Float(b01 - 3), 1)]
+        // Levels drawn: those built, out to the edge. Past the battery edge the last level's band eases in with the
+        // edge, so no ring pops when the level count changes.
+        let built = (1...Clipmap.levels).prefix { clipmap.ready($0) }.count
+        let levels = min(built, edgeRadius > Clipmap.handoff(Clipmap.levels - 1) ? Clipmap.levels : Clipmap.levels - 1)
+        let rMax = levels == Clipmap.levels ? edgeRadius : Clipmap.handoff(levels)
+        let grow = levels == Clipmap.levels ? (edgeRadius - Clipmap.handoff(levels - 1)) / (Clipmap.handoff(levels) - Clipmap.handoff(levels - 1)) : 1
+        for k in 1...max(levels, 1) {
+            let b1 = Clipmap.handoff(k), s = Double(1 << k)
+            if k == levels {
+                lods.append(SIMD4(Float(rMax), Float(rMax), Float(rMax), Float(s)))
+            } else {
+                let u = k == levels - 1 ? grow : 1
+                lods.append(SIMD4(Float(b1 - u * 0.2 * b1), Float(b1), Float(b1 - u * 3 * s), Float(s)))
+            }
+        }
+        while lods.count < 5 { lods.append(lods.last!) }
+        (f.lod0, f.lod1, f.lod2, f.lod3, f.lod4) = (lods[0], lods[1], lods[2], lods[3], lods[4])
+        f.fade = SIMD4(Float(0.7 * rMax), Float(rMax), Float(levels + 1), Renderer.lodShift)
         return f
     }
 
@@ -568,6 +893,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         var f = makeFrame(size: CGSize(width: w, height: h))
         frameIndex = (frameIndex + 1).truncatingRemainder(dividingBy: 4096)
         bakeClouds(into: cb, frame: &f)
+        if Renderer.fullCoarse { clipmap.invalidate() }
+        clipmap.encode(into: cb, center: SIMD2(camera.position.x, camera.position.z), drain: world.synchronous && !Renderer.chunkedCoarse,
+                       active: activeLevels)
         bakeLamps(into: cb, frame: &f)
         birdSlots.wait()
         cb.addCompletedHandler { [birdSlots] _ in birdSlots.signal() }
@@ -594,6 +922,9 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentTexture(world.structTex, index: 3)
             enc.setFragmentTexture(lightMap, index: 4)
             enc.setFragmentTexture(lightDir, index: 5)
+            enc.setFragmentTexture(clipmap.height, index: 6)
+            enc.setFragmentTexture(clipmap.climate, index: 7)
+            enc.setFragmentTexture(clipmap.cover, index: 8)
             enc.setFragmentBuffer(lampPos, offset: 0, index: 2)
             enc.setFragmentBuffer(lampState, offset: 0, index: 3)
             enc.setFragmentBytes(&hazeRefs, length: 128, index: 4)
@@ -749,6 +1080,7 @@ enum Snapshot {
             return
         }
         r.debugMode = settings.debugMode
+        r.timeScale = settings.timeScale
         r.world.synchronous = true
         r.camera.pitchOverride = settings.pitch
         let w = Int(settings.screenshotSize.width), h = Int(settings.screenshotSize.height)
@@ -795,18 +1127,21 @@ enum Snapshot {
             if let d = Double(ProcessInfo.processInfo.environment["VR_BIRDTEST"] ?? "") { r.wildlife.testPattern(camera: r.camera, distance: d) }
             if let d = Double(ProcessInfo.processInfo.environment["VR_MURMUR"] ?? "") { r.wildlife.testMurmuration(camera: r.camera, distance: d) }
             var times: [Double] = []
-            let frames = env["VR_MOTION"] != nil ? 48 : 12
+            let frames = env["VR_MOTION"] != nil ? Int(env["VR_MOTION_FRAMES"] ?? "") ?? 48 : 12
             // VR_FRAMES=n also writes each of the last n frames, for measuring frame-to-frame crawl.
             let dump = min(Int(env["VR_FRAMES"] ?? "") ?? 0, frames)
             var bytes = [UInt8](repeating: 0, count: w * h * 4)
             let out = settings.screenshotTimes.count > 1 ? path.replacingOccurrences(of: ".png", with: "_t\(Int(t)).png") : path
             for i in 0..<frames {
+                // VR_POWER_FLIP=i switches between battery and AC power at frame i (render scale kept).
+                if Int(env["VR_POWER_FLIP"] ?? "") == i { r.battery.toggle() }
                 if env["VR_MOTION"] != nil { r.simulate(1.0 / 60) }
                 let cb = r.queue.makeCommandBuffer()!
                 r.encode(into: cb, output: tex, outputSize: CGSize(width: w, height: h))
                 cb.commit()
                 cb.waitUntilCompleted()
                 times.append((cb.gpuEndTime - cb.gpuStartTime) * 1000)
+                if Renderer.logTiming { print(String(format: "frame %d gpu %.2f ms%@", i, times.last!, r.clipmap.idle ? "" : " (coarse job pending)")) }
                 if i >= frames - dump {
                     tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
                     write(bytes: bytes, width: w, height: h, to: out.replacingOccurrences(of: ".png", with: "_f\(i - frames + dump).png"))
@@ -815,9 +1150,9 @@ enum Snapshot {
             tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
             write(bytes: bytes, width: w, height: h, to: out)
             let seen = r.wildlife.inView(camera: r.camera, aspect: Double(w) / Double(h), tanHalf: tan(25.0 * .pi / 180))
-            print(String(format: "t=%.0f phase=%.3f sunY=%.2f exposure=%.2f cam=(%.0f,%.0f,%.0f) gpu=%.1fms birds=%d flocks=%d near=%.0f %@ -> %@", t, r.clock.phase,
+            print(String(format: "t=%.0f phase=%.3f sunY=%.2f exposure=%.2f cam=(%.0f,%.0f,%.0f) gpu=%.2fms mem=%.0fMB birds=%d flocks=%d near=%.0f %@ -> %@", t, r.clock.phase,
                          r.clock.sunDirection.y, r.exposure, r.camera.position.x, r.camera.position.y, r.camera.position.z, times.min()!,
-                         seen.count, seen.flocks, seen.nearest.isFinite ? seen.nearest : -1, Snapshot.sitesInView(r), out))
+                         Double(device.currentAllocatedSize) / 1048576, seen.count, seen.flocks, seen.nearest.isFinite ? seen.nearest : -1, Snapshot.sitesInView(r), out))
         }
         if let log = r.popLog { print(log.summary(r.wildlife)) }
     }
