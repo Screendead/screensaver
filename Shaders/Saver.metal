@@ -1049,21 +1049,24 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     // Footprint stretched across a grazing face, for detail that must fade before it aliases along the view.
     float fpA = fp / max(abs(dot(n, d)), 0.15);
     Surface s = surfaceAt(x.hm, x.size, h.voxel, h.normal, uv, fp, fpA, x.origin, x.seed, x.time);
-    // Prefilter: from ~1/10 voxel per pixel, blend toward the smooth heightfield normal, relax AO and
-    // shadows, and give risers their tread colour, so distant stairs read as contour bands, not moire.
+    // Prefilter: from ~1/10 voxel per pixel, relax AO and shadows and give risers their tread colour, so
+    // distant stairs read as contour bands, not moire.
     float wf = smoothstep(0.025, 0.20, fp);
     float3 nS = normalize(float3(s.nh.x - s.nh.y, 2.0, s.nh.z - s.nh.w));
-    // Below ~2 pixels per voxel even per-column normals, step shadows and sky visibility alias into a hatch
-    // that crawls under motion; shade the continuous slope under the stairs instead. The terrain normal is
-    // interpolated between columns even before that, or every lip and jog draws a dash.
+    // Below ~2 pixels per voxel step shadows and sky visibility alias into a hatch that crawls under motion;
+    // shade the continuous slope under the stairs instead.
     float wf2 = s.mat == 0 ? smoothstep(0.2, 0.5, fp) : 0.0;
-    if (s.mat == 0 && wf > 0.0) {
-        float R = mix(1.0, max(2.0, 1.5 * fp), wf2);
+    // A face a few pixels wide keeps its exact normal: a column's central difference tilts only the tops at a
+    // ledge, so they would shade unlike the rest of their plane. Toward 2 pixels per voxel the slope under the
+    // stairs takes over, smooth across ledges.
+    float wn = smoothstep(0.33, 0.6, fp);
+    if (s.mat == 0 && wn > 0.0) {
+        float R = max(2.0, 1.5 * fp);
         float2 grad = float2(groundSmooth(x.hm, p.xz + float2(R, 0), x.size) - groundSmooth(x.hm, p.xz - float2(R, 0), x.size),
                              groundSmooth(x.hm, p.xz + float2(0, R), x.size) - groundSmooth(x.hm, p.xz - float2(0, R), x.size)) / (2.0 * R);
         nS = normalize(float3(-grad.x, 1.0, -grad.y));
     }
-    float3 nl = normalize(mix(normalize(n - float3(s.slope.x, 0.0, s.slope.y)), nS, wf));
+    float3 nl = normalize(mix(normalize(n - float3(s.slope.x, 0.0, s.slope.y)), nS, wn));
     nl = normalize(mix(nl, float3(0, 1, 0), s.level));
     float ao = mix(mix(cornerAO(x.hm, x.size, h.voxel, h.normal, uv), 0.85, wf), 1.0, s.level) * s.canopy;
     // Cliffs several pixels tall keep their strata; only sub-pixel stairs take the tread colour.
@@ -1116,7 +1119,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     // High sun: risers sit in cooler shade so terraces keep their modelling at noon.
     float drop = s.H - min(min(s.nh.x, s.nh.y), min(s.nh.z, s.nh.w));
     float3 riserShade = mix(float3(1.0), float3(0.82, 0.86, 0.95),
-                            (1.0 - saturate(nl.y)) * smoothstep(0.3, 0.6, x.L.key.y) * smoothstep(1.5, 4.0, drop));
+                            (h.normal.y == 0 ? 1.0 - saturate(nl.y) : 0.0) * smoothstep(0.3, 0.6, x.L.key.y) * smoothstep(1.5, 4.0, drop));
     // Night: no pure-black riser feet; a faint indigo ambient keeps the steps readable as stone, not holes.
     ao = mix(ao, 1.0, 0.25 * x.L.night);
     skyFill += float3(0.09, 0.12, 0.25) * x.L.night;
