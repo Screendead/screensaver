@@ -836,6 +836,9 @@ fragment float4 postFragment(VOut in [[stage_in]], texture2d<float> scene [[text
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float3 x = scene.sample(s, in.uv).rgb * f.misc.x;
     float3 c = acesFit(x);
+    // Noon light is the flattest; restore a little chroma the tonemap shoulder takes away.
+    float l = dot(c, float3(0.2126, 0.7152, 0.0722));
+    c = max(mix(float3(l), c, 1.0 + 0.18 * smoothstep(0.3, 0.6, f.sunDir.y)), 0.0);
     float ign = fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715))));
     float3 enc = linearToSRGB(saturate(c)) + (ign - 0.5) / 255.0;
     float headroom = f.misc2.w;
