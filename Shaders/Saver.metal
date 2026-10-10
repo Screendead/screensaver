@@ -1308,8 +1308,7 @@ static float stairShadow(thread const Terrain& tr, int k, float2 p, float3 L, fl
     return lit / area;
 }
 
-// shadowT carries the traced shadow's hit distance (1e30: none) between the two shadings of a band pixel; < 0 traces it.
-static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows, thread float& shadowT) {
+static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows) {
     float3 p = o + d * h.t;
     float3 n = float3(h.normal);
     int k = h.level;
@@ -1389,15 +1388,12 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
         so.xz = clamp(so.xz, float2(h.voxel.xz) * cs + 0.002, float2(h.voxel.xz) * cs + (cs - 0.002));
         // Prefiltered, the ray starts a step above the column, and single steps shade by their expected cover.
         so.y = mix(so.y, max(so.y, s.H) + 1.0, wf2);
-        if (shadowT < 0.0) {
-            Hit sHit = trace(x.tr, so, x.L.key, 700.0, x.quality > 0.5 ? 120 : 48, k);
-            shadowT = sHit.hit ? sHit.t : 1e30;
-        }
+        Hit sHit = trace(x.tr, so, x.L.key, 700.0, x.quality > 0.5 ? 120 : 48, k);
         // Contact shadows from single-voxel steps draw sawtooth noise; keep them faint, cliffs full.
         float contact = 0.35 * (1.0 - smoothstep(2.0, 8.0, 0.5 / x.L.key.y));
         // The lift moves the ray's start about 1 / L.y along it; contact reach moves with it.
         float reach = wf2 / max(x.L.key.y, 0.05);
-        sh = shadowT < 1e29 ? 0.35 * (1.0 - smoothstep(2.0 + reach, 8.0 + reach, shadowT)) : 1.0;
+        sh = sHit.hit ? 0.35 * (1.0 - smoothstep(2.0 + reach, 8.0 + reach, sHit.t)) : 1.0;
         if (wf2 > 0.0) sh = mix(sh, min(sh, stairShadow(x.tr, k, p.xz, x.L.key, d, contact, 0.35)), wf2);
         float floorSh = mix(mix(0.5, 0.25, hiSun), 0.32, x.L.gold);
         sh = mix(sh, floorSh + (1.0 - floorSh) * sh, wf);
@@ -1443,8 +1439,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
 // In a morph band the shading also slides to the next level's, reaching it where the geometry does, so the switch
 // at the handoff circle is seamless in colour and light as well as in shape.
 static float3 shadeL(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows) {
-    float shadowT = -1.0;
-    float3 col = shade(x, o, d, h, shadows, shadowT);
+    float3 col = shade(x, o, d, h, shadows);
     float3 p = o + d * h.t;
     float w = morphAt(x.tr, h.level, p.xz);
     if (w > 0.0) {
@@ -1452,7 +1447,8 @@ static float3 shadeL(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadow
         h2.level = h.level + 1;
         int2 c = int2(floor((p.xz - float2(h.normal.xz) * 0.01) / x.tr.lod[h2.level].w));
         h2.voxel = int3(c.x, h.voxel.y, c.y);
-        col = mix(col, shade(x, o, d, h2, shadows, shadowT), w);
+        // Each shading traces its own level's shadow: the outer one must match the next level's hits past the circle.
+        col = mix(col, shade(x, o, d, h2, shadows), w);
     }
     return col;
 }
