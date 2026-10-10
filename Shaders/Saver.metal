@@ -18,6 +18,8 @@ struct Frame {
     float4 prevUp;
     float4 jitter;     // xy subpixel jitter in NDC
     float4 cloud;      // xy cloud field origin in drifted world xz, z field texel size (0: no field)
+    float4 lod[5];     // per level: x morph band start, y handoff radius (the last level's is the world's edge), z morph end, w column width
+    float4 fade;       // x fog fade start, y world radius, z level count
 };
 
 constant float SEA = 19.85;
@@ -418,6 +420,54 @@ kernel void reduceMax(texture2d<float, access::read> src [[texture(0)]],
     uint2 s = gid * 2;
     float m = max(max(src.read(s).r, src.read(s + uint2(1, 0)).r), max(src.read(s + uint2(0, 1)).r, src.read(s + uint2(1, 1)).r));
     dst.write(float4(m, 0, 0, 0), gid);
+}
+
+// MARK: - Coarse levels
+
+// Coarse level k (1...4) has columns s = 2^k voxels wide, built from the same terrainColumn field: the mean of
+// four point samples, one per child column, so no coarse level carries trees or arches.
+constant int COARSE_N = 2048;
+
+static inline float coarseHeight(int2 cw, int k, uint seed) {
+    int s = 1 << k, off = s >> 2, hs = s >> 1;
+    int2 b = cw * s + off;
+    float sum = terrainColumn(b, seed).x + terrainColumn(b + int2(hs, 0), seed).x
+              + terrainColumn(b + int2(0, hs), seed).x + terrainColumn(b + int2(hs, hs), seed).x;
+    return floor(sum * 0.25 + 0.5);
+}
+
+// Writes the world cells region.xy + [0, region.zw) of level info.x into its toroidal slice (texel = cell & 2047):
+// height and canopy cover, and every second cell also the half-resolution climate texel it starts.
+kernel void generateCoarse(texture2d<float, access::write> hOut [[texture(0)]],
+                           texture2d<float, access::write> cOut [[texture(1)]],
+                           constant int4& region [[buffer(0)]],
+                           constant int4& info [[buffer(1)]],
+                           uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= uint(region.z) || gid.y >= uint(region.w)) return;
+    int k = info.x, s = 1 << k;
+    uint seed = uint(info.y);
+    int2 cw = region.xy + int2(gid);
+    float H = coarseHeight(cw, k, seed);
+    float2 centre = float2(cw * s) + 0.5 * float(s);
+    // Expected share of the column under leaves: planting chance per tree cell times a mean canopy of ~13 columns.
+    float cover = saturate(groveDensity(centre, H, seed) * 13.0 / float(TREE_CELL * TREE_CELL));
+    hOut.write(float4(H, cover, 0, 0), uint2(cw & (COARSE_N - 1)));
+    if (all((cw & 1) == 0)) {
+        int2 cj = cw >> 1;
+        Climate c = climate((float2(cj) + 0.5) * float(2 * s), seed);
+        cOut.write(float4(c.temp, c.moist, c.fall, c.basin), uint2(cj & (COARSE_N / 2 - 1)));
+    }
+}
+
+kernel void reduceMaxRegion(texture2d<float, access::read> src [[texture(0)]],
+                            texture2d<float, access::write> dst [[texture(1)]],
+                            constant int4& region [[buffer(0)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= uint(region.z) || gid.y >= uint(region.w)) return;
+    uint2 g = gid + uint2(region.xy);
+    uint2 s = g * 2;
+    float m = max(max(src.read(s).r, src.read(s + uint2(1, 0)).r), max(src.read(s + uint2(0, 1)).r, src.read(s + uint2(1, 1)).r));
+    dst.write(float4(m, 0, 0, 0), g);
 }
 
 // MARK: - Traversal
@@ -1400,7 +1450,8 @@ static float3 softCloudSky(thread const Ctx& x, float3 o, float3 r) {
 
 fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0)]],
                               texture2d<float> hm [[texture(0)]], texture2d<float> cloudTex [[texture(1)]],
-                              texture2d<float> clim [[texture(2)]]) {
+                              texture2d<float> clim [[texture(2)]], texture2d_array<float> coarse [[texture(3)]],
+                              texture2d_array<float> coarseClim [[texture(4)]]) {
     float2 ndc = in.uv * 2.0 - 1.0;
     ndc.y = -ndc.y;
     ndc += f.jitter.xy;

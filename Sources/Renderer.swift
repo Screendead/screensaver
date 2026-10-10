@@ -18,6 +18,13 @@ struct Frame {
     var prevUp = SIMD4<Float>()
     var jitter = SIMD4<Float>()
     var cloud = SIMD4<Float>()
+    // lod0...lod4 are `lod[5]` in the shader.
+    var lod0 = SIMD4<Float>()
+    var lod1 = SIMD4<Float>()
+    var lod2 = SIMD4<Float>()
+    var lod3 = SIMD4<Float>()
+    var lod4 = SIMD4<Float>()
+    var fade = SIMD4<Float>()
 }
 
 enum GPU {
@@ -221,6 +228,146 @@ final class World {
     }
 }
 
+// Coarse LOD rings beyond the 1-voxel map. Level k (1...4) has columns 2^k voxels wide, 2048 to a side, kept
+// toroidally (texel = world cell & 2047) around the camera, so re-centring rewrites only the 64-cell strip that
+// enters the window, a chunk per frame inside the frame's own command buffer.
+final class Clipmap {
+    static let levels = 4, size = 2048, snap = 64, chunk = 256
+    // Must match Frame.lod in Shaders/Saver.metal: a level hands off to the next at 860 of its own columns,
+    // which keeps every read inside the window while a strip is rewritten.
+    static func handoff(_ k: Int) -> Double { 860.0 * Double(1 << k) }
+
+    let height: MTLTexture   // rg16Float array: height, canopy cover; max mips in r
+    let climate: MTLTexture  // rgba16Float array at half resolution
+    private let heightViews: [[MTLTexture]]
+    private let climateViews: [MTLTexture]
+    private let genPipeline: MTLComputePipelineState
+    private let reducePipeline: MTLComputePipelineState
+    private let seed: UInt32
+    private var lo: [SIMD2<Int32>?] = Array(repeating: nil, count: Clipmap.levels)
+    private struct Job { var level: Int; var x0: Int32; var z0: Int32; var w: Int32; var h: Int32; var done: Int32; var newLo: SIMD2<Int32> }
+    private var job: Job?
+
+    init?(device: MTLDevice, library: MTLLibrary, seed: UInt32) {
+        func pipeline(_ name: String) -> MTLComputePipelineState? {
+            library.makeFunction(name: name).flatMap { try? device.makeComputePipelineState(function: $0) }
+        }
+        let hd = MTLTextureDescriptor()
+        hd.textureType = .type2DArray
+        hd.pixelFormat = .rg16Float
+        hd.width = Clipmap.size
+        hd.height = Clipmap.size
+        hd.arrayLength = Clipmap.levels
+        hd.mipmapLevelCount = Int(log2(Double(Clipmap.size))) + 1
+        hd.usage = [.shaderRead, .shaderWrite, .pixelFormatView]
+        hd.storageMode = .private
+        let cd = MTLTextureDescriptor()
+        cd.textureType = .type2DArray
+        cd.pixelFormat = .rgba16Float
+        cd.width = Clipmap.size / 2
+        cd.height = Clipmap.size / 2
+        cd.arrayLength = Clipmap.levels
+        cd.usage = [.shaderRead, .shaderWrite, .pixelFormatView]
+        cd.storageMode = .private
+        guard let h = device.makeTexture(descriptor: hd), let c = device.makeTexture(descriptor: cd),
+              let gen = pipeline("generateCoarse"), let red = pipeline("reduceMaxRegion") else { return nil }
+        var hv: [[MTLTexture]] = [], cv: [MTLTexture] = []
+        for k in 0..<Clipmap.levels {
+            var mips: [MTLTexture] = []
+            for m in 0..<h.mipmapLevelCount {
+                guard let v = h.makeTextureView(pixelFormat: .rg16Float, textureType: .type2D, levels: m..<(m + 1), slices: k..<(k + 1)) else { return nil }
+                mips.append(v)
+            }
+            hv.append(mips)
+            guard let v = c.makeTextureView(pixelFormat: .rgba16Float, textureType: .type2D, levels: 0..<1, slices: k..<(k + 1)) else { return nil }
+            cv.append(v)
+        }
+        height = h
+        climate = c
+        heightViews = hv
+        climateViews = cv
+        genPipeline = gen
+        reducePipeline = red
+        self.seed = seed
+    }
+
+    // Window origin (in level cells) that centres level k on world xz `center`.
+    private static func target(_ center: SIMD2<Double>, level k: Int) -> SIMD2<Int32> {
+        let s = Double(1 << k)
+        func f(_ v: Double) -> Int32 { Int32(((floor(v / s) - Double(size / 2)) / Double(snap)).rounded(.down)) * Int32(snap) }
+        return SIMD2(f(center.x), f(center.y))
+    }
+
+    var idle: Bool { job == nil }
+
+    private func nextJob(_ center: SIMD2<Double>) -> Job? {
+        let n = Int32(Clipmap.size), step = Int32(Clipmap.snap)
+        for i in 0..<Clipmap.levels {
+            let t = Clipmap.target(center, level: i + 1)
+            guard let cur = lo[i], abs(t.x - cur.x) <= 8 * step, abs(t.y - cur.y) <= 8 * step else {
+                return Job(level: i, x0: t.x, z0: t.y, w: n, h: n, done: 0, newLo: t)
+            }
+            if t.x != cur.x {
+                let dir: Int32 = t.x > cur.x ? 1 : -1
+                return Job(level: i, x0: dir > 0 ? cur.x + n : cur.x - step, z0: cur.y, w: step, h: n, done: 0,
+                           newLo: SIMD2(cur.x + dir * step, cur.y))
+            }
+            if t.y != cur.y {
+                let dir: Int32 = t.y > cur.y ? 1 : -1
+                return Job(level: i, x0: cur.x, z0: dir > 0 ? cur.y + n : cur.y - step, w: n, h: step, done: 0,
+                           newLo: SIMD2(cur.x, cur.y + dir * step))
+            }
+        }
+        return nil
+    }
+
+    // Encodes pending generation: one chunk, or with `drain` everything the camera position needs. A whole-window
+    // rebuild (startup, or a jump of more than 8 strips) is always encoded in one go.
+    func encode(into cb: MTLCommandBuffer, center: SIMD2<Double>, drain: Bool) {
+        var budget = drain ? Int.max : 1
+        if job == nil { job = nextJob(center) }
+        guard job != nil, let enc = cb.makeComputeCommandEncoder() else { return }
+        defer { enc.endEncoding() }
+        while budget > 0 {
+            if job == nil { job = nextJob(center) }
+            guard var j = job else { return }
+            let full = j.w == Int32(Clipmap.size) && j.h == Int32(Clipmap.size)
+            let long = max(j.w, j.h)
+            let piece = full ? long : min(Int32(Clipmap.chunk), long - j.done)
+            var region = j.w >= j.h ? SIMD4<Int32>(j.x0 + j.done, j.z0, piece, j.h) : SIMD4<Int32>(j.x0, j.z0 + j.done, j.w, piece)
+            var info = SIMD4<Int32>(Int32(j.level + 1), Int32(bitPattern: seed), 0, 0)
+            enc.setComputePipelineState(genPipeline)
+            enc.setTexture(heightViews[j.level][0], index: 0)
+            enc.setTexture(climateViews[j.level], index: 1)
+            enc.setBytes(&region, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
+            enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 1)
+            enc.dispatchThreads(MTLSize(width: Int(region.z), height: Int(region.w), depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+            j.done += piece
+            budget -= 1
+            if j.done < long { job = j; continue }
+            // Max mips over the rewritten region; the window is 64-aligned, so the region is contiguous in storage
+            // unless it spans the whole axis.
+            let n = Int32(Clipmap.size), mask = n - 1
+            let sx = j.w == n ? 0 : j.x0 & mask, sz = j.h == n ? 0 : j.z0 & mask
+            enc.setComputePipelineState(reducePipeline)
+            let views = heightViews[j.level]
+            for m in 1..<views.count {
+                let dim = Int32(Clipmap.size >> m)
+                // Coarser than the strip: rebuild the whole (tiny) mip.
+                var r = m <= 6 ? SIMD4<Int32>(sx >> Int32(m), sz >> Int32(m), max(j.w >> Int32(m), 1), max(j.h >> Int32(m), 1))
+                               : SIMD4<Int32>(0, 0, dim, dim)
+                enc.setTexture(views[m - 1], index: 0)
+                enc.setTexture(views[m], index: 1)
+                enc.setBytes(&r, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
+                enc.dispatchThreads(MTLSize(width: Int(r.z), height: Int(r.w), depth: 1),
+                                    threadsPerThreadgroup: MTLSize(width: min(16, Int(r.z)), height: min(16, Int(r.w)), depth: 1))
+            }
+            lo[j.level] = j.newLo
+            job = nil
+        }
+    }
+}
+
 final class Renderer: NSObject, MTKViewDelegate {
     let device: MTLDevice
     let queue: MTLCommandQueue
@@ -238,6 +385,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var historyIndex = 0
     private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
     let world: World
+    let clipmap: Clipmap
     let camera: FlightCamera
     var clock = SkyClock()
     private(set) var battery: Bool
@@ -279,7 +427,8 @@ final class Renderer: NSObject, MTKViewDelegate {
               let tp = try? device.makeRenderPipelineState(descriptor: taa),
               let pp = try? device.makeRenderPipelineState(descriptor: post),
               let cf = lib.makeFunction(name: "cloudField").flatMap({ try? device.makeComputePipelineState(function: $0) }),
-              let world = World(device: device, library: lib, seed: seed) else { return nil }
+              let world = World(device: device, library: lib, seed: seed),
+              let clipmap = Clipmap(device: device, library: lib, seed: seed) else { return nil }
         self.device = device
         self.queue = queue
         scenePipeline = sp
@@ -287,6 +436,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         taaPipeline = tp
         cloudPipeline = cf
         self.world = world
+        self.clipmap = clipmap
         // Spec offset displays by 90 s of the same flight; steering reads GPU heights, so displays
         // instead start at different places in the same world.
         camera = FlightCamera(seed: seed &+ UInt32(screenIndex) &* 7919)
@@ -296,6 +446,14 @@ final class Renderer: NSObject, MTKViewDelegate {
         camera.heightAt = { [unowned world] x, z in world.height(x: x, z: z) }
         world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
         camera.placeAtStart()
+        // The coarse rings are built before the first frame; afterwards only strips are rewritten.
+        if let cb = queue.makeCommandBuffer() {
+            let t0 = CACurrentMediaTime()
+            clipmap.encode(into: cb, center: SIMD2(camera.position.x, camera.position.z), drain: true)
+            cb.commit()
+            cb.waitUntilCompleted()
+            if Renderer.logTiming { print(String(format: "coarse build %.1f ms (gpu %.1f)", (CACurrentMediaTime() - t0) * 1000, (cb.gpuEndTime - cb.gpuStartTime) * 1000)) }
+        }
     }
 
     convenience init?(view: MTKView, screen: NSScreen, seed: UInt32, screenIndex: Int, battery: Bool) {
@@ -371,6 +529,22 @@ final class Renderer: NSObject, MTKViewDelegate {
         let k = Int(frameIndex) % phases + 1
         func halton(_ i: Int, _ b: Int) -> Double { var f = 1.0, r = 0.0, i = i; while i > 0 { f /= Double(b); r += f * Double(i % b); i /= b }; return r }
         f.jitter = SIMD4(Float((halton(k, 2) - 0.5) * 2 / size.width), Float((halton(k, 3) - 0.5) * 2 / size.height), 0, 0)
+        // LOD rings. The 1-voxel map hands off at 660, inside the 1024 - 340 (worst drift) - 8 (neighbour reads)
+        // it always covers; nearer its edge only if the camera outran regeneration. Each level morphs toward the
+        // next over a band, reaching it 1.5 parent columns before the handoff circle.
+        let half = Double(World.size / 2)
+        let edge = half - 8 - max(abs(p.x - half), abs(p.z - half))
+        let b01 = min(660, edge)
+        var lods = [SIMD4<Float>(Float(b01 - 140), Float(b01), Float(b01 - 3), 1)]
+        let levels = battery ? 3 : Clipmap.levels
+        for k in 1...levels {
+            let b1 = Clipmap.handoff(k), s = Double(1 << k)
+            lods.append(k == levels ? SIMD4(Float(b1), Float(b1), Float(b1), Float(s)) : SIMD4(Float(0.8 * b1), Float(b1), Float(b1 - 3 * s), Float(s)))
+        }
+        while lods.count < 5 { lods.append(lods.last!) }
+        (f.lod0, f.lod1, f.lod2, f.lod3, f.lod4) = (lods[0], lods[1], lods[2], lods[3], lods[4])
+        let rMax = Float(Clipmap.handoff(levels))
+        f.fade = SIMD4(0.7 * rMax, rMax, Float(levels + 1), 0)
         return f
     }
 
@@ -395,6 +569,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         var f = makeFrame(size: CGSize(width: w, height: h))
         frameIndex = (frameIndex + 1).truncatingRemainder(dividingBy: 4096)
         bakeClouds(into: cb, frame: &f)
+        clipmap.encode(into: cb, center: SIMD2(camera.position.x, camera.position.z), drain: world.synchronous)
         let b = camera.basis
         prevCamera = (camera.position, b.fwd, b.right, b.up)
         let histIn = history[historyIndex], histOut = history[1 - historyIndex]
@@ -410,6 +585,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentTexture(world.heightTex, index: 0)
             enc.setFragmentTexture(cloudTex, index: 1)
             enc.setFragmentTexture(world.climateTex, index: 2)
+            enc.setFragmentTexture(clipmap.height, index: 3)
+            enc.setFragmentTexture(clipmap.climate, index: 4)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
         }
@@ -541,8 +718,9 @@ enum Snapshot {
             }
             tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
             write(bytes: bytes, width: w, height: h, to: out)
-            print(String(format: "t=%.0f phase=%.3f sunY=%.2f exposure=%.2f cam=(%.0f,%.0f,%.0f) gpu=%.1fms -> %@", t, r.clock.phase,
-                         r.clock.sunDirection.y, r.exposure, r.camera.position.x, r.camera.position.y, r.camera.position.z, times.min()!, out))
+            print(String(format: "t=%.0f phase=%.3f sunY=%.2f exposure=%.2f cam=(%.0f,%.0f,%.0f) gpu=%.2fms mem=%.0fMB -> %@", t, r.clock.phase,
+                         r.clock.sunDirection.y, r.exposure, r.camera.position.x, r.camera.position.y, r.camera.position.z, times.min()!,
+                         Double(device.currentAllocatedSize) / 1048576, out))
         }
     }
 
