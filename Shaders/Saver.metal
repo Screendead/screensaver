@@ -321,6 +321,11 @@ struct Hit {
     int iters;
 };
 
+static inline float heightAt(texture2d<float> hm, int2 c, int size) {
+    c = clamp(c, int2(0), int2(size - 1));
+    return hm.read(uint2(c), 0).r;
+}
+
 // Terrain height under any tree.
 static inline float groundAt(texture2d<float> hm, int2 c, int size) {
     c = clamp(c, int2(0), int2(size - 1));
