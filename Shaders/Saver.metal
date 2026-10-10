@@ -187,8 +187,13 @@ static inline float3 terrainColumn(int2 w, uint seed) {
     // Painted hills: rounded mounds from billowed Perlin noise, untreaded so every voxel step shows a bed,
     // rising from flat floors where the billow's creases are filled in.
     float painted = paintedAmount(cl);
+    // Low islands in lagoons, salt basins and painted country: a short-wavelength warp and roughening, or smooth
+    // domes floor into concentric rings that look built.
+    float lagoon = lagoonAmount(cl);
+    float eroded = max(max(lagoon, smoothstep(0.0, 0.3, salt)), smoothstep(0.0, 0.6, painted));
+    float2 ew = eroded > 0.0 ? float2(perlin2(p / 38.0, seed + 120u), perlin2(p / 38.0 + 19.1, seed + 121u)) * 14.0 * eroded : 0.0;
     if (painted > 0.0) {
-        float b = abs(fbm2((p + warp * 0.3) / 160.0, 3, seed + 111u));
+        float b = abs(fbm2((p + warp * 0.3 + ew) / 160.0, 3, seed + 111u));
         float amp = mix(22.0, 52.0, saturate(perlin2(p / 600.0, seed + 112u) * 0.8 + 0.5));
         float mound = smoothstep(0.07, 0.5, b);
         h = mix(h, paintedFloor(p, seed) + amp * mound * (2.0 - mound) * 0.75, smoothstep(0.0, 0.6, painted));
@@ -200,11 +205,11 @@ static inline float3 terrainColumn(int2 w, uint seed) {
     h = mix(SEA - 3.0, h, valley);
     // Lagoon shallows: the land sinks to a sandy bed rolling a few voxels either side of the surface,
     // so sand bars and islets break it and channels run deeper between them.
-    float lagoon = lagoonAmount(cl);
     if (lagoon > 0.0) {
-        float bed = fbm2((p + warp * 0.3) / 210.0, 3, seed + 15u) + 0.25 * perlin2(p / 600.0, seed + 16u);
+        float bed = fbm2((p + warp * 0.3 + ew) / 210.0, 3, seed + 15u) + 0.25 * perlin2(p / 600.0, seed + 16u);
         h = mix(h, SEA - 2.5 + bed * 14.0, lagoon);
     }
+    if (eroded > 0.0) h += eroded * (1.6 * perlin2(p / 21.0 + ew / 14.0, seed + 122u) + 0.9 * perlin2(p / 9.0, seed + 125u)) * smoothstep(SEA + 40.0, SEA + 2.0, h);
     h = floor(max(h, 2.0));
 
     // Salt pans: the land is cut down to old shorelines, low benches climbing out of a dead-flat floor,
@@ -212,7 +217,8 @@ static inline float3 terrainColumn(int2 w, uint seed) {
     bool pool = false;
     if (salt > 0.02) {
         float bench = 3.0;
-        float rim = PAN + floor(70.0 * pow(1.0 - smoothstep(0.1, 0.85, salt), 1.5) / bench) * bench;
+        float rs = salt + 0.05 * perlin2(p / 45.0, seed + 123u) + 0.025 * perlin2(p / 16.0, seed + 124u);
+        float rim = PAN + floor(70.0 * pow(1.0 - smoothstep(0.1, 0.85, rs), 1.5) / bench) * bench;
         h = min(h, rim);
         h = max(h, PAN - floor(6.0 * (1.0 - smoothstep(0.6, 0.85, salt))));
         if (h == PAN && poolNoise(p, seed) > poolLevel(salt)) { h = PAN - 1.0; pool = true; }
@@ -290,10 +296,10 @@ static inline float groveDensity(float2 w, float g, uint seed) {
     float dense = smoothstep(0.22, 0.44, grove + 0.35 * (wet - 0.5) + 0.12 * autumn + 0.3 * lagoon);
     // Sage scrub on the painted hills' valley floors.
     float fl = paintedFloor(p, seed);
-    float scrub = painted * smoothstep(fl + 3.0, fl + 0.5, g)
-                * smoothstep(-0.3, 0.3, perlin2(p / 60.0, seed + 113u));
+    float scrub = painted * smoothstep(fl + 3.0, fl + 0.5, g) * (1.0 - smoothstep(0.02, 0.2, saltAmount(c)))
+                * smoothstep(0.2, 0.45, perlin2(p / 60.0, seed + 113u));
     // Lone trees dot even dry grassland; groves need moisture.
-    return (0.02 * open + mix(0.32, 0.45, autumn) * dense * wet + 0.18 * scrub) * band;
+    return (0.02 * open + mix(0.32, 0.45, autumn) * dense * wet + 0.35 * scrub) * band;
 }
 
 struct Tree { bool ok; int2 c; float g; int lo; int top; int kind; };
@@ -322,6 +328,8 @@ static Tree treeInCell(texture2d<float, access::read> src, int2 cell, int2 origi
     else if (hashf(r) < coniferAmount(c)) t.kind = 3;
     else if (dense < 0.15) t.kind = int(hashf(pcg(r)) * 3.0);
     else t.kind = hashf(pcg(r)) < 0.3 ? 1 : 2;
+    // A lone one-voxel shrub on open sand or salt reads as debris.
+    if (t.kind == 0 && (saltAmount(c) > 0.02 || lagoonAmount(c) > 0.2 || desertAmount(c) > 0.3)) return t;
     int g = int(t.g);
     if (t.kind == 0) { t.lo = g; t.top = g + 1 + int(r >> 30 & 1u); }
     else if (t.kind == 1) { t.lo = g + 2 + int(r >> 29 & 1u); t.top = t.lo + 3; }
@@ -1011,7 +1019,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     // Moonlight drains colour.
     alb = mix(alb, float3(dot(alb, float3(0.3, 0.59, 0.11))), 0.4 * x.L.night);
     // Pale sand, salt and stone would glow under the moon brighter than the sky above them.
-    if (s.mat == 0) alb *= 1.0 - 0.45 * x.L.night * smoothstep(0.15, 0.45, dot(alb, float3(0.3, 0.59, 0.11)));
+    if (s.mat == 0) alb *= 1.0 - 0.55 * x.L.night * smoothstep(0.08, 0.3, dot(alb, float3(0.3, 0.59, 0.11)));
     // Canopies would otherwise drop to cut-out silhouettes under the moon.
     if (s.mat == 1 || s.mat == 2) alb *= 1.0 + 1.4 * x.L.night * (1.0 - 0.5 * s.autumn);
     float ndl = max(dot(nl, x.L.key), 0.0);
