@@ -109,6 +109,7 @@ final class World {
         var origin = SIMD2<Int32>(Int32.min, Int32.min)
         var globalMax: Float = 255
         var cpuHeights: [Float] = []
+        var cpuFloors: [Float] = []
         var siteList: [SiteInfo] = []
 
         init?(device: MTLDevice) {
@@ -140,13 +141,14 @@ final class World {
     private let genPipeline: MTLComputePipelineState
     private let reducePipeline: MTLComputePipelineState
     private let reduceBasePipeline: MTLComputePipelineState
+    private let cpuReducePipeline: MTLComputePipelineState
     private let cleanupPipeline: MTLComputePipelineState
     private let plantPipeline: MTLComputePipelineState
     private let climatePipeline: MTLComputePipelineState
     private let sitePipeline: MTLComputePipelineState
     private let stampPipeline: MTLComputePipelineState
     private let scratch: [MTLTexture]
-    // Max mips 1 and 2 of the plain heights for the camera's readback: the map's own mips from 1 up also bound the
+    // Max mips 1 and 2 of the plain heights (r) and solid floors (g) for the CPU readback: the map's own mips from 1 up also bound the
     // level-1 columns, which the camera must not steer by.
     private let cpuMips: [MTLTexture]
     private var buffers: [Buffer]
@@ -170,14 +172,14 @@ final class World {
         let sd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: World.size, height: World.size, mipmapped: false)
         sd.usage = [.shaderRead, .shaderWrite]
         sd.storageMode = .private
-        guard let gen = pipeline("generateHeight"), let red = pipeline("reduceMax"), let redBase = pipeline("reduceMaxBase"),
+        guard let gen = pipeline("generateHeight"), let red = pipeline("reduceMax"), let redBase = pipeline("reduceMaxBase"), let redCpu = pipeline("reduceCpu"),
               let clean = pipeline("cleanupColumns"),
               let plant = pipeline("plantTrees"), let clim = pipeline("bakeClimate"), let place = pipeline("placeSites"), let stamp = pipeline("stampStructures"),
               let s0 = device.makeTexture(descriptor: sd), let s1 = device.makeTexture(descriptor: sd), let q = device.makeCommandQueue(),
               let a = Buffer(device: device), let b = Buffer(device: device) else { return nil }
         var mips: [MTLTexture] = []
         for l in 1...World.cpuLevel {
-            let md = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Float, width: World.size >> l, height: World.size >> l, mipmapped: false)
+            let md = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Float, width: World.size >> l, height: World.size >> l, mipmapped: false)
             md.usage = [.shaderRead, .shaderWrite]
             md.storageMode = l == World.cpuLevel ? .shared : .private
             guard let t = device.makeTexture(descriptor: md) else { return nil }
@@ -190,6 +192,7 @@ final class World {
         genPipeline = gen
         reducePipeline = red
         reduceBasePipeline = redBase
+        cpuReducePipeline = redCpu
         cleanupPipeline = clean
         plantPipeline = plant
         climatePipeline = clim
@@ -280,8 +283,10 @@ final class World {
                 enc.setBytes(&row0, length: MemoryLayout<UInt32>.stride, index: 1)
                 enc.dispatchThreads(MTLSize(width: World.size, height: World.bandRows, depth: 1), threadsPerThreadgroup: tg)
             } else {
-                enc.setComputePipelineState(reducePipeline)
+                enc.setComputePipelineState(cpuReducePipeline)
                 for (l, t) in cpuMips.enumerated() {
+                    var fromColumns: Int32 = l == 0 ? 1 : 0
+                    enc.setBytes(&fromColumns, length: 4, index: 0)
                     enc.setTexture(l == 0 ? buf.levels[0] : cpuMips[l - 1], index: 0)
                     enc.setTexture(t, index: 1)
                     enc.dispatchThreads(MTLSize(width: t.width, height: t.height, depth: 1), threadsPerThreadgroup: tg)
@@ -310,10 +315,11 @@ final class World {
         guard done else { cb.commit(); return }
 
         let index = j.index, o = j.origin, t0 = j.t0
-        let finish = { [weak self] (heights: [Float], top: Float) in
+        let finish = { [weak self] (heights: [Float], floors: [Float], top: Float) in
             guard let self else { return }
             buf.origin = o
             buf.cpuHeights = heights
+            buf.cpuFloors = floors
             buf.globalMax = top + 1
             buf.siteList = World.readSites(buf.sites)
             if World.logSites {
@@ -332,13 +338,13 @@ final class World {
             cb.commit()
             cb.waitUntilCompleted()
             let r = World.readBack(buf.tex, cpuMips.last!)
-            finish(r.0, r.1)
+            finish(r.0, r.1, r.2)
         } else {
             cb.addCompletedHandler { [weak self] cb in
                 guard cb.status == .completed else { DispatchQueue.main.async { self?.pending = false }; return }
                 guard let self else { return }
                 let r = World.readBack(buf.tex, self.cpuMips.last!)
-                DispatchQueue.main.async { finish(r.0, r.1) }
+                DispatchQueue.main.async { finish(r.0, r.1, r.2) }
             }
             cb.commit()
         }
@@ -366,13 +372,13 @@ final class World {
         return list
     }
 
-    private static func readBack(_ tex: MTLTexture, _ cpu: MTLTexture) -> ([Float], Float) {
+    private static func readBack(_ tex: MTLTexture, _ cpu: MTLTexture) -> ([Float], [Float], Float) {
         let s = World.size >> World.cpuLevel
-        var raw = [Float16](repeating: 0, count: s * s)
-        cpu.getBytes(&raw, bytesPerRow: s * 2, from: MTLRegionMake2D(0, 0, s, s), mipmapLevel: 0)
+        var raw = [Float16](repeating: 0, count: s * s * 2)
+        cpu.getBytes(&raw, bytesPerRow: s * 4, from: MTLRegionMake2D(0, 0, s, s), mipmapLevel: 0)
         var top = [Float16](repeating: 0, count: 4)
         tex.getBytes(&top, bytesPerRow: 8, from: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: tex.mipmapLevelCount - 1)
-        return (raw.map { Float($0) }, Float(top[0]))
+        return ((0..<(s * s)).map { Float(raw[$0 * 2]) }, (0..<(s * s)).map { Float(raw[$0 * 2 + 1]) }, Float(top[0]))
     }
 
     // Conservative (4x4 max) height in world coords.
@@ -383,6 +389,16 @@ final class World {
         let cz = Int(floor((z - Double(b.origin.y)) / Double(1 << World.cpuLevel)))
         guard cx >= 0, cz >= 0, cx < s, cz < s, !b.cpuHeights.isEmpty else { return nil }
         return Double(b.cpuHeights[cz * s + cx])
+    }
+
+    // Lower bound in world coords: every column of the 4x4 cell is solid from the ground up to at least this.
+    func solidFloor(x: Double, z: Double) -> Double? {
+        let b = buffers[active]
+        let s = World.size >> World.cpuLevel
+        let cx = Int(floor((x - Double(b.origin.x)) / Double(1 << World.cpuLevel)))
+        let cz = Int(floor((z - Double(b.origin.y)) / Double(1 << World.cpuLevel)))
+        guard cx >= 0, cz >= 0, cx < s, cz < s, !b.cpuFloors.isEmpty else { return nil }
+        return Double(b.cpuFloors[cz * s + cx])
     }
 }
 
@@ -618,6 +634,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var frameIndex: Float = 0
     private var gpuTimes: [Double] = []
     private var sceneSize = (width: 0, height: 0)
+    let popLog: PopLog? = PopLog.enabled ? PopLog() : nil
     private(set) var aspect: Float = 16.0 / 10.0
     static let logTiming = ProcessInfo.processInfo.environment["VR_TIMING"] != nil
     static let fullCoarse = ProcessInfo.processInfo.environment["VR_COARSE_FULL"] != nil
@@ -727,6 +744,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         self.init(device: device, outputFormat: view.colorPixelFormat, seed: seed, screenIndex: screenIndex, battery: battery)
         view.autoResizeDrawable = false
         view.drawableSize = CGSize(width: view.bounds.width * backingScale, height: view.bounds.height * backingScale)
+        prepare(outputSize: view.drawableSize)
         view.delegate = self
     }
 
@@ -745,7 +763,9 @@ final class Renderer: NSObject, MTKViewDelegate {
             camera.sun = clock.sunDirection
             camera.nightIndex = clock.nightIndex
             camera.step(dt: step)
-            wildlife.step(dt: step, camera: camera, sunY: clock.sunDirection.y, phase: clock.phase)
+            wildlife.step(dt: step, camera: camera, sight: sight(), sunY: clock.sunDirection.y, phase: clock.phase)
+            popLog?.check(wildlife, sight: sight(), time: simTime + dt * timeScale - remaining + step, dt: step,
+                          period: PopLog.period(sunY: clock.sunDirection.y, phase: clock.phase))
             if Renderer.logTiming, let g = world.height(x: camera.position.x, z: camera.position.z), camera.position.y < g + 2 {
                 print(String(format: "camera low: y=%.1f ground=%.1f", camera.position.y, g))
             }
@@ -762,6 +782,34 @@ final class Renderer: NSObject, MTKViewDelegate {
         let e = clock.sunDirection.y
         let target = e > 0 ? 0.62 + 1.0 * max(0, 0.3 - e) / 0.3 + 0.08 * min(1, max(0, (e - 0.3) / 0.2)) : (e > -0.1 ? 2.02 + 0.4 * (-e / 0.1) : 1.6 + 0.4 * max(0, 0.3 + e) / 0.2)
         exposure += (target - exposure) * min(1, dt * timeScale * 0.2)
+    }
+
+    // What a frame rendered now could show; the frustum follows the scene size the last encode (or prepare) set.
+    func sight() -> Sight {
+        let b = camera.basis
+        let tanV = tan(25.0 * .pi / 180)
+        // As makeFrame's level-0 ring: its morph band starts 140 inside the handoff, less a cell for the floor's 4x4 grain.
+        let p = camera.position - SIMD3(Double(world.origin.x), 0, Double(world.origin.y)), half = Double(World.size / 2)
+        let edge = half - 8 - max(abs(p.x - half), abs(p.z - half)) - abs(Double(Renderer.lodShift))
+        return Sight(pos: camera.position, fwd: b.fwd, right: b.right, up: b.up, tanV: tanV, aspect: Double(aspect),
+                     pixelAngle: 2 * tanV / Double(max(sceneSize.height, 1)), sunY: clock.sunDirection.y,
+                     worldEdge: Clipmap.handoff(Clipmap.levels), floorReach: min(880, edge) - 140 - 6 - abs(Double(Renderer.lodShift)),
+                     floorAt: { [unowned world] x, z in world.solidFloor(x: x, z: z) })
+    }
+
+    // Scene and history sizes for an output size: the retro dither shows one flat colour per cell, so the temporal
+    // history only needs the cell grid, and the scene renders at (a fraction of) it.
+    private func sizes(_ outputSize: CGSize) -> (ow: Int, oh: Int, w: Int, h: Int) {
+        let cell = max(1.0, (outputSize.width / Renderer.ditherCells).rounded())
+        let ow = max(16, Int((outputSize.width / cell).rounded())), oh = max(16, Int((outputSize.height / cell).rounded()))
+        return (ow, oh, max(16, Int(Double(ow) * renderScale)), max(16, Int(Double(oh) * renderScale)))
+    }
+
+    // Sets the frustum the simulation sees before the first frame is encoded.
+    func prepare(outputSize: CGSize) {
+        let s = sizes(outputSize)
+        sceneSize = (s.w, s.h)
+        aspect = Float(s.w) / Float(s.h)
     }
 
     func makeFrame(size: CGSize) -> Frame {
@@ -830,11 +878,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
 
     func encode(into cb: MTLCommandBuffer, output: MTLTexture, outputSize: CGSize) {
-        // The retro dither shows one flat colour per cell, so the temporal history only needs the cell grid,
-        // and the scene renders at (a fraction of) it.
-        let cell = max(1.0, (outputSize.width / Renderer.ditherCells).rounded())
-        let ow = max(16, Int((outputSize.width / cell).rounded())), oh = max(16, Int((outputSize.height / cell).rounded()))
-        let w = max(16, Int(Double(ow) * renderScale)), h = max(16, Int(Double(oh) * renderScale))
+        let (ow, oh, w, h) = sizes(outputSize)
         if sceneTex?.width != w || sceneTex?.height != h || history.first?.width != ow || history.first?.height != oh {
             let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: w, height: h, mipmapped: false)
             td.usage = [.renderTarget, .shaderRead]
@@ -1048,6 +1092,7 @@ enum Snapshot {
         td.storageMode = .shared
         let tex = device.makeTexture(descriptor: td)!
         r.pinnedPhase = settings.phase
+        r.prepare(outputSize: CGSize(width: w, height: h))
         r.headroom = settings.headroom ?? 0
         let env = ProcessInfo.processInfo.environment
         // VR_SHOW=kind,distance,height,bearing[,rank]: hold the camera on the rank-th nearest site of a kind
@@ -1111,6 +1156,7 @@ enum Snapshot {
                          r.clock.sunDirection.y, r.exposure, r.camera.position.x, r.camera.position.y, r.camera.position.z, times.min()!,
                          Double(device.currentAllocatedSize) / 1048576, seen.count, seen.flocks, seen.nearest.isFinite ? seen.nearest : -1, Snapshot.sitesInView(r), out))
         }
+        if let log = r.popLog { print(log.summary(r.wildlife)) }
     }
 
     // Sites within 700 voxels whose centre falls inside the frame (not tested for occlusion).

@@ -426,6 +426,14 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
     dst.write(float4(float(hi), G, floating ? leaf : G, leaf), gid);
 }
 
+// Height a column is solid from the ground up: under an arch's gap, a canopy or a building's openings only the part
+// below them counts.
+static inline float solidFloor(float4 c) {
+    if (c.a > 0.0) return c.g;
+    // Structures too: a lintel, eave, deck, stilt house or hull is open in [g, b) whatever its base says.
+    return c.b > c.g ? c.g : c.r;
+}
+
 kernel void reduceMax(texture2d<float, access::read> src [[texture(0)]],
                       texture2d<float, access::write> dst [[texture(1)]],
                       uint2 gid [[thread_position_in_grid]]) {
@@ -433,6 +441,20 @@ kernel void reduceMax(texture2d<float, access::read> src [[texture(0)]],
     uint2 s = gid * 2;
     float m = max(max(src.read(s).r, src.read(s + uint2(1, 0)).r), max(src.read(s + uint2(0, 1)).r, src.read(s + uint2(1, 1)).r));
     dst.write(float4(m, 0, 0, 0), gid);
+}
+
+// The CPU readback's mips. r: the highest column below (the camera steers by it); g: the lowest solid floor below
+// (the birds' sightline test).
+kernel void reduceCpu(texture2d<float, access::read> src [[texture(0)]],
+                      texture2d<float, access::write> dst [[texture(1)]],
+                      constant int& fromColumns [[buffer(0)]],
+                      uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
+    uint2 s = gid * 2;
+    float4 a = src.read(s), b = src.read(s + uint2(1, 0)), c = src.read(s + uint2(0, 1)), d = src.read(s + uint2(1, 1));
+    float m = max(max(a.r, b.r), max(c.r, d.r));
+    float lo = fromColumns != 0 ? min(min(solidFloor(a), solidFloor(b)), min(solidFloor(c), solidFloor(d))) : min(min(a.g, b.g), min(c.g, d.g));
+    dst.write(float4(m, lo, 0, 0), gid);
 }
 
 // MARK: - Structures
@@ -2876,7 +2898,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     // Birds in front of land, water and sky. Their pixels carry negative depth, which tells the temporal resolve
     // that they move.
     if (nFlocks > 0) {
-        float tFront = water ? tw : (h.hit ? h.t : 6000.0);
+        // A trace out of steps has not shown the way clear: a bird past where it stopped could be behind a hill.
+        float tFront = !h.hit && h.iters >= primaryIters ? 0.0 : water ? tw : (h.hit ? h.t : 6000.0);
         BirdHit bh = traceBirds(birds, nFlocks, o, d, tFront, x.pixelAngle, 0.0);
         if (bh.t < tFront) {
             float3 bc = shadeBird(x, o + d * bh.t, bh);
@@ -2916,7 +2939,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             refl = rh.hit ? applyFog(x, shadeL(x, wp, r, rh, true), wp, r, rh.t)
                            : softCloudSky(x, wp, r);
             if (nFlocks > 0) {
-                float tB = rh.hit ? rh.t : 3000.0;
+                float tB = rh.hit ? rh.t : (rh.iters >= 260 ? 0.0 : 3000.0);
                 BirdHit bh = traceBirds(birds, nFlocks, wp, r, tB, x.pixelAngle, tw);
                 if (bh.t < tB) { refl = applyFog(x, shadeBird(x, wp + r * bh.t, bh), wp, r, bh.t); birdRefl = true; }
             }

@@ -18,6 +18,7 @@ final class Wildlife {
         var tint: Double
         var phase: Double
         var sheet = SIMD2<Double>.zero // starlings: place on the murmuration's sheet
+        var id = 0
     }
 
     struct Flight {
@@ -46,7 +47,7 @@ final class Wildlife {
                           flapFor: 1...2.6, glideFor: 1.5...4, glideAngle: 0.12, glideExt: 1, handDroop: -0.42, sweep: 0.45,
                           reach: 16, separation: 4.5, cohesion: 0.08, alignment: 0.35, pull: 0.03, wander: 2.0, clearance: 4)
         case .starling:
-            return Flight(speed: 12, minSpeed: 4, maxSpeed: 18, span: 0.7, flapHz: 8, amp: 0.8, bias: 0.05,
+            return Flight(speed: 12, minSpeed: 4, maxSpeed: 22, span: 0.7, flapHz: 8, amp: 0.8, bias: 0.05,
                           flapFor: 0.6...1.8, glideFor: 0.2...0.5, glideAngle: 0, glideExt: 0.9, handDroop: -0.05, sweep: 0.6,
                           reach: 4, separation: 0.9, cohesion: 0, alignment: 0.3, pull: 0, wander: 1.0, clearance: 8)
         case .bat: // never glides; jinks constantly
@@ -68,14 +69,22 @@ final class Wildlife {
         var heading: Double
         var speed: Double
         var altitude: Double
-        var presence = 0.0
         var age = 0.0
         let life: Double
         var leaving = false
-        var leftFor = 0.0 // seconds spent leaving while still in view
-        var fading = false
         var unseen = 0.0 // seconds since any bird was in frame
+        // Seconds until the flock, flying in from where nothing could see it, reaches the part of the frame it was
+        // aimed at; until then it holds its course and speed.
+        var transit = 0.0
+        var cruise = 0.0
+        var climb = 0.0 // while flying in
+        // Speed once arrived, for kinds that then hold to one spot.
+        var hold: Double?
+        // Murmuration: a slow drift along with the camera, so it stays in the frame while it gathers and wheels.
+        var drift = SIMD3<Double>.zero
         let seedPhase: Double
+        var serial = 0
+        var misses = 0 // murmuration: tries in a row to gather again ahead that found no place
 
         init(kind: Kind, slot: Int, anchor: SIMD3<Double>, heading: Double, speed: Double, altitude: Double, life: Double, seedPhase: Double) {
             self.kind = kind
@@ -89,8 +98,6 @@ final class Wildlife {
         }
 
         var dir: SIMD3<Double> { SIMD3(sin(heading), 0, cos(heading)) }
-        // Flocks fade by headcount, not size: a far bird is held at a cell's footprint, so shrinking it hides nothing.
-        var fadeTime: Double { kind == .starling ? 7 : 2.5 }
     }
 
     static let maxFlocks = 8
@@ -105,8 +112,19 @@ final class Wildlife {
     private var state: UInt64
     private var time = 0.0
     private var spawnTimer = 0.0
+    private var nextId = 1
+    private var spawnTurn = 0
     private var lastCam: SIMD3<Double>?
     private var camVel = SIMD3<Double>.zero
+    private var lastLook: (yaw: Double, pitch: Double)?
+    private var camYawRate = 0.0, camPitchRate = 0.0
+    // What the frame can show this step; set by step().
+    private var sight: Sight?
+    private var hiddenFrames: [(Sight, Double)] = []
+    // Spawn attempts that found no place out of sight, and those that did, by kind; for VR_POPLOG.
+    private(set) var spawnStats: [String: (tries: Int, made: Int, transit: Double)] = [:]
+    private(set) var failWhy: [String: Int] = [:]
+    private(set) var spawnMs = 0.0
     private let noiseSeed: UInt32
     var heightAt: (Double, Double) -> Double? = { _, _ in nil }
 
@@ -146,10 +164,11 @@ final class Wildlife {
 
     // Which flocks the hour calls for, one per slot. Gull slots fall back to songbirds away from water.
     private static func roster(sunY: Double, phase: Double) -> [Kind] {
-        if sunY < -0.16 { return [.bat] }
+        if sunY < -0.16 { return [.bat, .bat, .bat] }
         let dusk = phase > 0.25 && phase < 0.75
-        if sunY < 0.14 { return dusk ? [.starling, .songbird, .gull, .goose] : [.goose, .songbird, .gull, .songbird] }
-        return [.songbird, .raptor, .gull, .songbird]
+        // Flocks spend a while flying in out of sight, so the hour keeps more of them on the wing.
+        if sunY < 0.14 { return dusk ? [.starling, .songbird, .gull, .goose, .songbird, .songbird] : [.goose, .songbird, .gull, .songbird, .songbird, .goose] }
+        return [.songbird, .raptor, .gull, .songbird, .songbird, .gull, .songbird]
     }
 
     private func nearWater(_ p: SIMD2<Double>) -> SIMD2<Double>? {
@@ -165,51 +184,91 @@ final class Wildlife {
         return best
     }
 
-    func step(dt: Double, camera: FlightCamera, sunY: Double, phase: Double) {
+    func step(dt: Double, camera: FlightCamera, sight: Sight, sunY: Double, phase: Double) {
         time += dt
+        // The last frame drew the birds where they are now, from where the camera was then.
+        var sight = sight
+        sight.slack = 2
+        let shown = self.sight ?? sight
+        self.sight = sight
+        hiddenFrames = []
         let roster = Wildlife.roster(sunY: sunY, phase: phase)
         let cam = camera.position
         let fwd = camera.forward
-        let camYaw = atan2(fwd.x, fwd.z)
+        let camYaw = atan2(fwd.x, fwd.z), camPitch = asin(max(-1, min(1, fwd.y)))
         if let l = lastCam, dt > 0 { camVel += ((cam - l) / dt - camVel) * min(1, dt) }
         lastCam = cam
+        if let l = lastLook, dt > 0 {
+            camYawRate += (atan2(sin(camYaw - l.yaw), cos(camYaw - l.yaw)) / dt - camYawRate) * min(1, dt * 2)
+            camPitchRate += ((camPitch - l.pitch) / dt - camPitchRate) * min(1, dt * 2)
+        }
+        lastLook = (camYaw, camPitch)
 
-        // Retire flocks the hour no longer calls for, and those far away or long gone behind. Visibility is judged
-        // by the birds, not the anchor: a spread flock or a trailing skein reaches well past it. A flock is only
-        // dropped out of view; one that lingers in view while leaving fades out by headcount first.
+        // Retire flocks the hour no longer calls for, and those long gone from the frame, far off or fallen behind.
+        // A leaving flock turns out of the frame and is dropped only once no frame could show any of its birds.
         flocks.removeAll { f in
+            if f.birds.isEmpty { return true }
             let want = f.slot < roster.count ? roster[f.slot] : nil
             if want == nil || !(want == f.kind || (want == .gull && f.kind == .songbird)) { f.leaving = true }
             if f.age > f.life { f.leaving = true }
-            let seen = visible(f, camera: camera).count > 0
-            f.unseen = seen ? 0 : f.unseen + dt
+            let framed = f.birds.contains { sight.inFrame($0.pos, size: $0.size) }
+            f.unseen = framed ? 0 : f.unseen + dt
             let v = f.anchor - cam
             let dist = simd_length(SIMD2(v.x, v.z))
             let ahead = simd_dot(simd_normalize(SIMD2(v.x, v.z) + 1e-6), simd_normalize(SIMD2(fwd.x, fwd.z) + 1e-6))
-            if dist > 750 || f.birds.isEmpty || (f.fading && f.presence <= 0) { return true }
-            // Out by the map's edge a flock still in view fades before the hard limit above.
-            if dist > 600 && seen { f.fading = true }
-            // Crossed the frame and gone, or fallen behind: make room for the next.
-            if (f.unseen > 5 && f.age > 12) || (ahead < -0.2 && dist > 120) { f.leaving = true }
+            let lost = dist > 750 || (f.transit <= 0 && ((f.unseen > 5 && f.age > 12) || (ahead < -0.2 && dist > 120)))
+            // A murmuration the camera has turned or flown away from gathers again ahead, its birds streaming back
+            // in from wherever they are out of sight; only if no place ahead will do does it leave.
+            if f.kind == .starling, !f.leaving, f.unseen > 4, lost || !sight.inFrame(f.anchor, size: 60), floor(f.unseen) != floor(f.unseen - dt) {
+                // Still on show, mirrored in water: not lost yet.
+                if f.birds.contains(where: { sight.sees($0.pos, size: $0.size) }) {
+                    f.misses = 0
+                } else if regather(f, cam: cam, camYaw: camYaw, pitch: camPitch) {
+                    f.misses = 0
+                    return false
+                } else {
+                    f.misses += 1
+                }
+            }
+            if lost && (f.kind != .starling || f.misses >= 8 || f.unseen > 60) { f.leaving = true }
             guard f.leaving else { return false }
-            if !seen { return true }
-            f.leftFor += dt
-            // Staggered per flock, so flocks the hour retires together do not all dissolve at once.
-            if f.leftFor > 15 + 20 * f.seedPhase.truncatingRemainder(dividingBy: 1) { f.fading = true }
-            return false
+            return !f.birds.contains { shown.sees($0.pos, size: $0.size, margin: 0.03) || sight.sees($0.pos, size: $0.size, margin: 0.03) }
         }
         spawnTimer -= dt
         if spawnTimer <= 0 {
+            // No place out of sight that would bring the flock into the frame: look again in a second.
+            spawnTimer = 1.0
+            // Empty slots take turns, so one kind with no way in does not hold up the others.
             let used = Set(flocks.filter { !$0.leaving }.map(\.slot))
-            if let slot = roster.indices.first(where: { !used.contains($0) }), flocks.count < Wildlife.maxFlocks {
-                spawn(kind: roster[slot], slot: slot, cam: cam, camYaw: camYaw, pitch: asin(fwd.y))
-                spawnTimer = 1.5
+            let empty = roster.indices.filter { !used.contains($0) }
+            if !empty.isEmpty, flocks.count >= Wildlife.maxFlocks { failWhy["full", default: 0] += 1 }
+            if !empty.isEmpty, flocks.count < Wildlife.maxFlocks {
+                let slot = empty[spawnTurn % empty.count]
+                spawnTurn += 1
+                spawnStats["\(roster[slot])", default: (0, 0, 0)].tries += 1
+                let t0 = PopLog.enabled ? ProcessInfo.processInfo.systemUptime : 0
+                let made = spawn(kind: roster[slot], slot: slot, cam: cam, camYaw: camYaw, pitch: camPitch)
+                if PopLog.enabled { spawnMs = max(spawnMs, (ProcessInfo.processInfo.systemUptime - t0) * 1000) }
+                if made {
+                    spawnTimer = 1.5
+                    spawnStats["\(roster[slot])", default: (0, 0, 0)].made += 1
+                    spawnStats["\(roster[slot])", default: (0, 0, 0)].transit += max(0, flocks.last!.transit)
+                }
             }
         }
         for f in flocks { advance(f, dt: dt, cam: cam) }
+        if Wildlife.trace, floor(time) != floor(time - dt) {
+            let desc = flocks.map { f -> String in
+                let framed = f.birds.filter { sight.inFrame($0.pos, size: $0.size) }.count
+                let d = simd_length(f.anchor - cam)
+                return String(format: "%@%@ n=%d framed=%d d=%.0f tr=%.0f", "\(f.kind)", f.leaving ? "(L)" : "", f.birds.count, framed, d, max(0, f.transit))
+            }
+            print(String(format: "TRACE t=%.0f sunY=%.2f ", time, sunY) + desc.joined(separator: " | "))
+        }
     }
+    static let trace = ProcessInfo.processInfo.environment["VR_BIRDTRACE"] != nil
 
-    // Birds inside a generous view frustum (a 16:10 frame and then some; terrain occlusion ignored) and the nearest.
+    // Birds inside a generous view frustum (terrain occlusion ignored) and the nearest; for the snapshot report.
     private func visible(_ f: Flock, camera: FlightCamera, aspect: Double = 1.8, tanHalf: Double = 0.52) -> (count: Int, nearest: Double) {
         let b = camera.basis
         var n = 0, near = Double.infinity
@@ -225,117 +284,292 @@ final class Wildlife {
         return (n, near)
     }
 
-    private func spawn(kind wanted: Kind, slot: Int, cam: SIMD3<Double>, camYaw: Double, pitch: Double) {
-        var kind = wanted
+    // The frame `tau` seconds on, if the camera holds its velocity, its roll and its turn and pitch rates (those for at
+    // most `turnFor` seconds: the shot director's turns ease out within a few).
+    private func predicted(_ s: Sight, tau: Double, turnFor: Double = 3) -> Sight {
+        var p = s
+        let t = min(tau, turnFor)
+        let yawQ = simd_quatd(angle: camYawRate * t, axis: SIMD3(0, 1, 0))
+        let right = yawQ.act(s.right)
+        let q = simd_quatd(angle: -camPitchRate * t, axis: right) * yawQ
+        p.fwd = q.act(s.fwd)
+        p.right = q.act(s.right)
+        p.up = q.act(s.up)
+        p.pos = s.pos + camVel * tau
+        return p
+    }
+
+    // No frame from now to two seconds on could show any of these points. The camera's turn (at most 0.09 rad/s),
+    // pitch and climb are carried forward; the margin grows for their rates changing (yaw by at most 0.011 rad/s^2,
+    // pitch as its target moves) and roll easing (at most 0.11 rad/s).
+    private func hidden(_ pts: [SIMD3<Double>], size: Double) -> Bool {
+        guard let s = sight else { return true }
+        if hiddenFrames.isEmpty { hiddenFrames = [0.0, 1.0, 2.0].map { (predicted(s, tau: $0), 0.04 + 0.03 * $0) } }
+        let frames = hiddenFrames
+        for (f, m) in frames {
+            for p in pts where f.sees(p, size: size, margin: m) { return false }
+        }
+        return true
+    }
+
+    // Height for a flock at `p` seen from `c`: `elev` up from the camera, clear of the ground, and above the sightline
+    // so the hills between do not hide it.
+    private func flightLevel(_ kind: Kind, at p: SIMD2<Double>, from c: SIMD3<Double>, elev: Double) -> Double {
+        let fl = Wildlife.flight(kind)
+        let c2 = SIMD2(c.x, c.z)
+        let r = simd_length(p - c2)
+        let minAlt = ground(p.x, p.y) + (kind == .gull ? 4 : 1) * fl.clearance + (kind == .raptor ? 25 : 0) + (kind == .starling ? 25 : 0)
+        var alt = max(c.y + r * tan(elev), minAlt)
+        for k in 1...10 {
+            let sfrac = 0.1 + 0.09 * Double(k)
+            let q = c2 + (p - c2) * sfrac
+            alt = max(alt, c.y + (ground(q.x, q.y) + 4 - c.y) / sfrac)
+        }
+        return alt
+    }
+
+    private func elevation(_ kind: Kind, pitch: Double) -> Double {
+        // Inside the frame's vertical field (half-field 0.436 rad), mostly above the horizon so birds read against sky.
+        switch kind {
+        case .starling: return max(pitch, -0.05) + rand(0.08...0.22)
+        case .bat: return max(pitch, -0.1) + rand(0.12...0.3)
+        case .raptor: return pitch + rand(0.0...0.35)
+        default: return pitch + rand(-0.15...0.32)
+        }
+    }
+
+    // Where advance() would put a bird at p: never closer to the ground than it allows.
+    private func aboveGround(_ p: SIMD3<Double>) -> SIMD3<Double> {
+        SIMD3(p.x, max(p.y, ground(p.x, p.z) + 2), p.z)
+    }
+
+    // Room left in the bird buffer, so the renderer's caps never drop a bird that is drawn.
+    private var room: Int {
+        let birds = flocks.reduce(0) { $0 + $1.birds.count }
+        let clusters = flocks.reduce(0) { $0 + ($1.birds.count + Wildlife.clusterSize - 1) / Wildlife.clusterSize }
+        return max(0, min(Wildlife.maxBirds - birds, (Wildlife.maxClusters - clusters) * Wildlife.clusterSize))
+    }
+
+    // A flock comes into being only where no frame could show it: just beyond an edge of the frame, or in the frame
+    // but behind a hill. Of the paths from there it takes one that brings it into the frame soon, judged against where
+    // the camera will be, and keeps it there a while: against a camera faster than the birds that is mostly a flock
+    // flying along with it, drifting in across a side, gliding down past the top edge or rising over a ridge. Where
+    // no such path exists, the flock waits.
+    private func spawn(kind wanted: Kind, slot: Int, cam: SIMD3<Double>, camYaw: Double, pitch: Double) -> Bool {
+        if wanted == .starling { return spawnMurmuration(slot: slot, cam: cam, camYaw: camYaw, pitch: pitch) }
+        guard let s = sight else { return false }
         let roll = rand()
-        // Distance band and bearing: crossing flocks are placed so that, moving relative to the camera, they enter
-        // past a side edge of the frame (half-field ~0.62 rad) and cross its middle at distance r; distant ones may
-        // start in frame and fade in.
-        var r = 0.0, bearing = 0.0, crossing = false
-        var p = SIMD2<Double>.zero, alt = 0.0
-        var fl = Wildlife.flight(kind)
         let pace = rand(0.85...1.05)
-        var heading = 0.0
-        let c2 = SIMD2(cam.x, cam.z), cv = SIMD2(camVel.x, camVel.z)
-        // A few tries for a spot the camera can see: hills between would hide the flock.
-        for attempt in 0..<4 {
-            kind = wanted
+        let life = rand(70...150), seedPhase = rand(0...1000)
+        let count: Int
+        switch wanted {
+        case .songbird: count = Int(rand(5...22))
+        case .raptor: count = Int(rand(1...3.99))
+        case .gull: count = Int(rand(3...11))
+        case .starling: count = 0
+        case .bat: count = Int(rand(3...7))
+        case .goose: count = Int(rand(7...15)) | 1
+        }
+        let unit = (0..<count).map { _ in SIMD3(rand(-1...1), rand(-0.4...0.4), rand(-1...1)) }
+        let hold = rand(0.8...2.0)
+        let n = min(unit.count, room)
+        guard n > 0 else { return false }
+        let tanX = s.tanV * s.aspect
+        // The frames to come, every half second for 30 s.
+        let ahead = (1...60).map { predicted(s, tau: Double($0) * 0.5, turnFor: 6) }
+        for _ in 0..<12 {
+            var kind = wanted
+            let r: Double
             switch kind {
-            case .starling: r = rand(240...420); bearing = rand(-0.35...0.35); crossing = false
-            case .raptor: r = rand(110...320); bearing = rand(-0.5...0.5); crossing = false
-            case .bat: r = rand(25...60); bearing = rand(-0.4...0.4); crossing = false
-            default:
-                if roll < 0.3 { r = rand(45...90) } else if roll < 0.75 { r = rand(80...220) } else { r = rand(220...420) }
-                crossing = r < 300
-                bearing = crossing ? (rand() < 0.5 ? -1 : 1) * rand(0.0...0.25) : rand(-0.5...0.5)
+            case .raptor: r = rand(110...320)
+            case .bat: r = rand(40...140)
+            default: r = roll < 0.3 ? rand(45...90) : (roll < 0.75 ? rand(80...220) : rand(220...420))
             }
-            let a = camYaw + bearing
-            p = c2 + SIMD2(sin(a), cos(a)) * r
-            if crossing {
-                // Back along the flock's path relative to the camera from the crossing point, until past the edge.
-                // A camera much faster than the flock may leave no side entry; it then starts ahead and fades in.
-                let side: Double = bearing < 0 ? -1 : 1
-                heading = camYaw - side * .pi / 2 + rand(-0.6...0.6)
-                let w = SIMD2(sin(heading), cos(heading)) * Wildlife.flight(kind).speed * pace - cv
-                let mid = p
-                for k in 1...20 {
-                    p = mid - w * (0.5 * Double(k))
-                    let q = p - c2
-                    let off = atan2(sin(atan2(q.x, q.y) - camYaw), cos(atan2(q.x, q.y) - camYaw))
-                    if abs(off) > 0.72 { break }
+            let edge = rand(), along = rand(-0.9...0.9), low = rand(-0.9...0.1), base = rand(0...(2 * .pi)), pick = rand()
+            var fl = Wildlife.flight(kind)
+            // Flying in they go near their top speed, so some can keep pace with the camera; then raptors circle, bats
+            // jink about where they arrived, and the rest settle to their own pace and the camera overtakes them.
+            let cruise = fl.maxSpeed * (0.92 + 0.08 * pace)
+            let spread: Double = kind == .raptor ? 25 : 6 + Double(n) * 0.4
+            let size = fl.span * 1.12
+            // The start: out past a side or the top of the frame, or (one in five) low inside it, hoping for a hill
+            // in between. Angles are as tangents in the frame: x/z and y/z.
+            let out = 0.11 + (spread + 0.62 * size) / r + 1.5 * s.pixelAngle
+            let behindHill = edge >= 0.8
+            var ax = atan(along * tanX), ay = atan(along * 0.8 * s.tanV)
+            if edge < 0.3 { ax = -atan(tanX) - out } else if edge < 0.6 { ax = atan(tanX) + out } else if edge < 0.8 {
+                ay = atan(s.tanV) + out
+            } else { ay = atan(low * s.tanV) }
+            let d = simd_normalize(s.fwd + s.right * tan(ax) + s.up * tan(ay))
+            var start = s.pos + d * r
+            let floorY = ground(start.x, start.z) + fl.clearance * 1.5
+            if behindHill { start.y = floorY } else if start.y < floorY { failWhy["ground\(edge < 0.6 ? "S" : "T")", default: 0] += 1; continue }
+            if start.y > 190 { failWhy["high", default: 0] += 1; continue }
+            // Paths: twelve headings, level, gliding down or climbing; scored by how soon the anchor is in the frame
+            // and how long it stays.
+            var best: [(score: Double, v: SIMD3<Double>, enter: Double, leave: Double)] = []
+            for h in 0..<12 {
+                let heading = base + Double(h) * .pi / 6
+                for climb in kind == .goose ? [0.0] : [0.0, -0.35, 0.2] {
+                    let vy = climb * cruise, vh = sqrt(cruise * cruise - vy * vy)
+                    let v = SIMD3(sin(heading) * vh, vy, cos(heading) * vh)
+                    var enter = -1.0, leave = 30.0
+                    // Behind a hill the test marches the sightline, so it looks once a second.
+                    for i in stride(from: behindHill ? 1 : 0, to: 60, by: behindHill ? 2 : 1) {
+                        let k = Double(i + 1) * 0.5
+                        let p = start + v * k
+                        if p.y < ground(p.x, p.z) + 2 || p.y > 205 { if enter < 0 { enter = 99 }; leave = min(leave, k); break }
+                        let f = ahead[i]
+                        let seen = behindHill ? f.shows(p, size: size) : f.inFrame(p, size: size)
+                        if enter < 0 { if seen { enter = k } } else if !seen { leave = k; break }
+                    }
+                    guard enter >= 0, enter <= 20, leave - enter >= 4 else { continue }
+                    best.append((min(leave - enter, 20) - 0.7 * enter, v, enter, leave))
                 }
             }
+            guard let top = best.map(\.score).max() else { failWhy[behindHill ? "nopathH" : "nopath", default: 0] += 1; continue }
+            // Among the good ones, any: so flocks do not all come the one best way.
+            let good = best.filter { $0.score >= top - 3 }
+            let o = good[min(good.count - 1, Int(pick * Double(good.count)))]
+            let heading = atan2(o.v.x, o.v.z)
             if kind == .gull {
-                if let w = nearWater(p) { p = w; crossing = false } else { kind = .songbird }
+                let m = start + o.v * (o.enter + o.leave) / 2
+                if nearWater(SIMD2(m.x, m.z)) == nil { kind = .songbird; fl = Wildlife.flight(kind) }
             }
-            fl = Wildlife.flight(kind)
-            let g = ground(p.x, p.y)
-            // Elevation inside the frame's vertical field (half-field 0.436 rad), mostly above the horizon line so
-            // birds read against sky.
-            let elev: Double
-            switch kind {
-            case .starling: elev = max(pitch, -0.05) + rand(0.08...0.22)
-            case .bat: elev = max(pitch, -0.1) + rand(0.12...0.3)
-            case .raptor: elev = pitch + rand(0.0...0.35)
-            default: elev = pitch + rand(-0.15...0.32)
+            let offs = (0..<n).map { kind == .goose ? slotOffset($0, heading: heading, span: fl.span) : unit[$0] * spread }
+            let pts = offs.map { aboveGround(start + $0) }
+            guard hidden(pts, size: size) else { failWhy[behindHill ? "seenH" : "seen", default: 0] += 1; continue }
+            let f = Flock(kind: kind, slot: slot, anchor: start, heading: heading, speed: cruise, altitude: start.y, life: life, seedPhase: seedPhase)
+            f.serial = nextId
+            f.cruise = cruise
+            f.hold = kind == .raptor ? hold : (kind == .bat ? 2.5 : fl.speed * pace)
+            f.transit = (o.enter + o.leave) / 2
+            f.climb = o.v.y
+            if Wildlife.trace {
+                print(String(format: "SPAWN t=%.1f %@ %@ r=%.0f in frame %.1f-%.1f s", time, "\(kind)", behindHill ? "behind a hill" : "off frame", r, o.enter, o.leave))
             }
-            let minAlt = g + (kind == .gull ? 4 : 1) * fl.clearance + (kind == .raptor ? 25 : 0) + (kind == .starling ? 25 : 0)
-            alt = max(cam.y + r * tan(elev), minAlt)
-            // Raise it over the sightline: every point on the line from the camera clears the ground.
-            for k in 1...10 {
-                let sfrac = 0.1 + 0.09 * Double(k)
-                let q = c2 + (p - c2) * sfrac
-                alt = max(alt, cam.y + (ground(q.x, q.y) + 4 - cam.y) / sfrac)
+            for i in 0..<n {
+                let v = o.v + SIMD3(rand(-1...1), rand(-0.3...0.3), rand(-1...1))
+                var b = Bird(pos: pts[i], vel: v, size: fl.span * rand(0.88...1.12), tint: rand(0...1), phase: rand(0...1))
+                b.flap = rand(0...(2 * .pi))
+                b.beat = rand() < 0.5 ? rand(fl.flapFor) : -rand(fl.glideFor)
+                b.id = nextId
+                nextId += 1
+                f.birds.append(b)
             }
-            if alt <= 190 || attempt == 3 { break }
+            flocks.append(f)
+            return true
         }
-        alt = min(alt, 200)
-        if !crossing { heading = rand(0...(2 * .pi)) }
-        let speed: Double
-        switch kind {
-        case .starling: speed = 1.5
-        case .raptor: speed = rand(0.8...2.0)
-        case .bat: speed = 2.5
-        default: speed = fl.speed * pace
-        }
-        let n: Int
-        switch kind {
-        case .songbird: n = Int(rand(5...22))
-        case .raptor: n = Int(rand(1...3.99))
-        case .gull: n = Int(rand(3...11))
-        case .starling: n = Int(rand(320...420))
-        case .bat: n = Int(rand(3...7))
-        case .goose: n = Int(rand(7...15)) | 1
-        }
-        let f = Flock(kind: kind, slot: slot, anchor: SIMD3(p.x, alt, p.y), heading: heading, speed: speed, altitude: alt,
-                      life: rand(70...150), seedPhase: rand(0...1000))
-        let spread: Double = kind == .starling ? 18 : (kind == .raptor ? 25 : 6 + Double(n) * 0.4)
-        let budget = Wildlife.maxBirds - flocks.reduce(0) { $0 + $1.birds.count }
-        for i in 0..<min(n, budget) {
-            var off = SIMD3(rand(-1...1), rand(-0.4...0.4), rand(-1...1)) * spread
-            if kind == .goose { off = slotOffset(i, heading: heading, span: fl.span) }
-            let v = SIMD3(sin(heading), 0, cos(heading)) * fl.speed + SIMD3(rand(-1...1), rand(-0.3...0.3), rand(-1...1))
-            var b = Bird(pos: f.anchor + off, vel: v, size: fl.span * rand(0.88...1.12), tint: rand(0...1), phase: rand(0...1))
-            if kind == .starling {
-                // Denser toward the sheet's middle.
-                let ang = rand(0...(2 * .pi)), rad = pow(rand(), 0.7)
-                b.sheet = SIMD2(cos(ang), sin(ang)) * rad
-                b.pos = sheetPoint(f, b.sheet, b.phase)
+        return false
+    }
+
+    // A murmuration gathers: its place is in the frame ahead, but its birds start out of sight in a few long streams
+    // beside and behind the frame and fly in to their places on the sheet.
+    private func spawnMurmuration(slot: Int, cam: SIMD3<Double>, camYaw: Double, pitch: Double) -> Bool {
+        guard let s = sight else { return false }
+        let n = min(Int(rand(320...420)), room)
+        let life = rand(70...150), seedPhase = rand(0...1000)
+        guard n >= 200 else { return false }
+        let c2 = SIMD2(cam.x, cam.z)
+        for _ in 0..<6 {
+            let r = rand(240...400), bearing = rand(-0.3...0.3)
+            let a = camYaw + bearing
+            let p = c2 + SIMD2(sin(a), cos(a)) * r
+            let alt = flightLevel(.starling, at: p, from: cam, elev: elevation(.starling, pitch: pitch))
+            let anchor = SIMD3(p.x, alt, p.y)
+            let streams = Int(rand(3...5.99))
+            let tilts = (0..<streams).map { _ in (rand(-0.8...0.1), rand(-0.05...0.25), rand(40...100)) }
+            let firstSide: Double = rand() < 0.5 ? -1 : 1
+            guard alt <= 190, s.direct(anchor, size: 40),
+                  predicted(s, tau: 10, turnFor: 6).direct(anchor, size: 40) else { continue }
+            let f = makeMurmuration(slot: slot, anchor: anchor, n: n, life: life, seedPhase: seedPhase)
+            let right = SIMD3(cos(camYaw), 0, -sin(camYaw)), ahead = SIMD3(sin(camYaw), 0, cos(camYaw))
+            var staged = true
+            for j in 0..<streams where staged {
+                let (tilt, rise, length) = tilts[j]
+                let side = j % 2 == 0 ? firstSide : -firstSide
+                let u = simd_normalize(right * side * cos(tilt) + ahead * sin(tilt) + SIMD3(0, rise, 0))
+                // The stream's head starts just out of sight, its tail further out along the same line.
+                guard let d0 = stride(from: 20.0, through: 1200, by: 10).first(where: { hidden([anchor + u * $0], size: 40) }) else {
+                    staged = false
+                    break
+                }
+                let lo = j * n / streams, hi = (j + 1) * n / streams
+                for i in lo..<hi {
+                    let q = Double(i - lo) / Double(max(hi - lo, 1))
+                    var d = d0 + 15 + q * length
+                    let jitter = SIMD3(rand(-10...10), rand(-5...5), rand(-10...10))
+                    var tries = 0
+                    while !hidden([aboveGround(anchor + u * d + jitter)], size: f.birds[i].size) && tries < 20 { d += 10; tries += 1 }
+                    if tries == 20 { staged = false; break }
+                    f.birds[i].pos = aboveGround(anchor + u * d + jitter)
+                    f.birds[i].vel = -u * 14 + SIMD3(rand(-1...1), rand(-0.5...0.5), rand(-1...1))
+                }
             }
+            guard staged else { continue }
+            f.transit = gatherTime(f)
+            if Wildlife.trace { print(String(format: "MURMUR t=%.1f r=%.0f streams=%d n=%d gathered in %.0f s", time, r, streams, n, f.transit)) }
+            flocks.append(f)
+            return true
+        }
+        return false
+    }
+
+    // Moves an unseen murmuration's place into the frame ahead; its birds fly there from where they are.
+    private func regather(_ f: Flock, cam: SIMD3<Double>, camYaw: Double, pitch: Double) -> Bool {
+        guard let s = sight else { return false }
+        let c2 = SIMD2(cam.x, cam.z)
+        for _ in 0..<8 {
+            let r = rand(220...400), a = camYaw + rand(-0.3...0.3)
+            let p = c2 + SIMD2(sin(a), cos(a)) * r
+            let alt = flightLevel(.starling, at: p, from: cam, elev: elevation(.starling, pitch: pitch))
+            let anchor = SIMD3(p.x, alt, p.y)
+            guard alt <= 190, s.direct(anchor, size: 40), predicted(s, tau: 10, turnFor: 6).direct(anchor, size: 40) else { continue }
+            f.anchor = anchor
+            f.altitude = alt
+            f.drift = SIMD3(camVel.x, 0, camVel.z) * 0.8
+            f.unseen = 0
+            f.transit = gatherTime(f)
+            if Wildlife.trace { print(String(format: "REGATHER t=%.1f r=%.0f in %.0f s", time, r, f.transit)) }
+            return true
+        }
+        return false
+    }
+
+    // Roughly how long the furthest bird takes to reach its place on the sheet.
+    private func gatherTime(_ f: Flock) -> Double {
+        let far = f.birds.reduce(0.0) { max($0, simd_length(sheetPoint(f, $1.sheet, $1.phase) - $1.pos)) }
+        return far / 15 + 3
+    }
+
+    // A murmuration flock with its birds in their places on the sheet.
+    private func makeMurmuration(slot: Int, anchor: SIMD3<Double>, n: Int, life: Double, seedPhase: Double) -> Flock {
+        let fl = Wildlife.flight(.starling)
+        let f = Flock(kind: .starling, slot: slot, anchor: anchor, heading: rand(0...(2 * .pi)), speed: 1.5, altitude: anchor.y,
+                      life: life, seedPhase: seedPhase)
+        f.serial = nextId
+        f.cruise = 8
+        f.hold = 1.5
+        for _ in 0..<n {
+            var b = Bird(pos: anchor, vel: f.dir * fl.speed, size: fl.span * rand(0.88...1.12), tint: rand(0...1), phase: rand(0...1))
+            // Denser toward the sheet's middle.
+            let ang = rand(0...(2 * .pi)), rad = pow(rand(), 0.7)
+            b.sheet = SIMD2(cos(ang), sin(ang)) * rad
+            b.pos = sheetPoint(f, b.sheet, b.phase)
             b.flap = rand(0...(2 * .pi))
             b.beat = rand() < 0.5 ? rand(fl.flapFor) : -rand(fl.glideFor)
+            b.id = nextId
+            nextId += 1
             f.birds.append(b)
         }
-        if kind == .starling {
-            // Neighbours on the sheet stay neighbours in the air: order by strips of the sheet so each cluster of
-            // consecutive birds is a compact patch.
-            let strips = Double(max(1, f.birds.count / (Wildlife.clusterSize * 4)))
-            f.birds.sort { a, b in
-                let sa = floor((a.sheet.x + 1) / 2 * strips), sb = floor((b.sheet.x + 1) / 2 * strips)
-                return sa != sb ? sa < sb : a.sheet.y < b.sheet.y
-            }
+        // Neighbours on the sheet stay neighbours in the air: order by strips of the sheet so each cluster of
+        // consecutive birds is a compact patch.
+        let strips = Double(max(1, f.birds.count / (Wildlife.clusterSize * 4)))
+        f.birds.sort { a, b in
+            let sa = floor((a.sheet.x + 1) / 2 * strips), sb = floor((b.sheet.x + 1) / 2 * strips)
+            return sa != sb ? sa < sb : a.sheet.y < b.sheet.y
         }
-        flocks.append(f)
+        return f
     }
 
     // Murmuration: birds hold places on a thin sheet that turns, tilts, stretches and ripples. Edge-on it reads as a
@@ -351,7 +585,7 @@ final class Wildlife {
         let yaw = t * 0.16 + 0.8 * sin(t * 0.05)
         q = SIMD3(q.x, q.y * cos(tilt) - q.z * sin(tilt), q.y * sin(tilt) + q.z * cos(tilt))
         q = SIMD3(q.x * cos(yaw) + q.z * sin(yaw), q.y, -q.x * sin(yaw) + q.z * cos(yaw))
-        return f.anchor + q + f.dir * f.speed * dt
+        return f.anchor + q + (f.dir * f.speed + f.drift) * dt
     }
 
     // Goose skein: the leader at the point, the rest alternately down either arm of the V.
@@ -365,12 +599,19 @@ final class Wildlife {
     private func advance(_ f: Flock, dt: Double, cam: SIMD3<Double>) {
         let fl = Wildlife.flight(f.kind)
         f.age += dt
-        f.presence = max(0, min(1, f.presence + (f.fading ? -dt : dt) / f.fadeTime))
+        f.transit -= dt
+        let arrived = f.transit <= 0
+        f.speed += (((arrived || f.kind == .starling) && !f.leaving ? f.hold ?? f.cruise : f.cruise) - f.speed) * min(1, dt * 0.3)
 
         // Anchor: a heading that drifts on the noise flow field, bends down valleys (toward the lower side ahead),
-        // and for gulls toward water. Leaving flocks just hold course.
+        // and for gulls toward water. Flocks flying in hold course; leaving flocks in frame turn for its nearer side.
         let ap = SIMD2(f.anchor.x, f.anchor.z)
-        if !f.leaving && f.kind != .goose {
+        if f.leaving, f.unseen == 0, let s = sight {
+            let side: Double = simd_dot(f.anchor - s.pos, s.right) >= 0 ? 1 : -1
+            let out = atan2(s.fwd.x, s.fwd.z) + side * .pi / 2
+            f.heading += max(-0.3 * dt, min(0.3 * dt, atan2(sin(out - f.heading), cos(out - f.heading))))
+        }
+        if !f.leaving && arrived && f.kind != .goose {
             var turn = 0.35 * noise(ap.x / 400 + f.seedPhase, time * 0.02, noiseSeed)
             let fd = SIMD2(sin(f.heading), cos(f.heading)), side = SIMD2(fd.y, -fd.x)
             let look = ap + fd * 60
@@ -383,11 +624,14 @@ final class Wildlife {
             }
             f.heading += turn * dt
         }
-        if f.kind == .starling || f.kind == .bat {
-            // These hold to one spot: the anchor circles slowly about where it was spawned.
+        if (f.kind == .starling || (f.kind == .bat && arrived)) && !f.leaving {
+            // These hold to one spot: the anchor circles slowly about where it arrived.
             f.heading += 0.12 * dt
         }
         if f.kind == .starling {
+            let pace = f.leaving ? SIMD3<Double>.zero : SIMD3(camVel.x, 0, camVel.z) * 0.8
+            f.drift += (pace - f.drift) * min(1, dt * 0.2)
+            f.anchor += f.drift * dt
             // The murmuration drifts clear of the camera's path: flown through, it is hundreds of boxes filling the
             // frame (and the GPU's worst case).
             let d = SIMD2(f.anchor.x - cam.x, f.anchor.z - cam.z), l = simd_length(d)
@@ -401,7 +645,8 @@ final class Wildlife {
                 f.anchor.z += push.y
             }
         }
-        let vA = f.dir * f.speed
+        if !arrived && f.kind != .starling { f.altitude += f.climb * dt }
+        let vA = f.dir * f.speed + SIMD3(0, arrived || f.kind == .starling ? 0 : f.climb, 0)
         f.anchor += vA * dt
         var gAhead = ground(f.anchor.x, f.anchor.z)
         for d in [20.0, 45.0, 80.0] {
@@ -440,7 +685,7 @@ final class Wildlife {
             }
             let toA = f.anchor - b.pos
             switch f.kind {
-            case .raptor:
+            case .raptor where arrived && !f.leaving:
                 // Thermal soaring: each bird circles its own ring about the anchor, rising and sinking slowly.
                 let th = time * (0.22 + 0.05 * b.phase) + b.phase * 2 * .pi
                 let ring = 16 + 18 * b.phase
@@ -454,12 +699,22 @@ final class Wildlife {
                 let target = sheetPoint(f, b.sheet, b.phase)
                 let ahead = sheetPoint(f, b.sheet, b.phase, dt: 0.1)
                 let sheetVel: SIMD3<Double> = (ahead - target) / 0.1
-                acc += (target - b.pos) * 1.6
-                acc += (sheetVel - b.vel) * 1.2
+                let gap = target - b.pos, gl = simd_length(gap)
+                if gl > 20 {
+                    // Still streaming in: a steady cruise toward its place, on top of the sheet's own drift, within
+                    // the top speed so the drift does not eat the approach.
+                    let closing = min(gl * 0.5, (max(16, fl.maxSpeed * fl.maxSpeed * 0.92 - simd_length_squared(sheetVel))).squareRoot())
+                    acc += (sheetVel + gap / gl * closing - b.vel) * 1.5
+                } else {
+                    acc += gap * 1.6
+                    acc += (sheetVel - b.vel) * 1.2
+                }
                 let dh = b.pos - hawk, dl = simd_length(dh)
                 if dl < 12 { acc += dh / max(dl, 0.5) * 40 * (1 - dl / 12) }
             default:
-                acc += toA * fl.pull + (vA - b.vel) * 0.15
+                // Bats flying in hold their line; once arrived they jink about the spot.
+                let commute = f.kind == .bat && !arrived
+                acc += toA * (commute ? 0.4 : fl.pull) + (vA - b.vel) * (commute ? 1.2 : 0.15)
             }
             if f.leaving { acc += f.dir * 1.5 }
             // Birds shy from the camera: within a few units they read as boxes, not birds.
@@ -477,10 +732,10 @@ final class Wildlife {
             let wx: Double = sin(wt * 1.13 + ph) + 0.5 * sin(wt * 2.71 + ph * 1.7)
             let wy: Double = 0.35 * sin(wt * 0.87 + ph * 2.3)
             let wz: Double = sin(wt * 0.97 + ph * 3.1) + 0.5 * sin(wt * 2.29 + ph * 0.7)
-            acc += SIMD3(wx, wy, wz) * fl.wander
+            acc += SIMD3(wx, wy, wz) * fl.wander * (f.kind == .bat && !arrived ? 0.3 : 1)
             // Terrain: climb away from ground ahead, and keep well under the cloud base.
-            let look = b.pos + b.vel * 1.2
-            let g = max(ground(b.pos.x, b.pos.z), ground(look.x, look.z))
+            let look = b.pos + b.vel * 1.2, look2 = b.pos + b.vel * 2.5
+            let g = max(ground(b.pos.x, b.pos.z), ground(look.x, look.z), ground(look2.x, look2.z) - 3)
             let clear = fl.clearance
             if b.pos.y < g + clear { acc.y += (g + clear - b.pos.y) * 4 }
             if b.pos.y > 215 { acc.y -= (b.pos.y - 215) * 2 }
@@ -493,7 +748,12 @@ final class Wildlife {
             let maxY = 0.45 * s
             b.vel.y = max(-maxY, min(maxY, b.vel.y))
             b.pos += b.vel * dt
-            b.pos.y = max(b.pos.y, ground(b.pos.x, b.pos.z) + 1.5)
+            // Never into the ground. Its 4x4 maximum steps by whole voxels from cell to cell, so a bird under it
+            // climbs out at its top speed rather than jumping onto it.
+            if let h = heightAt(b.pos.x, b.pos.z), b.pos.y < h + 1.5 {
+                b.pos.y = min(h + 1.5, b.pos.y + fl.maxSpeed * dt)
+                b.vel.y = max(b.vel.y, maxY)
+            }
 
             // Wingbeats in bursts between glides; a climbing bird keeps flapping.
             if b.beat > 0 {
@@ -525,24 +785,42 @@ final class Wildlife {
         return (fl.glideAngle, fl.glideAngle + fl.handDroop, fl.glideExt, fl.sweep + 0.6 * folded)
     }
 
-    // Writes cluster spheres then birds into `buffer`, map-local (relative to `origin`). Returns the cluster count.
+    // The birds the renderer is given, flock by flock and cluster by cluster, within the bird buffer's caps.
+    func drawList() -> [(flock: Flock, clusters: [[Int]])] {
+        var list: [(flock: Flock, clusters: [[Int]])] = []
+        var nc = 0, nb = 0
+        for f in flocks where list.count < Wildlife.maxFlocks {
+            var cs: [[Int]] = []
+            for start in stride(from: 0, to: f.birds.count, by: Wildlife.clusterSize) where nc < Wildlife.maxClusters {
+                var c: [Int] = []
+                for i in start..<min(start + Wildlife.clusterSize, f.birds.count) where nb < Wildlife.maxBirds {
+                    c.append(i)
+                    nb += 1
+                }
+                if c.isEmpty { continue }
+                cs.append(c)
+                nc += 1
+            }
+            if !cs.isEmpty { list.append((f, cs)) }
+        }
+        return list
+    }
+
+    // Writes cluster spheres then birds into `buffer`, map-local (relative to `origin`). Returns the flock count.
     func upload(into buffer: MTLBuffer, origin o: SIMD3<Double>) -> Int {
         let out = buffer.contents().bindMemory(to: SIMD4<Float>.self, capacity: Wildlife.bufferLength / 16)
         var nc = 0, nb = 0
         let clusters = Wildlife.maxFlocks * 2
         let birds = (Wildlife.maxFlocks + Wildlife.maxClusters) * 2
         var nf = 0
-        for f in flocks where nf < Wildlife.maxFlocks {
+        for (f, cs) in drawList() {
             let fl = Wildlife.flight(f.kind)
-            let grow = f.presence * f.presence * (3 - 2 * f.presence)
             let firstCluster = nc
             var flo = SIMD3<Double>(repeating: .infinity), fhi = SIMD3<Double>(repeating: -.infinity)
-            for start in stride(from: 0, to: f.birds.count, by: Wildlife.clusterSize) where nc < Wildlife.maxClusters {
+            for c in cs {
                 let first = nb
                 var lo = SIMD3<Double>(repeating: .infinity), hi = SIMD3<Double>(repeating: -.infinity)
-                for i in start..<min(start + Wildlife.clusterSize, f.birds.count) where nb < Wildlife.maxBirds {
-                    // Golden-ratio order spreads each step of the fade evenly across the flock.
-                    if (Double(i) * 0.618034).truncatingRemainder(dividingBy: 1) >= grow { continue }
+                for i in c {
                     let b = f.birds[i]
                     let p = b.pos - o
                     lo = simd_min(lo, p); hi = simd_max(hi, p)
@@ -555,7 +833,6 @@ final class Wildlife {
                     out[base + 3] = SIMD4(Float(w.hand), Float(w.sweep), 0, 0)
                     nb += 1
                 }
-                if nb == first { continue }
                 flo = simd_min(flo, lo); fhi = simd_max(fhi, hi)
                 let c = (lo + hi) / 2
                 let r = simd_length(hi - lo) / 2 + fl.span
@@ -563,7 +840,6 @@ final class Wildlife {
                 out[clusters + nc * 2 + 1] = SIMD4(Float(first), Float(nb - first), 0, 0)
                 nc += 1
             }
-            if nc == firstCluster { continue }
             let c = (flo + fhi) / 2
             let r = simd_length(fhi - flo) / 2 + fl.span
             out[nf * 2] = SIMD4(Float(c.x), Float(c.y), Float(c.z), Float(r))
@@ -573,19 +849,11 @@ final class Wildlife {
         return nf
     }
 
-    // Debug: replaces the flocks with one murmuration `distance` ahead of the camera, for timing the worst case.
+    // Debug: replaces the flocks with one murmuration `distance` ahead of the camera, gathered, for timing the worst case.
     func testMurmuration(camera: FlightCamera, distance: Double) {
         flocks = []
-        let fw = camera.forward
-        let saved = spawnTimer
-        spawn(kind: .starling, slot: 0, cam: camera.position, camYaw: atan2(fw.x, fw.z), pitch: asin(fw.y))
-        spawnTimer = saved
-        guard let f = flocks.first else { return }
-        let target = camera.position + fw * distance
-        let shift = target - f.anchor
-        f.anchor += shift
-        f.presence = 1
-        for i in f.birds.indices { f.birds[i].pos += shift }
+        let n = Int(rand(320...420))
+        flocks = [makeMurmuration(slot: 0, anchor: camera.position + camera.forward * distance, n: n, life: rand(70...150), seedPhase: rand(0...1000))]
     }
 
     // Debug: replaces the flocks with a grid of birds of every kind close in front of the camera, at varied headings
@@ -594,7 +862,6 @@ final class Wildlife {
         let b = camera.basis
         let kinds: [Kind] = [.songbird, .raptor, .gull, .starling, .bat, .goose]
         flocks = kinds.map { Flock(kind: $0, slot: 99, anchor: camera.position, heading: 0, speed: 0, altitude: 0, life: 1e9, seedPhase: 0) }
-        for f in flocks { f.presence = 1 }
         for row in 0..<3 {
             for col in 0..<6 {
                 let k = kinds[col]
