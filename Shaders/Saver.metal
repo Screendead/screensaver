@@ -103,7 +103,7 @@ static inline float ridged2(float2 p, int oct, uint s) {
 
 // MARK: - World
 
-struct Climate { float temp; float moist; };
+struct Climate { float temp; float moist; float fall; };
 
 static inline float2 seedOffset(uint seed) {
     return float2(hashf(pcg(seed)), hashf(pcg(seed ^ 0x9e3779b9u))) * 50000.0;
@@ -114,6 +114,7 @@ static inline Climate climate(float2 w, uint seed) {
     Climate c;
     c.temp = saturate(fbm2(p / 900.0, 2, seed + 11) * 1.6 + 0.5);
     c.moist = saturate(fbm2(p / 800.0 + 91.0, 2, seed + 12) * 1.6 + 0.5);
+    c.fall = saturate(perlin2(p / 1000.0 + 213.0, seed + 15) * 2.0 + 0.5);
     return c;
 }
 
@@ -129,6 +130,12 @@ static inline float desertAmount(Climate c) {
 // Level of the flat alluvial floors between painted hills.
 static inline float paintedFloor(float2 p, uint seed) {
     return SEA + 3.0 + 8.0 * saturate(perlin2(p / 700.0, seed + 110u) * 0.7 + 0.5);
+}
+
+// Autumn hardwoods: a third climate field picks temperate, moist country out of the grassland.
+static inline float autumnAmount(Climate c) {
+    return smoothstep(0.38, 0.60, c.fall) * smoothstep(0.25, 0.50, c.moist) * smoothstep(0.20, 0.36, c.temp)
+         * (1.0 - smoothstep(0.1, 0.4, desertAmount(c)));
 }
 
 // Column = (height, gapLo, gapHi): solid where y < height, except inside [gapLo, gapHi).
@@ -222,7 +229,12 @@ kernel void cleanupColumns(texture2d<float, access::read> src [[texture(0)]],
 // from its trunk, so a column only needs the trees of its own and the 8 neighbouring cells.
 constant int TREE_CELL = 5;
 
-static inline float coniferAmount(Climate c) { return smoothstep(0.50, 0.32, c.temp); }
+static inline float coniferAmount(Climate c) { return smoothstep(0.50, 0.32, c.temp) * (1.0 - 0.8 * autumnAmount(c)); }
+
+// Whole groves of birch within the autumn woods.
+static inline float birchAmount(float2 w, uint seed) {
+    return smoothstep(0.22, 0.38, perlin2((w + seedOffset(seed)) / 110.0, seed + 95u));
+}
 
 // Grove density: a low-frequency Perlin field gated by climate; zero on sand, snow, desert and water.
 static inline float groveDensity(float2 w, float g, uint seed) {
@@ -230,17 +242,18 @@ static inline float groveDensity(float2 w, float g, uint seed) {
     Climate c = climate(w, seed);
     float grove = fbm2(p / 300.0, 3, seed + 90u) + 0.3 * perlin2(p / 70.0, seed + 91u);
     float painted = paintedAmount(c);
+    float autumn = autumnAmount(c);
     float open = (1.0 - smoothstep(0.2, 0.5, desertAmount(c))) * (1.0 - smoothstep(0.1, 0.4, painted));
     float wet = smoothstep(0.25, 0.6, c.moist) * open;
     float snowline = mix(160.0, 92.0, smoothstep(0.42, 0.18, c.temp));
     float band = smoothstep(SEA + 2.0, SEA + 6.0, g) * smoothstep(snowline - 4.0, snowline - 30.0, g);
-    float dense = smoothstep(0.22, 0.44, grove + 0.35 * (wet - 0.5));
+    float dense = smoothstep(0.22, 0.44, grove + 0.35 * (wet - 0.5) + 0.12 * autumn);
     // Sage scrub on the painted hills' valley floors.
     float fl = paintedFloor(p, seed);
     float scrub = painted * smoothstep(fl + 3.0, fl + 0.5, g)
                 * smoothstep(-0.3, 0.3, perlin2(p / 60.0, seed + 113u));
     // Lone trees dot even dry grassland; groves need moisture.
-    return (0.02 * open + 0.32 * dense * wet + 0.18 * scrub) * band;
+    return (0.02 * open + mix(0.32, 0.45, autumn) * dense * wet + 0.18 * scrub) * band;
 }
 
 struct Tree { bool ok; int2 c; float g; int lo; int top; int kind; };
@@ -262,9 +275,10 @@ static Tree treeInCell(texture2d<float, access::read> src, int2 cell, int2 origi
     if (hashf(pcg(h)) > groveDensity(w, t.g, seed)) return t;
     uint r = pcg(h + 5u);
     Climate c = climate(w, seed);
-    // 0 shrub, 1 small round, 2 round, 3 conifer.
+    // 0 shrub, 1 small round, 2 round, 3 conifer, 4 birch.
     float dense = groveDensity(w, t.g, seed);
     if (paintedAmount(c) > 0.3) t.kind = 0;
+    else if (autumnAmount(c) > 0.3 && birchAmount(w, seed) > 0.5) t.kind = 4;
     else if (hashf(r) < coniferAmount(c)) t.kind = 3;
     else if (dense < 0.15) t.kind = int(hashf(pcg(r)) * 3.0);
     else t.kind = hashf(pcg(r)) < 0.3 ? 1 : 2;
@@ -272,6 +286,7 @@ static Tree treeInCell(texture2d<float, access::read> src, int2 cell, int2 origi
     if (t.kind == 0) { t.lo = g; t.top = g + 1 + int(r >> 30 & 1u); }
     else if (t.kind == 1) { t.lo = g + 2 + int(r >> 29 & 1u); t.top = t.lo + 3; }
     else if (t.kind == 2) { t.lo = g + 2 + int(r >> 29 & 1u); t.top = t.lo + 4; }
+    else if (t.kind == 4) { t.lo = g + 3 + int(r >> 29 & 1u); t.top = t.lo + 5; }
     else { t.lo = g + 1; t.top = g + 6 + int(r >> 28 & 3u); }
     t.ok = true;
     return t;
@@ -281,7 +296,7 @@ static Tree treeInCell(texture2d<float, access::read> src, int2 cell, int2 origi
 static inline int2 canopySpan(Tree t, int2 o) {
     int d2 = o.x * o.x + o.y * o.y;
     if (t.kind == 0) return d2 == 0 ? int2(t.lo, t.top) : d2 == 1 ? int2(t.lo, t.top - 1) : int2(0);
-    if (t.kind == 1) return d2 <= 1 ? int2(t.lo, t.top) : d2 == 2 ? int2(t.lo + 1, t.top - 1) : int2(0);
+    if (t.kind == 1 || t.kind == 4) return d2 <= 1 ? int2(t.lo, t.top) : d2 == 2 ? int2(t.lo + 1, t.top - 1) : int2(0);
     if (t.kind == 2) return d2 <= 2 ? int2(t.lo, t.top) : d2 <= 5 ? int2(t.lo + 1, t.top - 1) : int2(0);
     // Conifer: a stepped cone, widest a little above the ground.
     int h = t.top - t.lo;
@@ -609,11 +624,25 @@ struct Surface {
     float3 tread;   // the column's top colour, used to prefilter risers at distance
     float4 nh;      // neighbour heights: -x, +x, -z, +z
     float H;
-    int mat;        // 0 terrain, 1 leaf, 2 wood
+    int mat;        // 0 terrain, 1 leaf, 2 wood, 3 pale bark
     float canopy;   // ambient left under a canopy overhead
     float2 slope;   // heightfield gradient of fine relief on top faces
     float riser;    // drop below this face, for side faces
+    float autumn;
 };
+
+// Autumn foliage: a slow Perlin hue field runs lingering green, gold, orange, scarlet to crimson;
+// birch groves lean gold. Kept dark and earthy so the colour reads as paint, not candy.
+static inline float3 autumnLeaf(float2 w, float birch, uint seed) {
+    float k = saturate(perlin2(w / 75.0, seed + 96u) * 1.1 + 0.55 + 0.12 * perlin2(w / 19.0, seed + 97u));
+    k = mix(k, 0.28, 0.75 * birch);
+    float3 green = float3(0.055, 0.075, 0.03), gold = float3(0.22, 0.15, 0.035), orange = float3(0.21, 0.09, 0.035);
+    float3 scarlet = float3(0.18, 0.04, 0.025), crimson = float3(0.12, 0.018, 0.018);
+    if (k < 0.2) return mix(green, gold, smoothstep(0.0, 0.2, k));
+    if (k < 0.45) return mix(gold, orange, smoothstep(0.2, 0.45, k));
+    if (k < 0.7) return mix(orange, scarlet, smoothstep(0.45, 0.7, k));
+    return mix(scarlet, crimson, smoothstep(0.7, 1.0, k));
+}
 
 // Sedimentary bedding by world height: broad formations, beds of uneven tone and fine laminae. Beds dip gently
 // with a slow horizontal warp, so a layer runs continuously across neighbouring columns and around canyon walls.
@@ -710,6 +739,14 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
     float desert = desertAmount(c);
     float painted = smoothstep(0.0, 0.6, paintedAmount(c));
     float cold = smoothstep(0.42, 0.18, c.temp);
+    float autumn = autumnAmount(c);
+    s.autumn = autumn;
+    float birch = 0.0;
+    float3 fallLeaf = 0.0;
+    if (autumn > 0.0) {
+        birch = birchAmount(w, seed);
+        fallLeaf = autumnLeaf(w, birch, seed);
+    }
     bool underGap = !tree && col.z > col.y && float(v.y) < col.z;
 
     float snowline = mix(160.0, 92.0, cold) + 5.0 * perlin2(w / 160.0, seed + 21u);
@@ -717,6 +754,12 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
 
     float3 grassWet = float3(0.12, 0.20, 0.13), grassDry = float3(0.40, 0.34, 0.16), grassCold = float3(0.20, 0.23, 0.17);
     float3 grass = mix(mix(grassDry, grassWet, smoothstep(0.3, 0.7, c.moist)), grassCold, cold);
+    // Autumn ground: tawny grass, with fallen leaves drifting out from the groves in the canopy's own hues.
+    if (autumn > 0.0) {
+        float litter = smoothstep(0.08, 0.36, perlin2((w + seedOffset(seed)) / 300.0, seed + 90u));
+        float3 fallen = mix(fallLeaf * 1.5, float3(0.30, 0.15, 0.07), 0.45);
+        grass = mix(grass, mix(float3(0.22, 0.18, 0.09), fallen, litter), autumn * 0.8);
+    }
     float3 sand = float3(0.47, 0.41, 0.29);
     float3 desertTop = float3(0.54, 0.34, 0.19);
     float3 tread = mix(grass, desertTop, desert) * (0.95 + 0.1 * perlin2(wq / 40.0, seed + 30u));
@@ -775,6 +818,7 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
         float3 leaf = mix(float3(0.035, 0.07, 0.035), float3(0.065, 0.09, 0.04), k);
         leaf = mix(leaf, float3(0.025, 0.055, 0.045), conifer);
         leaf = mix(leaf, float3(0.11, 0.125, 0.09), painted);
+        leaf = mix(leaf, fallLeaf, autumn * (1.0 - conifer * 0.5));
         // A 16x16 leaf texture: two-tone texels, faded out once a texel nears a pixel.
         int2 tx = int2(floor(uv * 16.0));
         int3 tk = n.y != 0 ? int3(v.x * 16 + tx.x, v.y * 2 + max(n.y, 0), v.z * 16 + tx.y)
@@ -792,8 +836,14 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
         s.canopy = 1.0;
     } else if (tree && float(v.y) >= col.y) {
         s.albedo = float3(0.06, 0.058, 0.052);
+        s.mat = 2;
+        if (autumn > 0.3 && birch > 0.5) {
+            // Birch bark: chalk white, broken by dark lenticel bands.
+            uint bh = hash3i(int3(v.x, int(floor(wy * 3.0)), v.z), seed + 98u);
+            s.albedo = mix(hashf(bh) < 0.22 ? float3(0.06, 0.055, 0.05) : float3(0.30, 0.29, 0.27), float3(0.24, 0.23, 0.215), smoothstep(0.04, 0.12, fp));
+            s.mat = 3;
+        }
         s.tread = s.albedo;
-            s.mat = 2;
         s.canopy = 1.0;
     }
     return s;
@@ -889,7 +939,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     // Moonlight drains colour.
     alb = mix(alb, float3(dot(alb, float3(0.3, 0.59, 0.11))), 0.4 * x.L.night);
     // Canopies would otherwise drop to cut-out silhouettes under the moon.
-    if (s.mat != 0) alb *= 1.0 + 1.4 * x.L.night;
+    if (s.mat == 1 || s.mat == 2) alb *= 1.0 + 1.4 * x.L.night * (1.0 - 0.5 * s.autumn);
     float ndl = max(dot(nl, x.L.key), 0.0);
     float hiSun = smoothstep(0.15, 0.45, x.L.key.y) * (1.0 - x.L.night);
     float sh = 1.0;
@@ -928,7 +978,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     if (s.mat == 1) {
         float back = pow(saturate(dot(d, x.L.key)), 4.0) * (1.0 - smoothstep(0.08, 0.45, x.L.key.y)) * (1.0 - x.L.night);
         float graze = 1.0 - abs(dot(n, d));
-        col += alb * float3(0.9, 1.3, 0.3) * x.L.keyCol * back * (1.0 - ndl) * (1.0 - abs(n.y)) * graze * graze * sh;
+        col += alb * mix(float3(0.9, 1.3, 0.3), float3(1.3, 0.9, 0.4), s.autumn) * x.L.keyCol * back * (1.0 - ndl) * (1.0 - abs(n.y)) * graze * graze * sh;
     }
     // Under a high moon, land sits cool and below the sky so night reads as night (won night A/B);
     // under a low moon it is already dark and keeps its contours (darkening lost the dusk A/B).
