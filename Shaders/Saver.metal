@@ -126,7 +126,9 @@ static inline Climate climate(float2 w, uint seed) {
 // Climate is smooth over hundreds of voxels but costs seven noise octaves, so each map bakes it per column.
 kernel void bakeClimate(texture2d<float, access::write> out [[texture(0)]],
                         constant int4& info [[buffer(0)]],
-                        uint2 gid [[thread_position_in_grid]]) {
+                        constant uint& row0 [[buffer(1)]],
+                        uint2 g [[thread_position_in_grid]]) {
+    uint2 gid = g + uint2(0, row0);
     if (gid.x >= uint(info.z) || gid.y >= uint(info.z)) return;
     Climate c = climate(float2(int2(gid) + info.xy), uint(info.w));
     out.write(float4(c.temp, c.moist, c.fall, c.basin), gid);
@@ -264,7 +266,9 @@ static inline float3 terrainColumn(int2 w, uint seed) {
 
 kernel void generateHeight(texture2d<float, access::write> out [[texture(0)]],
                            constant int4& info [[buffer(0)]],
-                           uint2 gid [[thread_position_in_grid]]) {
+                           constant uint& row0 [[buffer(1)]],
+                           uint2 g [[thread_position_in_grid]]) {
+    uint2 gid = g + uint2(0, row0);
     if (gid.x >= uint(info.z) || gid.y >= uint(info.z)) return;
     int2 w = int2(gid) + info.xy;
     out.write(float4(terrainColumn(w, uint(info.w)), 0), gid);
@@ -273,7 +277,9 @@ kernel void generateHeight(texture2d<float, access::write> out [[texture(0)]],
 // Clamps each column into its 4-neighbour height range: removes single-voxel spikes and pits.
 kernel void cleanupColumns(texture2d<float, access::read> src [[texture(0)]],
                            texture2d<float, access::write> dst [[texture(1)]],
-                           uint2 gid [[thread_position_in_grid]]) {
+                           constant uint& row0 [[buffer(1)]],
+                           uint2 g [[thread_position_in_grid]]) {
+    uint2 gid = g + uint2(0, row0);
     uint n = src.get_width();
     if (gid.x >= n || gid.y >= n) return;
     float4 c = src.read(gid);
@@ -381,7 +387,9 @@ static inline int2 canopySpan(Tree t, int2 o) {
 kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
                        texture2d<float, access::write> dst [[texture(1)]],
                        constant int4& info [[buffer(0)]],
-                       uint2 gid [[thread_position_in_grid]]) {
+                       constant uint& row0 [[buffer(1)]],
+                       uint2 g [[thread_position_in_grid]]) {
+    uint2 gid = g + uint2(0, row0);
     uint n = src.get_width();
     if (gid.x >= n || gid.y >= n) return;
     float4 col = src.read(gid);
@@ -422,6 +430,19 @@ kernel void reduceMax(texture2d<float, access::read> src [[texture(0)]],
     dst.write(float4(m, 0, 0, 0), gid);
 }
 
+// Mip 1 of the 1-voxel map also bounds the level-1 column over it, which the morph band slides toward: the
+// rounded mean of the four raw columns, as coarseHeight takes it.
+kernel void reduceMaxBase(texture2d<float, access::read> src [[texture(0)]],
+                          texture2d<float, access::read> raw [[texture(1)]],
+                          texture2d<float, access::write> dst [[texture(2)]],
+                          uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
+    uint2 s = gid * 2;
+    float m = max(max(src.read(s).r, src.read(s + uint2(1, 0)).r), max(src.read(s + uint2(0, 1)).r, src.read(s + uint2(1, 1)).r));
+    float parent = floor((raw.read(s).r + raw.read(s + uint2(1, 0)).r + raw.read(s + uint2(0, 1)).r + raw.read(s + uint2(1, 1)).r) * 0.25 + 0.5);
+    dst.write(float4(max(m, parent), 0, 0, 0), gid);
+}
+
 // MARK: - Coarse levels
 
 // Coarse level k (1...4) has columns s = 2^k voxels wide, built from the same terrainColumn field: the mean of
@@ -442,6 +463,7 @@ static inline float coarseHeight(int2 cw, int k, uint seed) {
 // height and canopy cover, and every second cell also the half-resolution climate texel it starts.
 kernel void generateCoarse(texture2d<float, access::write> hOut [[texture(0)]],
                            texture2d<float, access::write> cOut [[texture(1)]],
+                           texture2d<float, access::write> vOut [[texture(2)]],
                            constant int4& region [[buffer(0)]],
                            constant int4& info [[buffer(1)]],
                            uint2 gid [[thread_position_in_grid]]) {
@@ -453,12 +475,28 @@ kernel void generateCoarse(texture2d<float, access::write> hOut [[texture(0)]],
     float2 centre = float2(cw * s) + 0.5 * float(s);
     // Expected share of the column under leaves: planting chance per tree cell times a mean canopy of ~13 columns.
     float cover = saturate(groveDensity(centre, H, seed) * 13.0 / float(TREE_CELL * TREE_CELL));
-    hOut.write(float4(H, cover, 0, 0), uint2(cw & (COARSE_N - 1)));
+    hOut.write(float4(H), uint2(cw & (COARSE_N - 1)));
+    vOut.write(float4(cover), uint2(cw & (COARSE_N - 1)));
     if (all((cw & 1) == 0)) {
         int2 cj = cw >> 1;
         Climate c = climate((float2(cj) + 0.5) * float(2 * s), seed);
         cOut.write(float4(c.temp, c.moist, c.fall, c.basin), uint2(cj & (COARSE_N / 2 - 1)));
     }
+}
+
+// Mip 1 of level info.x over world mip-1 cells region.xy + [0, region.zw): each is one column of the next level,
+// whose height the morph band slides toward, so it bounds that too.
+kernel void reduceMaxParent(texture2d<float, access::read> src [[texture(0)]],
+                            texture2d<float, access::write> dst [[texture(1)]],
+                            constant int4& region [[buffer(0)]],
+                            constant int4& info [[buffer(1)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= uint(region.z) || gid.y >= uint(region.w)) return;
+    int2 c = region.xy + int2(gid);
+    int2 s = c * 2;
+    float m = max(max(src.read(uint2(s & (COARSE_N - 1))).r, src.read(uint2((s + int2(1, 0)) & (COARSE_N - 1))).r),
+                  max(src.read(uint2((s + int2(0, 1)) & (COARSE_N - 1))).r, src.read(uint2((s + int2(1, 1)) & (COARSE_N - 1))).r));
+    dst.write(float4(max(m, coarseHeight(c, info.x + 1, uint(info.y)))), uint2(c & (COARSE_N / 2 - 1)));
 }
 
 kernel void reduceMaxRegion(texture2d<float, access::read> src [[texture(0)]],
@@ -514,7 +552,8 @@ static inline bool solid(texture2d<float> hm, int3 v, int size) {
 // a multiple of 64), so a level's cells and max mips are world-aligned and the origin in level cells is exact.
 struct Terrain {
     texture2d<float> hm;
-    texture2d_array<float> ch;   // coarse height, canopy cover
+    texture2d_array<float> ch;   // coarse height, with max mips that also bound the next level (its morph target)
+    texture2d_array<float> cv;   // coarse canopy cover
     texture2d_array<float> cc;   // coarse climate, half resolution
     texture2d<float> clim;
     constant float4* lod;        // Frame.lod
@@ -556,7 +595,7 @@ static inline float groundSmoothL(thread const Terrain& tr, int k, float2 p) {
 
 static inline float coverL(thread const Terrain& tr, int k, int2 c) {
     if (k == 0) return 0.0;
-    return tr.ch.read(uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1)), uint(k - 1), 0).g;
+    return tr.cv.read(uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1)), uint(k - 1), 0).r;
 }
 
 // Height of the next level's column over level-k cell c.
@@ -632,6 +671,8 @@ static Hit trace(thread const Terrain& tr, float3 o, float3 d, float tMax, int m
     int k = max(startLevel, levelAt(tr, length(o.xz + d.xz * t - tr.cam)));
     if (k >= tr.levels) return h;
     float tSwitch = k < tr.levels - 1 ? circleExit(o.xz, d.xz, tr.cam, tr.lod[k].y) : 1e30;
+    float s = tr.lod[k].w, invS = 1.0 / s;
+    int2 fo = levelOrigin(tr, k);
     int level = MAX_LEVEL;
     // A ray that starts inside a column hits the side it last crossed into.
     float2 tbox = min((0.0 - o.xz) * inv.xz, (float(tr.size) - o.xz) * inv.xz);
@@ -644,38 +685,34 @@ static Hit trace(thread const Terrain& tr, float3 o, float3 d, float tMax, int m
         if (t >= tSwitch) {
             k++;
             tSwitch = k < tr.levels - 1 ? circleExit(o.xz, d.xz, tr.cam, tr.lod[k].y) : 1e30;
+            s = tr.lod[k].w;
+            invS = 1.0 / s;
+            fo = levelOrigin(tr, k);
             level = MAX_LEVEL;
             nudge = float2(0);
             continue;
         }
         float3 p = o + d * t;
-        float s = tr.lod[k].w;
-        int2 fo = levelOrigin(tr, k);
-        int2 mc = (int2(floor((p.xz + nudge) * (1.0 / s))) + fo) >> level;
+        int2 mc = (int2(floor((p.xz + nudge) * invS)) + fo) >> level;
         int2 lc = (mc << level) - fo;
         float2 cLo = float2(lc) * s, cHi = cLo + s * float(1 << level);
         float2 tb = (select(cLo, cHi, d.xz > 0.0) - o.xz) * inv.xz;
         float tCell = min(min(tb.x, tb.y), min(tExit, tSwitch));
-        float hmax = maxAt(tr, k, mc, level);
-        // In the morph band columns rise or sink toward the next level: bound both.
-        if (k < tr.levels - 1) {
-            float2 far = max(abs(cLo - tr.cam), abs(cHi - tr.cam));
-            if (dot(far, far) > tr.lod[k].x * tr.lod[k].x) {
-                int2 wc = k == 0 ? mc + (tr.origin >> level) : mc;
-                hmax = max(hmax, level > 0 ? maxAt(tr, k + 1, wc, level - 1) : maxAt(tr, k + 1, wc >> 1, 0));
-            }
-        }
         float yA = o.y + d.y * t, yB = o.y + d.y * tCell;
-        if (min(yA, yB) >= hmax) {
-            lastAxis = tb.x < tb.y ? 0 : 2;
-            nudge = select(float2(0), sign(d.xz) * 0.01, tb <= tCell + 1e-4);
-            t = tCell;
-            level = min(level + 1, MAX_LEVEL);
+        if (level > 0) {
+            // Mips from 1 up also bound the next level's columns, which morph-band columns rise or sink toward.
+            if (min(yA, yB) >= maxAt(tr, k, mc, level)) {
+                lastAxis = tb.x < tb.y ? 0 : 2;
+                nudge = select(float2(0), sign(d.xz) * 0.01, tb <= tCell + 1e-4);
+                t = tCell;
+                level = min(level + 1, MAX_LEVEL);
+                continue;
+            }
+            level--;
             continue;
         }
-        if (level > 0) { level--; continue; }
 
-        // One column, solid in [0, gl) and [gh, H).
+        // One column, solid in [0, gl) and [gh, H); a ray passing over it moves on as a skip would.
         float3 col = columnMorph(tr, k, lc);
         float H = col.x, gl = col.y, gh = col.z;
         bool inGap = yA >= gl && yA < gh;
@@ -707,6 +744,8 @@ static Hit trace(thread const Terrain& tr, float3 o, float3 d, float tMax, int m
         t = tCell;
         level = 1;
     }
+    // Out of steps, not out of the world.
+    h.iters = maxIter;
     return h;
 }
 
@@ -1388,7 +1427,11 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
         so.xz = clamp(so.xz, float2(h.voxel.xz) * cs + 0.002, float2(h.voxel.xz) * cs + (cs - 0.002));
         // Prefiltered, the ray starts a step above the column, and single steps shade by their expected cover.
         so.y = mix(so.y, max(so.y, s.H) + 1.0, wf2);
-        Hit sHit = trace(x.tr, so, x.L.key, 700.0, x.quality > 0.5 ? 120 : 48, k);
+        int shadowIters = x.quality > 0.5 ? 120 : 48;
+        Hit sHit = trace(x.tr, so, x.L.key, 700.0, shadowIters, k);
+        // A ray that runs out of steps is still threading terrain toward the sun: count it as blocked there, so a
+        // shaded spot never comes out lit.
+        sHit.hit = sHit.hit || sHit.iters >= shadowIters;
         // Contact shadows from single-voxel steps draw sawtooth noise; keep them faint, cliffs full.
         float contact = 0.35 * (1.0 - smoothstep(2.0, 8.0, 0.5 / x.L.key.y));
         // The lift moves the ray's start about 1 / L.y along it; contact reach moves with it.
@@ -1439,18 +1482,18 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
 // In a morph band the shading also slides to the next level's, reaching it where the geometry does, so the switch
 // at the handoff circle is seamless in colour and light as well as in shape.
 static float3 shadeL(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows) {
-    float3 col = shade(x, o, d, h, shadows);
     float3 p = o + d * h.t;
     float w = morphAt(x.tr, h.level, p.xz);
-    if (w > 0.0) {
+    // One shading per pixel: the next level's with probability w, varying per pixel and frame for TAA to blend.
+    if (w > 0.0 && x.dither < w) {
         Hit h2 = h;
         h2.level = h.level + 1;
         int2 c = int2(floor((p.xz - float2(h.normal.xz) * 0.01) / x.tr.lod[h2.level].w));
         h2.voxel = int3(c.x, h.voxel.y, c.y);
         // Each shading traces its own level's shadow: the outer one must match the next level's hits past the circle.
-        col = mix(col, shade(x, o, d, h2, shadows), w);
+        return shade(x, o, d, h2, shadows);
     }
-    return col;
+    return shade(x, o, d, h, shadows);
 }
 
 // Converges on the actual sky colour as fog thickens (T -> 0), so fogged land meets the sky with no seam.
@@ -1628,7 +1671,7 @@ static float3 softCloudSky(thread const Ctx& x, float3 o, float3 r) {
 fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0)]],
                               texture2d<float> hm [[texture(0)]], texture2d<float> cloudTex [[texture(1)]],
                               texture2d<float> clim [[texture(2)]], texture2d_array<float> coarse [[texture(3)]],
-                              texture2d_array<float> coarseClim [[texture(4)]]) {
+                              texture2d_array<float> coarseClim [[texture(4)]], texture2d_array<float> coarseCover [[texture(5)]]) {
     float2 ndc = in.uv * 2.0 - 1.0;
     ndc.y = -ndc.y;
     ndc += f.jitter.xy;
@@ -1639,7 +1682,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     int levels = int(f.fade.z);
     float gmax = f.misc.y;
     for (int k = 1; k < levels; k++) gmax = max(gmax, coarse.read(uint2(0), uint(k - 1), coarse.get_num_mip_levels() - 1).r + 1.0);
-    Terrain tr { hm, coarse, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax };
+    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax };
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
             2.0 * tanH * f.resolution.w, f.misc.w, makeLight(f.sunDir.xyz),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
