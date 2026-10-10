@@ -575,7 +575,9 @@ static Light makeLight(float3 sunDir) {
     Light L;
     float e = sunDir.y;
     L.sun = sunDir;
-    L.moon = normalize(float3(-sunDir.x, max(-sunDir.y, 0.08), -sunDir.z));
+    // The moon rides lower than the anti-sun (at most ~20 degrees), so a frame that holds it still has room
+    // for land below the horizon; a high moon left land a strip along the bottom.
+    L.moon = normalize(float3(-sunDir.x, max(-sunDir.y * 0.7, 0.08), -sunDir.z));
     L.zenith = key5(e, float3(0.018, 0.022, 0.045), float3(0.10, 0.10, 0.22), float3(0.13, 0.16, 0.32),
                     float3(0.10, 0.20, 0.48), float3(0.06, 0.20, 0.62));
     L.horizon = key5(e, float3(0.022, 0.026, 0.045), float3(0.30, 0.24, 0.36), float3(0.80, 0.45, 0.28),
@@ -1146,10 +1148,9 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
         lone = (1.0 - 0.5 * run) * smoothstep(0.01, 0.05, fp) * (1.0 - wn) * (1.0 - keep);
     }
     float3 alb = h.normal.y == 0 ? mix(s.albedo, s.tread, max(wf * (1.0 - keep), lone)) : s.albedo;
+    float deep = x.L.night * smoothstep(0.32, 0.45, -x.L.sun.y);
     // Moonlight drains colour.
-    alb = mix(alb, float3(dot(alb, float3(0.3, 0.59, 0.11))), 0.4 * x.L.night);
-    // Pale sand, salt and stone would glow under the moon brighter than the sky above them.
-    if (s.mat == 0) alb *= 1.0 - 0.5 * x.L.night * s.pale;
+    alb = mix(alb, float3(dot(alb, float3(0.3, 0.59, 0.11))), 0.4 * x.L.night + 0.1 * deep);
     // Canopies would otherwise drop to cut-out silhouettes under the moon: lifted toward the luminance of a lifted
     // green crown, never past it, or fall foliage, already several times brighter, glows like candy.
     if (s.mat == 1 || s.mat == 2) {
@@ -1157,7 +1158,15 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
         alb = mix(alb, float3(l), 0.4 * x.L.night * s.autumn);
         alb *= 1.0 + x.L.night * (clamp(0.17 / max(l, 1e-3), 1.0, 2.4) - 1.0);
     }
+    // Pale sand, salt and snow would glow under the moon brighter than the sky above them. A knee on albedo
+    // above mid-tone, not a cut keyed to the material, so tones keep their order: a stone riser never outshines
+    // its sand tread.
+    float kn = 4.5 * x.L.night;
+    alb *= (1.0 + 0.1 * kn) / (1.0 + kn * dot(alb, float3(0.3, 0.59, 0.11)));
     float ndl = mix(max(dot(nl, x.L.key), 0.0), max(x.L.key.y, 0.0), lone);
+    // A low moon lights a step's riser several times brighter than its tread, drawing a highlight line along
+    // every step; under the moon only cliffs outshine the ground they stand in.
+    if (h.normal.y == 0 && s.mat == 0) ndl = mix(ndl, min(ndl, max(x.L.key.y, 0.0)), x.L.night * (1.0 - keep));
     float hiSun = smoothstep(0.15, 0.45, x.L.key.y) * (1.0 - x.L.night);
     float sh = 1.0;
     if (shadows && ndl > 0.0 && x.L.shadows) {
@@ -1198,7 +1207,11 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     // Night: no pure-black riser feet; a faint indigo ambient keeps the steps readable as stone, not holes.
     ao = mix(ao, 1.0, 0.25 * x.L.night);
     skyFill += float3(0.09, 0.12, 0.25) * x.L.night;
-    float3 col = alb * (x.L.keyCol * ndl * sh * mix(1.0, 1.1, x.L.night) + (skyFill * ao * riserShade + bounce));
+    // Deep in the night, land sits below the sky so night reads as night (won night A/B): moonlight is graded
+    // to a cool silver and the fill to a deep blue well under it, so slopes facing the moon still model. In
+    // early night it is already dark and keeps its contours (darkening lost the dusk A/B).
+    float3 col = alb * (x.L.keyCol * ndl * sh * mix(1.0, 1.1, x.L.night) * mix(float3(1.0), float3(0.40, 0.42, 0.47), deep)
+                        + (skyFill * ao * riserShade + bounce) * mix(float3(1.0), float3(0.19, 0.23, 0.38), deep));
     // Low sun: up-facing treads take a warm sky-dome tint instead of going to charcoal.
     col += alb * x.L.keyCol * 0.07 * (1.0 - smoothstep(0.05, 0.35, x.L.key.y)) * saturate(nl.y) * (1.0 - x.L.night);
     // Backlit leaves: a low sun glows through the canopy edges facing away from it.
@@ -1207,9 +1220,6 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
         float graze = 1.0 - abs(dot(n, d));
         col += alb * mix(float3(0.9, 1.3, 0.3), float3(1.3, 0.9, 0.4), s.autumn) * x.L.keyCol * back * (1.0 - ndl) * (1.0 - abs(n.y)) * graze * graze * sh;
     }
-    // Under a high moon, land sits cool and below the sky so night reads as night (won night A/B);
-    // under a low moon it is already dark and keeps its contours (darkening lost the dusk A/B).
-    col *= mix(float3(1.0), float3(0.5, 0.56, 0.72), x.L.night * smoothstep(0.32, 0.45, x.L.moon.y));
     return col;
 }
 
@@ -1466,13 +1476,27 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         col += x.L.keyCol * 0.5 * pow(max(dot(r, x.L.key), 0.0), 40.0) * fres * x.L.gold;
         if (x.L.night > 0.0) {
             // Moon path: the chance that some ripple facet mirrors the moon (a slope distribution, so it is
-            // smooth and TAA-stable), broken into glitter by fine ripples that fade with pixel footprint.
+            // smooth and TAA-stable). Slopes along the view spread wider than across it, so the path runs out
+            // toward the horizon; a broad skirt under the core lets it fade out rather than stop.
             float3 hv = normalize(x.L.moon - d);
             float2 slope = hv.xz / max(hv.y, 0.05);
-            float path = exp(-dot(slope, slope) / 0.03);
+            float2 vh = normalize(d.xz + 1e-5);
+            float sa = dot(slope, vh), sc = slope.x * vh.y - slope.y * vh.x;
+            float q = sa * sa / 0.05 + sc * sc / 0.012;
+            float cover = 0.55 * exp(-q) + 0.25 * exp(-0.2 * q);
+            // Glitter: a facet lights where the ripple field clears a threshold set by the cover, so the core is a
+            // broken sheen and the skirt thins to scattered sparks. Each octave hands over to the next coarser as
+            // its features shrink toward a pixel, measured along the foreshortened view; far out, swells long
+            // across the moon's bearing break the path into bands, and past them the cover itself remains.
+            float fpv = tw * x.pixelAngle / max(-d.y, 0.1);
             float fine = perlin3(float3(ww * 1.6, x.time * 0.7), x.seed + 61u);
-            float spark = mix(0.3, smoothstep(0.2, 0.55, fine), saturate(1.0 - tw * x.pixelAngle * 3.0));
-            col += float3(0.75, 0.82, 1.0) * x.L.night * path * (0.12 + 2.5 * spark);
+            float2 mz = normalize(x.L.moon.xz);
+            float swell = perlin3(float3(dot(ww, mz) * 0.07, (ww.x * mz.y - ww.y * mz.x) * 0.02, x.time * 0.1), x.seed + 62u);
+            float rip = mix(swell, mix(e0, fine, saturate(1.0 - fpv * 2.0)), saturate(1.0 - fpv * 0.25));
+            // The ripple noise is near-Gaussian (sd ~0.22); a logistic quantile turns cover into its threshold.
+            float thr = 0.13 * log((1.0 - cover) / max(cover, 1e-4));
+            float glint = mix(cover, smoothstep(thr - 0.07, thr + 0.07, rip), saturate(1.0 - fpv * 0.04));
+            col += float3(0.75, 0.82, 1.0) * x.L.night * (0.05 * cover + 0.55 * glint);
         }
         tSurf = tw;
     } else if (h.hit) {

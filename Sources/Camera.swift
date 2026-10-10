@@ -116,14 +116,14 @@ final class FlightCamera {
         let m01 = min(max((mode + 0.2) / 0.6, 0), 1)
         let steerSign = m01 * m01 * (3 - 2 * m01) * 2 - 1
         // When the sun or moon is low, turn toward it so its disc and water glitter come into frame.
-        let key = sun.y > -0.05 ? sun : SIMD3(-sun.x, max(-sun.y, 0.08), -sun.z)
+        let key = sun.y > -0.05 ? sun : SIMD3(-sun.x, max(-sun.y * 0.7, 0.08), -sun.z)
         let keyYaw = atan2(key.x, key.z)
         let w = min(max(1 - abs(key.y - 0.15) / 0.2, 0), 1)
         let steerKey = sin(keyYaw - yaw) * 0.06 * w
         facing = w * max(0, cos(keyYaw - yaw))
         // Night: the moon (matching L.moon in the shader) is the focal light; turn toward it.
         let nightW = min(max((-sun.y - 0.2) / 0.1, 0), 1)
-        let moon = simd_normalize(SIMD3(-sun.x, max(-sun.y, 0.08), -sun.z))
+        let moon = simd_normalize(SIMD3(-sun.x, max(-sun.y * 0.7, 0.08), -sun.z))
         let moonYaw = atan2(moon.x, moon.z)
         let steerMoon = sin(moonYaw - yaw) * 0.05 * nightW
         let moonOff = abs(FlightCamera.angleDiff(moonYaw, yaw))
@@ -134,7 +134,7 @@ final class FlightCamera {
             let lightYaw = nightW > w ? moonYaw : keyYaw
             // At night the shots are only those that hold the moon; terrain picks among them. Free headings let
             // relief outvote the moon wherever the land happens to rise away from it.
-            let (center, span, step) = nightW > 0.5 ? (moonYaw, 2, 0.15) : (yaw, 3, 0.5)
+            let (center, span, step) = nightW > 0.5 ? (moonYaw, 3, 0.15) : (yaw, 3, 0.5)
             let headings: [Double] = (-span...span).map { center + Double($0) * step }
             shotYaw = headings.max { shotScore($0, lightYaw: lightYaw, lightW: lightW) < shotScore($1, lightYaw: lightYaw, lightW: lightW) }
             nextShot = time + 12
@@ -212,8 +212,9 @@ final class FlightCamera {
         let look = p + fwdFlat * 70
         if h(look.x, look.y) <= 20.0 { s *= 0.35 }
         var targetPitch = -0.08 - 0.40 * s + 0.05 * facing + 0.03 * wander(time + 900, 1.3) + max(-0.04, min(0.06, climbRate * 0.03))
-        // Facing the moon: lift the view so the moon sits near the top and its path lies across the water.
-        let moonPitch = min(asin(moon.y) - 0.30, 0.2)
+        // Facing the moon: it sits just inside the top edge (vertical half-field 0.436 rad), leaving the lower
+        // frame to land and the moon's path across the water.
+        let moonPitch = min(asin(moon.y) - 0.38, 0.13)
         targetPitch += (moonPitch - targetPitch) * facingMoon
         surveyAmount = s
         pitch += ((pitchOverride ?? targetPitch) - pitch) * min(1, dt * 0.25)
