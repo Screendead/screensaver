@@ -757,17 +757,39 @@ struct Ctx {
     float dither; // per-pixel, per-frame in [0, 1); TAA resolves it
 };
 
-// Mean light reaching a staircase of unit steps with this gradient, as seen along d: each step that rises
-// toward the light shades the strip of tread behind it (to contact level ct) and its own riser (to cr).
-// The smoothed gradient misses the local ups and downs of terraced ground; the gain of 3 matches the mean
-// of the traced step shadows it replaces.
-static float stairShadow(float2 grad, float3 L, float3 d, float ct, float cr) {
-    float2 up = grad * L.xz;
-    float2 f = saturate(max(up, 0.0) / max(L.y, 0.02));
-    float tread = 1.0 - (1.0 - (1.0 - f.x) * (1.0 - f.y)) * (1.0 - ct);
-    float2 riser = max(grad * d.xz, 0.0);
-    float2 riserSh = select(float2(1.0), float2(cr), up > 0.0);
-    return saturate(1.0 - 3.0 * (1.0 - (abs(d.y) * tread + dot(riser, riserSh)) / (abs(d.y) + riser.x + riser.y)));
+// Mean light reaching the stairs around p, as seen along d, averaged bilinearly over the four nearest
+// columns: a higher neighbour toward the light shades a strip of a column's tread (to contact level ct), and
+// risers sit at contact level cr, as the traced shadow had them: its origin, kept inside the hit column, starts
+// a side face's ray inside the solid.
+static float stairShadow(texture2d<float> hm, int size, float2 p, float3 L, float3 d, float ct, float cr) {
+    float2 q = p - 0.5, f = fract(q);
+    int2 c0 = int2(floor(q));
+    int2 sx = int2(L.x > 0.0 ? 1 : -1, 0), sz = int2(0, L.z > 0.0 ? 1 : -1);
+    int2 vx = int2(d.x > 0.0 ? 1 : -1, 0), vz = int2(0, d.z > 0.0 ? 1 : -1);
+    // Horizontal reach of a unit step's shadow along each axis, in columns.
+    float2 reach = abs(L.xz) / max(L.y, 0.02);
+    float lit = 0.0, area = 0.0;
+    for (int j = 0; j <= 1; j++)
+        for (int i = 0; i <= 1; i++) {
+            int2 c = c0 + int2(i, j);
+            float w = (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y);
+            float h = groundAt(hm, c, size);
+            // A step k columns toward the light covers what its shadow has left after crossing k - 1 columns.
+            float fx = 0.0, fz = 0.0;
+            for (int k = 1; k <= 2; k++) {
+                fx = max(fx, (groundAt(hm, c + sx * k, size) - h) * reach.x - float(k - 1));
+                fz = max(fz, (groundAt(hm, c + sz * k, size) - h) * reach.y - float(k - 1));
+            }
+            fx = saturate(fx);
+            fz = saturate(fz);
+            float tread = 1.0 - (1.0 - (1.0 - fx) * (1.0 - fz)) * (1.0 - ct);
+            // Risers on the camera's side of the column, by visible area.
+            float rx = max(h - groundAt(hm, c - vx, size), 0.0) * abs(d.x);
+            float rz = max(h - groundAt(hm, c - vz, size), 0.0) * abs(d.z);
+            lit += w * (abs(d.y) * tread + (rx + rz) * cr);
+            area += w * (abs(d.y) + rx + rz);
+        }
+    return lit / area;
 }
 
 static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows, bool lips = true) {
@@ -809,8 +831,10 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
         Hit sHit = trace(x.hm, so, x.L.key, 700.0, x.quality > 0.5 ? 120 : 48, x.globalMax, x.size);
         // Contact shadows from single-voxel steps draw sawtooth noise; keep them faint, cliffs full.
         float contact = 0.35 * (1.0 - smoothstep(2.0, 8.0, 0.5 / x.L.key.y));
-        sh = sHit.hit ? 0.35 * (1.0 - smoothstep(2.0, 8.0, sHit.t)) : 1.0;
-        if (wf2 > 0.0) sh = mix(sh, min(sh, stairShadow(grad, x.L.key, d, contact, 0.35)), wf2);
+        // The lift moves the ray's start about 1 / L.y along it; contact reach moves with it.
+        float reach = wf2 / max(x.L.key.y, 0.05);
+        sh = sHit.hit ? 0.35 * (1.0 - smoothstep(2.0 + reach, 8.0 + reach, sHit.t)) : 1.0;
+        if (wf2 > 0.0) sh = mix(sh, min(sh, stairShadow(x.hm, x.size, p.xz, x.L.key, d, contact, 0.35)), wf2);
         sh = mix(sh, mix(0.5, 0.25, hiSun) + mix(0.5, 0.75, hiSun) * sh, wf);
         sh = mix(sh, 1.0, 0.3 * x.L.night);
     }
@@ -1112,6 +1136,8 @@ fragment float4 taaFragment(VOut in [[stage_in]], texture2d<float> cur [[texture
     float2 outSize = float2(hist.get_width(), hist.get_height());
     float2 inSize = float2(cur.get_width(), cur.get_height());
     float2 toOut = outSize / inSize;
+    // Past 2x the splat widens with the sample spacing, or pixels between samples would hardly ever update.
+    float spread = max(1.0, toOut.x * toOut.y / 4.0);
     float2 jit = float2(f.jitter.x, -f.jitter.y) * 0.5 * inSize;
     float2 sp = in.pos.xy / toOut - jit;
     int2 base = int2(floor(sp));
@@ -1123,7 +1149,7 @@ fragment float4 taaFragment(VOut in [[stage_in]], texture2d<float> cur [[texture
             int2 k = clamp(base + int2(i, j), int2(0), lim);
             float4 v = cur.read(uint2(k));
             float2 dpx = (float2(base + int2(i, j)) + 0.5 - sp) * toOut;
-            float w = exp(-2.29 * dot(dpx, dpx));
+            float w = exp(-2.29 * dot(dpx, dpx) / spread);
             float3 t = tmap(v.rgb);
             sum += t * w;
             wsum += w;
