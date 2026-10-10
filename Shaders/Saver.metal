@@ -2863,6 +2863,35 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
             cloudTex, f.cloud.xyz, st, sites, lampPos, lampState, lightMap, lightDir, f.lights };
 
+    // Debug map view: 11 level 4 (+-10k tall, +-16k wide), 12 level 2, 13 level 1; hillshade, height ramp, 100-voxel
+    // contours, 2k grid, yellow 10k lines, magenta world origin, red camera.
+    if (f.misc2.z >= 11 && f.misc2.z <= 13) {
+        int k = f.misc2.z == 11 ? 4 : f.misc2.z == 12 ? 2 : 1;
+        float cs = float(1 << k);
+        float2 uv = in.uv - 0.5;
+        uv.x *= f.resolution.x / f.resolution.y;
+        float2 cell = f.camPos.xz / cs + float2(f.mapInfo.xy >> k) + uv * 1300.0;
+        int2 ci = int2(floor(cell));
+        float h0 = coarse.read(uint2(ci & (COARSE_N - 1)), uint(k - 1), 0).r;
+        float hx = coarse.read(uint2((ci + int2(1, 0)) & (COARSE_N - 1)), uint(k - 1), 0).r;
+        float hz = coarse.read(uint2((ci + int2(0, 1)) & (COARSE_N - 1)), uint(k - 1), 0).r;
+        float3 n = normalize(float3(-(hx - h0) / cs, 1.0, -(hz - h0) / cs));
+        float lit = saturate(dot(n, normalize(float3(-1, 1.2, 1))));
+        float3 c = h0 <= SEA ? float3(0.15, 0.3, 0.55)
+                 : h0 < 120 ? mix(float3(0.3, 0.5, 0.25), float3(0.55, 0.5, 0.3), h0 / 120.0)
+                 : h0 < 600 ? mix(float3(0.55, 0.5, 0.3), float3(0.5, 0.35, 0.3), (h0 - 120.0) / 480.0)
+                 : h0 < 1200 ? mix(float3(0.5, 0.35, 0.3), float3(0.6, 0.6, 0.65), (h0 - 600.0) / 600.0) : float3(0.95);
+        c *= 0.35 + 0.9 * lit;
+        if (floor(h0 / 100.0) != floor(hx / 100.0) || floor(h0 / 100.0) != floor(hz / 100.0)) c *= 0.6;
+        float2 wc = cell * cs;
+        float px = 1300.0 * cs / f.resolution.y;
+        float2 g1 = abs(wc - 2000.0 * floor(wc / 2000.0 + 0.5)), g2 = abs(wc - 10000.0 * floor(wc / 10000.0 + 0.5));
+        if (any(g1 < px * 0.6)) c = mix(c, float3(0), 0.35);
+        if (any(g2 < px * 1.2)) c = float3(1, 1, 0);
+        if (all(abs(wc) < px * 4.0)) c = float3(1, 0, 1);
+        if (length(uv) < 0.004) c = float3(1, 0, 0);
+        return float4(c * c, 1);
+    }
     const int primaryIters = 520;
     Hit h = trace(x.tr, o, d, x.tr.rmax, primaryIters, 0);
     if (f.misc2.z == 1) return float4(float(h.iters) / float(primaryIters), h.hit ? 0.3 : 0.0, h.iters >= primaryIters - 1 ? 1 : 0, 1);
