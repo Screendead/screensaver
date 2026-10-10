@@ -181,6 +181,93 @@ constant float PAN = 20.0;
 static inline float poolNoise(float2 p, uint seed) { return fbm2(p / 140.0, 3, seed + 16) + 0.25 * perlin2(p / 35.0, seed + 17); }
 static inline float poolLevel(float salt) { return 0.08 + 0.5 * (1.0 - smoothstep(0.8, 0.95, salt)); }
 
+// MARK: - Mega relief
+
+// Heights are rgba16Float/r16Float everywhere (map, rings, gaps, first leaf, the CPU copy): integers are exact only
+// up to 2048, so land stops at 2000 and trees on the highest summit still fit.
+constant float TERRAIN_CEIL = 2000.0;
+
+// Lift over the lowland, and the signals a later wall/overhang pass needs. Provinces about 30% of the land, each
+// one landform across its extent, separated by lowland 6-12k wide: alpine ranges, tablelands with sheer
+// escarpments, karst pillar forests; a low-frequency river net cuts gorges through them, and a rare tepui stands
+// on its own. U is 0 outside them, so the lowland there is exactly as before. p is seed-offset world position.
+struct Mega { float U; float wK; };
+
+static inline Mega megaLift(float2 p, float lagoon, uint seed) {
+    Mega g;
+    g.U = 0.0;
+    g.wK = 0.0;
+    float2 cw = float2(fbm2(p / 7000.0, 2, seed + 200u), fbm2(p / 7000.0 + 71.3, 2, seed + 201u)) * 3000.0;
+    float2 q = p + cw;
+    float m = fbm2(q / 16000.0, 3, seed + 202u) * 1.6 + 0.5;
+    float M = smoothstep(0.50, 0.80, m);
+    if (M > 0.0) {
+        float a = perlin2(q / 22000.0, seed + 203u), b = perlin2(q / 22000.0 + 9.7, seed + 204u);
+        float wA = smoothstep(-0.12, 0.12, a);
+        float wT = (1.0 - wA) * smoothstep(-0.12, 0.12, b);
+        float wK = (1.0 - wA) * (1.0 - wT);
+        float core = smoothstep(0.55, 0.95, m);
+        float U = 0.0;
+        if (wA > 0.0) {
+            // Ridged multifractal, domain-warped into ranges; its finest octave is 200 wide, so the 16-voxel ring
+            // carries every octave. The pow keeps the valleys between ridges low.
+            float2 aw = float2(fbm2(p / 1800.0, 3, seed + 210u), fbm2(p / 1800.0 + 13.1, 3, seed + 211u)) * 500.0;
+            float r = ridged2((p + aw) / 3200.0, 5, seed + 212u);
+            U += wA * M * (120.0 + 1450.0 * pow(saturate(r), 1.8)) * mix(0.55, 1.0, core);
+        }
+        if (wT > 0.0) {
+            // Two tiers, each a sloping talus apron (a quarter of its height) under a sheer cap rock; outliers of the
+            // field near a threshold stand as mesas, then buttes.
+            float2 tw = float2(fbm2(p / 1500.0, 3, seed + 220u), fbm2(p / 1500.0 + 5.3, 3, seed + 221u)) * 700.0
+                      + float2(perlin2(p / 260.0, seed + 222u), perlin2(p / 260.0 + 3.1, seed + 223u)) * 90.0;
+            float sv = fbm2((p + tw) / 6000.0, 3, seed + 224u) * 1.4 + 0.5 + 0.5 * (M - 0.5);
+            float s1 = 0.25 * smoothstep(0.38, 0.45, sv) + 0.75 * smoothstep(0.45, 0.456, sv);
+            float s2 = 0.25 * smoothstep(0.55, 0.62, sv) + 0.75 * smoothstep(0.62, 0.626, sv);
+            float roll = 18.0 * fbm2(p / 400.0, 2, seed + 225u);
+            U += wT * smoothstep(0.0, 0.3, M) * (430.0 * s1 + 380.0 * s2 + roll * s1);
+        }
+        if (wK > 0.0) {
+            // Pillars at the maxima of a warped field, isolated at the fringe and merging into a slot-cut plateau in
+            // the core, with thin needles among the fringe pillars. One flat-topped height per pillar.
+            float P = 280.0 + 260.0 * saturate(fbm2(q / 5000.0, 2, seed + 230u) * 1.5 + 0.5);
+            float2 kw = float2(perlin2(p / 60.0, seed + 231u), perlin2(p / 60.0 + 7.7, seed + 232u)) * 14.0;
+            float c1 = perlin2((p + kw) / 52.0, seed + 233u);
+            float c2 = perlin2((p + kw) / 23.0, seed + 235u);
+            float thr = mix(0.40, -0.05, core * core);
+            float big = smoothstep(thr, thr + 0.02, c1);
+            float thin = smoothstep(0.52, 0.54, c2) * (1.0 - core) * smoothstep(0.1, 0.4, perlin2(p / 900.0, seed + 236u) + 0.3);
+            float hv = 0.45 + 0.55 * saturate(perlin2(p / 170.0, seed + 234u) * 0.9 + 0.5);
+            float kh = P * M * max(big * mix(hv, 1.0, core * core), thin * hv * 0.8);
+            U += wK * floor(kh / 9.0) * 9.0;
+        }
+        // Lagoon country keeps only its pillars standing in the water.
+        U *= mix(1.0, wK, lagoon);
+        // Rivers cut gorges: slots through tableland and karst, broader valleys through ranges.
+        float gorge = abs(fbm2(q / 5000.0, 3, seed + 250u));
+        U *= smoothstep(0.008, mix(0.035, 0.12, wA), gorge);
+        g.U = U;
+        g.wK = wK;
+    }
+    // Tepui: in about one 30k cell in three, a sheer-walled table mountain over a talus skirt.
+    const float CELL = 30000.0;
+    int2 cell = int2(floor(p / CELL));
+    uint hc = hash2i(cell, seed + 240u);
+    if (hashf(hc) < 0.35) {
+        float2 c = (float2(cell) + 0.25 + 0.5 * float2(hashf(pcg(hc)), hashf(pcg(hc + 1u)))) * CELL;
+        float R = 900.0 + 600.0 * hashf(pcg(hc + 2u));
+        float dd = length(p - c);
+        if (dd < R + 900.0) {
+            float d = dd + 320.0 * fbm2(p / 1100.0, 3, seed + 241u) + 50.0 * perlin2(p / 140.0, seed + 242u);
+            float Hl = 1500.0 + 350.0 * hashf(pcg(hc + 3u));
+            float t = 0.22 * smoothstep(R + 420.0, R + 10.0, d) + 0.78 * smoothstep(R + 10.0, R - 6.0, d);
+            float top = 30.0 * fbm2(p / 350.0, 2, seed + 243u) * smoothstep(R, R - 80.0, d);
+            float T = Hl * t + top;
+            if (T > g.U) { g.U = T; g.wK = 0.0; }
+        }
+    }
+    return g;
+}
+
 // Column = (height, gapLo, gapHi): solid where y < height, except inside [gapLo, gapHi).
 static inline float3 terrainColumn(int2 w, uint seed) {
     float2 p = float2(w) + seedOffset(seed);
@@ -235,6 +322,19 @@ static inline float3 terrainColumn(int2 w, uint seed) {
         float bed = fbm2((p + warp * 0.3 + ew) / 210.0, 3, seed + 15u) + 0.25 * perlin2(p / 600.0, seed + 16u);
         h = mix(h, SEA - 2.5 + bed * 14.0, lagoon);
     }
+    Mega mg = megaLift(p, lagoon, seed);
+    float U = mg.U;
+    if (U > 0.5) {
+        // Lifted land is re-terraced into cliff bands, so mountain faces read as contours, not a stair lattice.
+        // Karst keeps its sheer pillar walls.
+        float hm = h + U;
+        float tdm = mix(td, 14.0, smoothstep(40.0, 400.0, U));
+        float hn3 = hm / tdm, lv3 = floor(hn3);
+        h = mix(hm, (lv3 + smoothstep(0.6, 1.0, hn3 - lv3)) * tdm, smoothstep(0.5, 30.0, U) * (1.0 - mg.wK));
+        h = min(h, TERRAIN_CEIL);
+    }
+    // A pan's rim would otherwise chop a massif flat.
+    salt *= 1.0 - smoothstep(10.0, 80.0, U);
     if (eroded > 0.0) h += eroded * (1.6 * perlin2(p / 21.0 + ew / 14.0, seed + 122u) + 0.9 * perlin2(p / 9.0, seed + 125u)) * smoothstep(SEA + 40.0, SEA + 2.0, h);
     h = floor(max(h, 2.0));
 
@@ -254,7 +354,7 @@ static inline float3 terrainColumn(int2 w, uint seed) {
 
     // Arches and undercuts: noise blobs hollow out a band low in each mesa tier.
     float gl = 0, gh = 0;
-    if (canyon > 0.2) {
+    if (canyon > 0.2 && U <= 0.5) {
         float blob = fbm2(p / 34.0, 3, seed + 8);
         float g = (blob - 0.2) * canyon;
         if (g > 0.0) {
@@ -1202,8 +1302,19 @@ kernel void bakeLights(texture2d<float, access::write> lm [[texture(0)]],
     ld.write(P, gid);
 }
 
+// A coarse column from its four child samples: their rounded mean, or toward their max where they straddle a sheer
+// wall far taller than the column is wide, so walls fatten by half a column instead of each handoff growing a
+// half-height ledge. Lowland relief never comes near the threshold.
+static inline float coarseCombine(float a, float b, float c, float d, float s) {
+    float mean = (a + b + c + d) * 0.25;
+    float hi = max(max(a, b), max(c, d)), range = hi - min(min(a, b), min(c, d));
+    float lo = max(3.0 * s, 40.0);
+    if (range > lo) mean = mix(mean, hi, smoothstep(lo, 2.0 * lo, range));
+    return floor(mean + 0.5);
+}
+
 // Mip 1 of the 1-voxel map also bounds the level-1 column over it, which the morph band slides toward: the
-// rounded mean of the four raw columns, as coarseHeight takes it.
+// four raw columns combined as coarseHeight combines them.
 kernel void reduceMaxBase(texture2d<float, access::read> src [[texture(0)]],
                           texture2d<float, access::read> raw [[texture(1)]],
                           texture2d<float, access::write> dst [[texture(2)]],
@@ -1211,7 +1322,7 @@ kernel void reduceMaxBase(texture2d<float, access::read> src [[texture(0)]],
     if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
     uint2 s = gid * 2;
     float m = max(max(src.read(s).r, src.read(s + uint2(1, 0)).r), max(src.read(s + uint2(0, 1)).r, src.read(s + uint2(1, 1)).r));
-    float parent = floor((raw.read(s).r + raw.read(s + uint2(1, 0)).r + raw.read(s + uint2(0, 1)).r + raw.read(s + uint2(1, 1)).r) * 0.25 + 0.5);
+    float parent = coarseCombine(raw.read(s).r, raw.read(s + uint2(1, 0)).r, raw.read(s + uint2(0, 1)).r, raw.read(s + uint2(1, 1)).r, 2.0);
     dst.write(float4(max(m, parent), 0, 0, 0), gid);
 }
 
@@ -1226,9 +1337,8 @@ constant float COVER_GAIN = 2.5;
 static inline float coarseHeight(int2 cw, int k, uint seed) {
     int s = 1 << k, off = s >> 2, hs = s >> 1;
     int2 b = cw * s + off;
-    float sum = terrainColumn(b, seed).x + terrainColumn(b + int2(hs, 0), seed).x
-              + terrainColumn(b + int2(0, hs), seed).x + terrainColumn(b + int2(hs, hs), seed).x;
-    return floor(sum * 0.25 + 0.5);
+    return coarseCombine(terrainColumn(b, seed).x, terrainColumn(b + int2(hs, 0), seed).x,
+                         terrainColumn(b + int2(0, hs), seed).x, terrainColumn(b + int2(hs, hs), seed).x, float(s));
 }
 
 // Writes the world cells region.xy + [0, region.zw) of level info.x into its toroidal slice (texel = cell & 2047):
