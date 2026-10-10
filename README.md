@@ -31,12 +31,16 @@ It replaces the system screensaver. If you like, set System Settings › Lock Sc
 | `--duration N` | Preview: exit after N seconds |
 | `--idle N` | Idle threshold in seconds (agent default 30) |
 | `--seed N` | Fixed world seed (default: random per activation) |
-| `--speed X` | Time multiplier (soak testing) |
+| `--speed X` | Time multiplier (soak testing). Snapshots honour it too: `--times 60 --speed 20` simulates 1200 s |
 | `--battery` | Force the battery-quality path |
 | `--screenshot out.png --times 10,60 --size WxH --scale S` | Render offscreen PNGs after simulating to each time |
 | `--phase P`, `--pitch R`, `--debug M` | Snapshot overrides: day phase (0 = sunrise), camera pitch, debug view |
 
 Environment: `VR_TIMING=1` logs GPU frame times and world regeneration, and `VR_DEBUG=1` logs idle and activation decisions.
+Snapshot test switches: `VR_MOTION=1` (with `VR_MOTION_FRAMES=n`, `VR_FRAMES=n`) advances the camera between frames and dumps them,
+`VR_CHUNKED=1` updates the LOD rings a piece per frame as live, `VR_COARSE_FULL=1` rebuilds them whole every frame,
+`VR_LODSHIFT=v` moves the rings' centre v voxels ahead of the camera, and `VR_POWER_FLIP=i` switches power source at frame i.
+Live frame times are measured at `--size 3456x2234 --scale 1`: the scene renders on the 864-cell dither grid, so scale 1 is the AC live size.
 
 ## Layout
 
