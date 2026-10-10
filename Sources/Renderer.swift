@@ -12,6 +12,11 @@ struct Frame {
     var mapInfo = SIMD4<Int32>()
     var misc = SIMD4<Float>()
     var misc2 = SIMD4<Float>()
+    var prevPos = SIMD4<Float>()
+    var prevFwd = SIMD4<Float>()
+    var prevRight = SIMD4<Float>()
+    var prevUp = SIMD4<Float>()
+    var jitter = SIMD4<Float>()
 }
 
 enum GPU {
@@ -194,6 +199,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     let queue: MTLCommandQueue
     let scenePipeline: MTLRenderPipelineState
     let postPipeline: MTLRenderPipelineState
+    let taaPipeline: MTLRenderPipelineState
+    private var history: [MTLTexture] = []
+    private var historyIndex = 0
+    private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
     let world: World
     let camera: FlightCamera
     var clock = SkyClock()
@@ -226,13 +235,19 @@ final class Renderer: NSObject, MTKViewDelegate {
         post.vertexFunction = lib.makeFunction(name: "fullscreenVertex")
         post.fragmentFunction = lib.makeFunction(name: "postFragment")
         post.colorAttachments[0].pixelFormat = outputFormat
+        let taa = MTLRenderPipelineDescriptor()
+        taa.vertexFunction = lib.makeFunction(name: "fullscreenVertex")
+        taa.fragmentFunction = lib.makeFunction(name: "taaFragment")
+        taa.colorAttachments[0].pixelFormat = .rgba16Float
         guard let sp = try? device.makeRenderPipelineState(descriptor: scene),
+              let tp = try? device.makeRenderPipelineState(descriptor: taa),
               let pp = try? device.makeRenderPipelineState(descriptor: post),
               let world = World(device: device, library: lib, seed: seed) else { return nil }
         self.device = device
         self.queue = queue
         scenePipeline = sp
         postPipeline = pp
+        taaPipeline = tp
         self.world = world
         // Spec offset displays by 90 s of the same flight; steering reads GPU heights, so displays
         // instead start at different places in the same world.
@@ -295,6 +310,17 @@ final class Renderer: NSObject, MTKViewDelegate {
         f.mapInfo = SIMD4(world.origin.x, world.origin.y, Int32(World.size), Int32(bitPattern: world.seed))
         f.misc = SIMD4(Float(exposure), world.globalMax, 0.6, Float(cloudCover))
         f.misc2 = SIMD4(frameIndex, 1, debugMode, headroom)
+        if let pc = prevCamera {
+            let pp = pc.pos - o
+            f.prevPos = SIMD4(Float(pp.x), Float(pp.y), Float(pp.z), 1)
+            f.prevFwd = SIMD4(SIMD3<Float>(pc.fwd), 0)
+            f.prevRight = SIMD4(SIMD3<Float>(pc.right), 0)
+            f.prevUp = SIMD4(SIMD3<Float>(pc.up), 0)
+        }
+        // Halton(2,3) subpixel jitter, accumulated by the temporal resolve.
+        let k = Int(frameIndex) % 8 + 1
+        func halton(_ i: Int, _ b: Int) -> Double { var f = 1.0, r = 0.0, i = i; while i > 0 { f /= Double(b); r += f * Double(i % b); i /= b }; return r }
+        f.jitter = SIMD4(Float((halton(k, 2) - 0.5) * 2 / size.width), Float((halton(k, 3) - 0.5) * 2 / size.height), 0, 0)
         return f
     }
 
@@ -305,11 +331,17 @@ final class Renderer: NSObject, MTKViewDelegate {
             td.usage = [.renderTarget, .shaderRead]
             td.storageMode = .private
             sceneTex = device.makeTexture(descriptor: td)
+            history = (0..<2).compactMap { _ in device.makeTexture(descriptor: td) }
+            prevCamera = nil
         }
         guard let sceneTex else { return }
         sceneSize = (w, h)
         var f = makeFrame(size: CGSize(width: w, height: h))
         frameIndex += 1
+        let b = camera.basis
+        prevCamera = (camera.position, b.fwd, b.right, b.up)
+        let histIn = history[historyIndex], histOut = history[1 - historyIndex]
+        historyIndex = 1 - historyIndex
 
         let sp = MTLRenderPassDescriptor()
         sp.colorAttachments[0].texture = sceneTex
@@ -322,6 +354,18 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
         }
+        let tpd = MTLRenderPassDescriptor()
+        tpd.colorAttachments[0].texture = histOut
+        tpd.colorAttachments[0].loadAction = .dontCare
+        tpd.colorAttachments[0].storeAction = .store
+        if let enc = cb.makeRenderCommandEncoder(descriptor: tpd) {
+            enc.setRenderPipelineState(taaPipeline)
+            enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
+            enc.setFragmentTexture(sceneTex, index: 0)
+            enc.setFragmentTexture(histIn, index: 1)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            enc.endEncoding()
+        }
         let pp = MTLRenderPassDescriptor()
         pp.colorAttachments[0].texture = output
         pp.colorAttachments[0].loadAction = .dontCare
@@ -329,7 +373,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         if let enc = cb.makeRenderCommandEncoder(descriptor: pp) {
             enc.setRenderPipelineState(postPipeline)
             enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
-            enc.setFragmentTexture(sceneTex, index: 0)
+            enc.setFragmentTexture(histOut, index: 0)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
         }
@@ -376,6 +420,7 @@ enum Snapshot {
         }
         r.debugMode = settings.debugMode
         r.world.synchronous = true
+        r.camera.pitchOverride = settings.pitch
         let w = Int(settings.screenshotSize.width), h = Int(settings.screenshotSize.height)
         r.renderScale = settings.renderScale ?? r.renderScale
         let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: w, height: h, mipmapped: false)
@@ -389,7 +434,7 @@ enum Snapshot {
             if let phase = settings.phase { r.clock.phase = phase }
             simulated = t
             var times: [Double] = []
-            for _ in 0..<3 {
+            for _ in 0..<12 {
                 let cb = r.queue.makeCommandBuffer()!
                 let t0 = CACurrentMediaTime()
                 r.encode(into: cb, output: tex, outputSize: CGSize(width: w, height: h))

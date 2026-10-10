@@ -13,6 +13,7 @@ final class FlightCamera {
     private var time: Double = 0
     private(set) var surveyAmount: Double = 0
     var sun = SIMD3<Double>(0, 1, 0)
+    var pitchOverride: Double?
 
     // Height lookup in world coords; returns nil outside the loaded map.
     var heightAt: (Double, Double) -> Double? = { _, _ in nil }
@@ -113,7 +114,7 @@ final class FlightCamera {
         let nightTilt = sun.y < -0.2 ? -0.08 : 0
         let targetPitch = -0.08 - 0.40 * s + nightTilt + 0.03 * wander(time + 900, 1.3) + max(-0.04, min(0.06, climbRate * 0.03))
         surveyAmount = s
-        pitch += (targetPitch - pitch) * min(1, dt * 0.25)
+        pitch += ((pitchOverride ?? targetPitch) - pitch) * min(1, dt * 0.25)
         let targetRoll = max(-0.07, min(0.07, -yawRate * 0.8))
         roll += (targetRoll - roll) * min(1, dt * 0.8)
     }

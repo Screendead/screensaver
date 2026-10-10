@@ -11,7 +11,12 @@ struct Frame {
     float4 resolution; // xy pixels, zw inverse
     int4   mapInfo;    // xy world xz of texel 0, z size, w seed
     float4 misc;       // x exposure, y global max height, z wind angle, w cloud cover
-    float4 misc2;      // x frame index, y fog density scale, z debug mode
+    float4 misc2;      // x frame index, y fog density scale, z debug mode, w EDR headroom (0 = SDR)
+    float4 prevPos;    // previous frame's camera, in this frame's map-local coords; w history valid
+    float4 prevFwd;
+    float4 prevRight;
+    float4 prevUp;
+    float4 jitter;     // xy subpixel jitter in NDC
 };
 
 constant float SEA = 19.85;
@@ -651,18 +656,30 @@ static float3 skyWithClouds(thread const Ctx& x, float3 o, float3 d, float tLimi
     CloudHit c = traceClouds(o, d, x.origin, x.seed, x.time, x.cover, tLimit);
     if (!c.hit) return sky;
     float ndl = max(dot(c.n, x.L.key), 0.0);
-    float3 lit = x.L.keyCol * (0.35 + 0.65 * ndl) * mix(1.0, 0.35, x.L.night) + x.L.zenith * 1.6 + x.L.horizon * 0.5;
-    lit *= c.n.y < 0 ? 0.62 : 1.0;
+    float3 lit = x.L.keyCol * (0.2 + 0.5 * ndl) * mix(1.0, 0.35, x.L.night) + x.L.zenith * 1.2 + x.L.horizon * 0.4;
+    lit *= c.n.y < 0 ? 0.55 : (c.n.y > 0 ? 1.0 : 0.85);
     lit += x.L.keyCol * pow(max(dot(d, x.L.sun), 0.0), 12.0) * 2.0 * x.L.sunAmt;
     float3 col = mix(lit * 0.95, sky, 0.12);
     float T = exp(-c.t / 2200.0) * smoothstep(3500.0, 1500.0, c.t);
     return mix(sky, col, T);
 }
 
+// Reflected sky: clouds as a soft density wash rather than hard voxels; rippled water blurs them anyway.
+static float3 softCloudSky(thread const Ctx& x, float3 o, float3 r) {
+    float3 sky = skyColor(r, x.L, true, x.seed, x.time);
+    if (r.y < 0.02) return sky;
+    float t = (CLOUD_Y - o.y) / r.y;
+    float2 q = o.xz + r.xz * t + float2(x.origin);
+    float dens = smoothstep(0.0, 0.25, cloudDensity(q, x.seed, x.time, x.cover));
+    float3 lit = x.L.keyCol * 0.6 * mix(1.0, 0.35, x.L.night) + x.L.zenith * 1.6 + x.L.horizon * 0.5;
+    return mix(sky, lit * 0.9, dens * 0.6 * exp(-t / 3000.0));
+}
+
 fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0)]],
                               texture2d<float> hm [[texture(0)]]) {
     float2 ndc = in.uv * 2.0 - 1.0;
     ndc.y = -ndc.y;
+    ndc += f.jitter.xy;
     float tanH = f.camPos.w;
     float3 d = normalize(f.camFwd.xyz + f.camRight.xyz * ndc.x * tanH * f.camFwd.w + f.camUp.xyz * ndc.y * tanH);
     float3 o = f.camPos.xyz;
@@ -672,9 +689,11 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
 
     Hit h = trace(hm, o, d, 4000.0, 400, x.globalMax, x.size);
     if (f.misc2.z == 1) return float4(float(h.iters) / 400.0, h.hit ? 0.3 : 0.0, h.iters >= 399 ? 1 : 0, 1);
+    if (f.misc2.z == 5) return float4(skyColor(d, x.L, false, x.seed, x.time), 1);
+    if (f.misc2.z == 6) return float4(skyWithClouds(x, o, d, 4000.0), 1);
 
     float tw = d.y < 0 ? (SEA - o.y) / d.y : 1e9;
-    bool water = tw > 0 && (!h.hit || tw < h.t);
+    bool water = d.y < 0 && tw > 0 && (!h.hit || tw < h.t);
     float3 col;
     float tSurf;
     if (water) {
@@ -691,9 +710,9 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         if (x.quality > 0.5) {
             Hit rh = trace(hm, wp + float3(0, 0.02, 0), r, 1500.0, 220, x.globalMax, x.size);
             refl = rh.hit ? applyFog(x, shade(x, wp, r, rh, false), wp, r, rh.t)
-                           : mix(skyColor(r, x.L, true, x.seed, x.time), skyWithClouds(x, wp, r, 4000.0), 0.55);
+                           : softCloudSky(x, wp, r);
         } else {
-            refl = skyColor(r, x.L, false, x.seed, x.time);
+            refl = softCloudSky(x, wp, r);
         }
         float3 deep = x.L.zenith * 0.18 + x.L.horizon * 0.06 + float3(0.004, 0.014, 0.018);
         float3 under = deep;
@@ -712,11 +731,47 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         col = shade(x, o, d, h, true);
         tSurf = h.t;
     } else {
-        return float4(skyWithClouds(x, o, d, 4000.0), 1);
+        col = skyWithClouds(x, o, d, 4000.0);
+        tSurf = 6e4;
     }
+    if (tSurf >= 6e4) return float4(col, tSurf);
     if (f.misc2.z == 3) return float4(float3(fogTransmittance(x, o, d, tSurf)), 1);
     if (f.misc2.z != 2) col = applyFog(x, col, o, d, tSurf);
-    return float4(col, 1);
+    return float4(col, tSurf);
+}
+
+
+// Temporal resolve: reproject history through the previous camera (the world is static), clamp it to
+// the current 3x3 neighbourhood, and blend. Alpha carries hit distance.
+fragment float4 taaFragment(VOut in [[stage_in]], texture2d<float> cur [[texture(0)]],
+                            texture2d<float> hist [[texture(1)]], constant Frame& f [[buffer(0)]]) {
+    constexpr sampler lin(filter::linear, address::clamp_to_edge);
+    int2 px = int2(in.pos.xy);
+    float4 c = cur.read(uint2(px));
+    if (f.prevPos.w < 0.5 || c.a > 5e4) return c;
+    float3 mn = c.rgb, mx = c.rgb;
+    int2 lim = int2(cur.get_width() - 1, cur.get_height() - 1);
+    for (int j = -1; j <= 1; j++)
+        for (int i = -1; i <= 1; i++) {
+            float3 v = cur.read(uint2(clamp(px + int2(i, j), int2(0), lim))).rgb;
+            mn = min(mn, v);
+            mx = max(mx, v);
+        }
+
+    float2 ndc = in.uv * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+    ndc += f.jitter.xy;
+    float tanH = f.camPos.w;
+    float3 d = normalize(f.camFwd.xyz + f.camRight.xyz * ndc.x * tanH * f.camFwd.w + f.camUp.xyz * ndc.y * tanH);
+    float3 wp = f.camPos.xyz + d * min(c.a, 1e5);
+    float3 v = wp - f.prevPos.xyz;
+    float z = dot(v, f.prevFwd.xyz);
+    if (z <= 0.01) return c;
+    float2 pn = float2(dot(v, f.prevRight.xyz) / (z * tanH * f.camFwd.w), dot(v, f.prevUp.xyz) / (z * tanH));
+    float2 puv = float2(pn.x * 0.5 + 0.5, 0.5 - pn.y * 0.5);
+    if (any(puv < 0.0) || any(puv > 1.0)) return c;
+    float3 h = clamp(hist.sample(lin, puv).rgb, mn, mx);
+    return float4(mix(h, c.rgb, 0.12), c.a);
 }
 
 static inline float3 acesFit(float3 x) {
