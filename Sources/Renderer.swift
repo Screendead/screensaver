@@ -1076,9 +1076,20 @@ enum Snapshot {
                 }
             }
         }
+        // VR_CAM=x,z,height,yawDeg,pitchDeg[,abs]: holds the camera at world (x, z), `height` above the ground there
+        // (absolute when abs is 1).
+        let camSpec = env["VR_CAM"].map { $0.split(separator: ",").compactMap { Double($0) } }
+        if let v = camSpec, v.count >= 5 {
+            r.camera.freeze(position: SIMD3(v[0], 400, v[1]), yaw: v[3] * .pi / 180, pitch: v[4] * .pi / 180)
+            r.camera.pitchOverride = nil
+        }
         var simulated = 0.0
         for t in settings.screenshotTimes.sorted() {
             r.simulate(t - simulated)
+            if let v = camSpec, v.count >= 5 {
+                let g = (v.count > 5 && v[5] == 1) ? 0 : max(r.world.height(x: v[0], z: v[1]) ?? 20, 19.85)
+                r.camera.freeze(position: SIMD3(v[0], g + v[2], v[1]), yaw: v[3] * .pi / 180, pitch: v[4] * .pi / 180)
+            }
             if let phase = settings.phase { r.clock.phase = phase }
             simulated = t
             if let d = Double(ProcessInfo.processInfo.environment["VR_BIRDTEST"] ?? "") { r.wildlife.testPattern(camera: r.camera, distance: d) }
@@ -1107,8 +1118,8 @@ enum Snapshot {
             tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
             write(bytes: bytes, width: w, height: h, to: out)
             let seen = r.wildlife.inView(camera: r.camera, aspect: Double(w) / Double(h), tanHalf: tan(25.0 * .pi / 180))
-            print(String(format: "t=%.0f phase=%.3f sunY=%.2f exposure=%.2f cam=(%.0f,%.0f,%.0f) gpu=%.2fms mem=%.0fMB birds=%d flocks=%d near=%.0f %@ -> %@", t, r.clock.phase,
-                         r.clock.sunDirection.y, r.exposure, r.camera.position.x, r.camera.position.y, r.camera.position.z, times.min()!,
+            print(String(format: "t=%.0f phase=%.3f sunY=%.2f exposure=%.2f cam=(%.0f,%.0f,%.0f) yaw=%.1f pitch=%.1f gpu=%.2fms mem=%.0fMB birds=%d flocks=%d near=%.0f %@ -> %@", t, r.clock.phase,
+                         r.clock.sunDirection.y, r.exposure, r.camera.position.x, r.camera.position.y, r.camera.position.z, r.camera.yaw * 180 / .pi, r.camera.pitch * 180 / .pi, times.min()!,
                          Double(device.currentAllocatedSize) / 1048576, seen.count, seen.flocks, seen.nearest.isFinite ? seen.nearest : -1, Snapshot.sitesInView(r), out))
         }
     }

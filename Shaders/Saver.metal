@@ -26,7 +26,7 @@ struct Frame {
 };
 
 constant float SEA = 19.85;
-constant int MAX_LEVEL = 6;
+constant int MAX_LEVEL = 8;
 
 // MARK: - Hash & noise
 
