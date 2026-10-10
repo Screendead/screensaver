@@ -411,16 +411,19 @@ struct Hit {
     int iters;
 };
 
-static inline float heightAt(texture2d<float> hm, int2 c, int size) {
-    c = clamp(c, int2(0), int2(size - 1));
-    return hm.read(uint2(c), 0).r;
-}
-
 // Terrain height under any tree.
 static inline float groundAt(texture2d<float> hm, int2 c, int size) {
     c = clamp(c, int2(0), int2(size - 1));
     float4 col = hm.read(uint2(c), 0);
     return col.a > 0.0 ? col.g : col.r;
+}
+
+// Ground bilinearly interpolated between column centres: the continuous slope under the stairs.
+static inline float groundSmooth(texture2d<float> hm, float2 p, int size) {
+    float2 q = p - 0.5, f = fract(q);
+    int2 i = int2(floor(q));
+    return mix(mix(groundAt(hm, i, size), groundAt(hm, i + int2(1, 0), size), f.x),
+               mix(groundAt(hm, i + int2(0, 1), size), groundAt(hm, i + int2(1, 1), size), f.x), f.y);
 }
 
 static inline float3 columnAt(texture2d<float> hm, int2 c, int size) {
@@ -948,17 +951,18 @@ static float cornerAO(texture2d<float> hm, int size, int3 v, int3 n, float2 uv) 
     return mix(0.6, 1.0, pow(ao, 0.8));
 }
 
-// Fraction of open sky above a face, from how far the surrounding columns rise above it within 6 voxels.
-// One value per voxel face, so it is stable under jitter and camera motion.
-static float skyVisibility(texture2d<float> hm, int size, int3 v, int3 n, float y) {
-    int2 c = v.xz + n.xz;
+// Fraction of open sky above a point, from how far the surrounding columns rise above y within 6 voxels.
+// Heights are filtered, so a c on a column centre reads exact columns.
+static float skyVisibility(texture2d<float> hm, float2 c, float y) {
+    constexpr sampler bl(filter::linear, address::clamp_to_edge);
+    float2 inv = 1.0 / float2(hm.get_width(), hm.get_height());
     float occ = 0.0;
     const int2 dirs[8] = { int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1), int2(1, 1), int2(-1, 1), int2(1, -1), int2(-1, -1) };
     for (int i = 0; i < 8; i++) {
         float m = 0.0;
         for (int r = 1; r <= 3; r++) {
             float dist = float(r * 2) * (i < 4 ? 1.0 : 1.414);
-            float rise = heightAt(hm, c + dirs[i] * (r * 2), size) - y;
+            float rise = hm.sample(bl, (c + float2(dirs[i] * (r * 2))) * inv, level(0)).r - y;
             m = max(m, rise / sqrt(rise * rise + dist * dist));
         }
         occ += m;
@@ -1002,6 +1006,41 @@ struct Ctx {
     float dither; // per-pixel, per-frame in [0, 1); TAA resolves it
 };
 
+// Mean light reaching the stairs around p, as seen along d, averaged bilinearly over the four nearest
+// columns: a higher neighbour toward the light shades a strip of a column's tread (to contact level ct), and
+// risers sit at contact level cr, as the traced shadow had them: its origin, kept inside the hit column, starts
+// a side face's ray inside the solid.
+static float stairShadow(texture2d<float> hm, int size, float2 p, float3 L, float3 d, float ct, float cr) {
+    float2 q = p - 0.5, f = fract(q);
+    int2 c0 = int2(floor(q));
+    int2 sx = int2(L.x > 0.0 ? 1 : -1, 0), sz = int2(0, L.z > 0.0 ? 1 : -1);
+    int2 vx = int2(d.x > 0.0 ? 1 : -1, 0), vz = int2(0, d.z > 0.0 ? 1 : -1);
+    // Horizontal reach of a unit step's shadow along each axis, in columns.
+    float2 reach = abs(L.xz) / max(L.y, 0.02);
+    float lit = 0.0, area = 0.0;
+    for (int j = 0; j <= 1; j++)
+        for (int i = 0; i <= 1; i++) {
+            int2 c = c0 + int2(i, j);
+            float w = (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y);
+            float h = groundAt(hm, c, size);
+            // A step k columns toward the light covers what its shadow has left after crossing k - 1 columns.
+            float fx = 0.0, fz = 0.0;
+            for (int k = 1; k <= 2; k++) {
+                fx = max(fx, (groundAt(hm, c + sx * k, size) - h) * reach.x - float(k - 1));
+                fz = max(fz, (groundAt(hm, c + sz * k, size) - h) * reach.y - float(k - 1));
+            }
+            fx = saturate(fx);
+            fz = saturate(fz);
+            float tread = 1.0 - (1.0 - (1.0 - fx) * (1.0 - fz)) * (1.0 - ct);
+            // Risers on the camera's side of the column, by visible area.
+            float rx = max(h - groundAt(hm, c - vx, size), 0.0) * abs(d.x);
+            float rz = max(h - groundAt(hm, c - vz, size), 0.0) * abs(d.z);
+            lit += w * (abs(d.y) * tread + (rx + rz) * cr);
+            area += w * (abs(d.y) + rx + rz);
+        }
+    return lit / area;
+}
+
 static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows) {
     float3 p = o + d * h.t;
     float3 n = float3(h.normal);
@@ -1014,6 +1053,16 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     // shadows, and give risers their tread colour, so distant stairs read as contour bands, not moire.
     float wf = smoothstep(0.025, 0.20, fp);
     float3 nS = normalize(float3(s.nh.x - s.nh.y, 2.0, s.nh.z - s.nh.w));
+    // Below ~2 pixels per voxel even per-column normals, step shadows and sky visibility alias into a hatch
+    // that crawls under motion; shade the continuous slope under the stairs instead. The terrain normal is
+    // interpolated between columns even before that, or every lip and jog draws a dash.
+    float wf2 = s.mat == 0 ? smoothstep(0.2, 0.5, fp) : 0.0;
+    if (s.mat == 0 && wf > 0.0) {
+        float R = mix(1.0, max(2.0, 1.5 * fp), wf2);
+        float2 grad = float2(groundSmooth(x.hm, p.xz + float2(R, 0), x.size) - groundSmooth(x.hm, p.xz - float2(R, 0), x.size),
+                             groundSmooth(x.hm, p.xz + float2(0, R), x.size) - groundSmooth(x.hm, p.xz - float2(0, R), x.size)) / (2.0 * R);
+        nS = normalize(float3(-grad.x, 1.0, -grad.y));
+    }
     float3 nl = normalize(mix(normalize(n - float3(s.slope.x, 0.0, s.slope.y)), nS, wf));
     nl = normalize(mix(nl, float3(0, 1, 0), s.level));
     float ao = mix(mix(cornerAO(x.hm, x.size, h.voxel, h.normal, uv), 0.85, wf), 1.0, s.level) * s.canopy;
@@ -1036,9 +1085,15 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
         // Keep the origin inside the hit voxel's footprint so boundary columns can't self-shadow.
         float3 so = p + n * 0.02;
         so.xz = clamp(so.xz, float2(h.voxel.xz) + 0.002, float2(h.voxel.xz) + 0.998);
+        // Prefiltered, the ray starts a step above the column, and single steps shade by their expected cover.
+        so.y = mix(so.y, max(so.y, s.H) + 1.0, wf2);
         Hit sHit = trace(x.hm, so, x.L.key, 700.0, x.quality > 0.5 ? 120 : 48, x.globalMax, x.size);
         // Contact shadows from single-voxel steps draw sawtooth noise; keep them faint, cliffs full.
-        sh = sHit.hit ? 0.35 * (1.0 - smoothstep(2.0, 8.0, sHit.t)) : 1.0;
+        float contact = 0.35 * (1.0 - smoothstep(2.0, 8.0, 0.5 / x.L.key.y));
+        // The lift moves the ray's start about 1 / L.y along it; contact reach moves with it.
+        float reach = wf2 / max(x.L.key.y, 0.05);
+        sh = sHit.hit ? 0.35 * (1.0 - smoothstep(2.0 + reach, 8.0 + reach, sHit.t)) : 1.0;
+        if (wf2 > 0.0) sh = mix(sh, min(sh, stairShadow(x.hm, x.size, p.xz, x.L.key, d, contact, 0.35)), wf2);
         float floorSh = mix(mix(0.5, 0.25, hiSun), 0.32, x.L.gold);
         sh = mix(sh, floorSh + (1.0 - floorSh) * sh, wf);
         sh = mix(sh, 1.0, 0.3 * x.L.night);
@@ -1051,7 +1106,9 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     float3 skyFill = mix(x.L.horizon, x.L.zenith, saturate(zw + 0.15 * nl.y)) * 0.9 * lowFill * mix(1.0, 0.85, hiSun);
     // Golden hour: shade is the violet dome opposite the sun, well below the key, so hillsides keep dark values.
     skyFill *= mix(float3(1.0), float3(0.62, 0.58, 0.85), x.L.gold * x.L.sunAmt);
-    skyFill *= mix(1.0, skyVisibility(x.hm, x.size, h.voxel, h.normal, p.y), mix(0.55, 0.85, hiSun));
+    float2 svAt = mix(float2(h.voxel.xz + h.normal.xz) + 0.5, p.xz, wf2);
+    float svY = wf2 > 0.0 ? mix(p.y, groundSmooth(x.hm, p.xz, x.size), wf2) : p.y;
+    skyFill *= mix(1.0, skyVisibility(x.hm, svAt, svY), mix(0.55, 0.85, hiSun));
     // A wall sees half the dome, and the half it sees is the dimmer horizon side; without this a riser in shade
     // outshines the sunlit tread above it under a low sun.
     skyFill *= 0.5 + 0.5 * saturate(nl.y);
@@ -1326,7 +1383,7 @@ static inline float3 itmap(float3 v) { return v / max(1.0 - max(max(v.r, v.g), v
 
 // 9-tap Catmull-Rom via bilinear taps: bilinear history fetches blur edges a little more every frame the
 // camera moves, which TAA then accumulates.
-static float3 sampleCatmullRom(texture2d<float> t, sampler s, float2 uv) {
+static float4 sampleCatmullRom(texture2d<float> t, sampler s, float2 uv) {
     float2 size = float2(t.get_width(), t.get_height());
     float2 sp = uv * size;
     float2 tc = floor(sp - 0.5) + 0.5;
@@ -1337,50 +1394,78 @@ static float3 sampleCatmullRom(texture2d<float> t, sampler s, float2 uv) {
     float2 w3 = f * f * (-0.5 + 0.5 * f);
     float2 w12 = w1 + w2;
     float2 t0 = (tc - 1.0) / size, t3 = (tc + 2.0) / size, t12 = (tc + w2 / w12) / size;
-    float3 c = 0;
-    c += t.sample(s, float2(t0.x, t0.y)).rgb * w0.x * w0.y;
-    c += t.sample(s, float2(t12.x, t0.y)).rgb * w12.x * w0.y;
-    c += t.sample(s, float2(t3.x, t0.y)).rgb * w3.x * w0.y;
-    c += t.sample(s, float2(t0.x, t12.y)).rgb * w0.x * w12.y;
-    c += t.sample(s, float2(t12.x, t12.y)).rgb * w12.x * w12.y;
-    c += t.sample(s, float2(t3.x, t12.y)).rgb * w3.x * w12.y;
-    c += t.sample(s, float2(t0.x, t3.y)).rgb * w0.x * w3.y;
-    c += t.sample(s, float2(t12.x, t3.y)).rgb * w12.x * w3.y;
-    c += t.sample(s, float2(t3.x, t3.y)).rgb * w3.x * w3.y;
+    float4 c = 0;
+    c += t.sample(s, float2(t0.x, t0.y)) * w0.x * w0.y;
+    c += t.sample(s, float2(t12.x, t0.y)) * w12.x * w0.y;
+    c += t.sample(s, float2(t3.x, t0.y)) * w3.x * w0.y;
+    c += t.sample(s, float2(t0.x, t12.y)) * w0.x * w12.y;
+    c += t.sample(s, float2(t12.x, t12.y)) * w12.x * w12.y;
+    c += t.sample(s, float2(t3.x, t12.y)) * w3.x * w12.y;
+    c += t.sample(s, float2(t0.x, t3.y)) * w0.x * w3.y;
+    c += t.sample(s, float2(t12.x, t3.y)) * w12.x * w3.y;
+    c += t.sample(s, float2(t3.x, t3.y)) * w3.x * w3.y;
     return max(c, 0.0);
 }
 
-// Temporal resolve: reproject history through the previous camera (the world is static), clamp it to
-// the current 3x3 neighbourhood, and blend. Alpha carries hit distance.
+// Temporal resolve, upsampling: runs at output resolution over a jittered scene that may be smaller. Each
+// scene sample lands at its jittered position and is splatted by distance in output pixels, so detail finer
+// than a scene pixel builds up over frames. History is reprojected through the previous camera (the world
+// is static) and clamped to the scene's 3x3 neighbourhood. Scene alpha carries hit distance; history alpha
+// carries the accumulated sample weight.
 fragment float4 taaFragment(VOut in [[stage_in]], texture2d<float> cur [[texture(0)]],
                             texture2d<float> hist [[texture(1)]], constant Frame& f [[buffer(0)]]) {
     constexpr sampler lin(filter::linear, address::clamp_to_edge);
-    int2 px = int2(in.pos.xy);
-    float4 c = cur.read(uint2(px));
-    if (f.prevPos.w < 0.5 || f.misc2.z == 7) return c;
-    float3 mn = tmap(c.rgb), mx = mn;
-    int2 lim = int2(cur.get_width() - 1, cur.get_height() - 1);
+    float2 outSize = float2(hist.get_width(), hist.get_height());
+    float2 inSize = float2(cur.get_width(), cur.get_height());
+    float2 toOut = outSize / inSize;
+    // Past 2x the splat widens with the sample spacing, or pixels between samples would hardly ever update.
+    float spread = max(1.0, toOut.x * toOut.y / 4.0);
+    float2 jit = float2(f.jitter.x, -f.jitter.y) * 0.5 * inSize;
+    float2 sp = in.pos.xy / toOut - jit;
+    int2 base = int2(floor(sp));
+    int2 lim = int2(inSize) - 1;
+    float3 sum = 0, mn = 1e9, mx = -1e9;
+    float wsum = 0, depth = 1e9;
     for (int j = -1; j <= 1; j++)
         for (int i = -1; i <= 1; i++) {
-            float3 v = tmap(cur.read(uint2(clamp(px + int2(i, j), int2(0), lim))).rgb);
-            mn = min(mn, v);
-            mx = max(mx, v);
+            int2 k = clamp(base + int2(i, j), int2(0), lim);
+            float4 v = cur.read(uint2(k));
+            float2 dpx = (float2(base + int2(i, j)) + 0.5 - sp) * toOut;
+            float w = exp(-2.29 * dot(dpx, dpx) / spread);
+            float3 t = tmap(v.rgb);
+            sum += t * w;
+            wsum += w;
+            mn = min(mn, t);
+            mx = max(mx, t);
+            depth = min(depth, v.a);
         }
+    float3 c = sum / wsum;
+    float4 fresh = float4(itmap(c), wsum);
+    if (f.prevPos.w < 0.5 || f.misc2.z == 7) {
+        if (all(toOut == 1.0)) return float4(cur.read(uint2(clamp(int2(in.pos.xy), int2(0), lim))).rgb, wsum);
+        return fresh;
+    }
 
     float2 ndc = in.uv * 2.0 - 1.0;
     ndc.y = -ndc.y;
     float tanH = f.camPos.w;
     float3 d = normalize(f.camFwd.xyz + f.camRight.xyz * ndc.x * tanH * f.camFwd.w + f.camUp.xyz * ndc.y * tanH);
-    float3 wp = f.camPos.xyz + d * min(c.a, 1e5);
+    float3 wp = f.camPos.xyz + d * min(depth, 1e5);
     float3 v = wp - f.prevPos.xyz;
     float z = dot(v, f.prevFwd.xyz);
-    if (z <= 0.01) return c;
+    if (z <= 0.01) return fresh;
     float2 pn = float2(dot(v, f.prevRight.xyz) / (z * tanH * f.camFwd.w), dot(v, f.prevUp.xyz) / (z * tanH));
     float2 puv = float2(pn.x * 0.5 + 0.5, 0.5 - pn.y * 0.5);
-    if (any(puv < 0.0) || any(puv > 1.0)) return c;
+    if (any(puv < 0.0) || any(puv > 1.0)) return fresh;
     // Clamp and blend in a compressed space so sub-pixel EDR spikes can't smear or flicker.
-    float3 h = clamp(tmap(sampleCatmullRom(hist, lin, puv)), mn, mx);
-    return float4(itmap(mix(h, tmap(c.rgb), 0.12)), c.a);
+    float4 hs = sampleCatmullRom(hist, lin, puv);
+    float3 h = tmap(hs.rgb);
+    float3 hc = clamp(h, mn, mx);
+    // Capped so the blend never falls below 0.12 of a full-resolution sample's weight; a history the clamp
+    // had to move is partly stale, so it counts for less.
+    float hw = min(hs.a, 10.0) * (1.0 - smoothstep(0.02, 0.15, length(hc - h)) * 0.75);
+    float a = wsum / (wsum + hw);
+    return float4(itmap(mix(hc, c, a)), hw + wsum);
 }
 
 static inline float3 acesFit(float3 x) {

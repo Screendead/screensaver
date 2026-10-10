@@ -344,8 +344,10 @@ final class Renderer: NSObject, MTKViewDelegate {
             f.prevRight = SIMD4(SIMD3<Float>(pc.right), 0)
             f.prevUp = SIMD4(SIMD3<Float>(pc.up), 0)
         }
-        // Halton(2,3) subpixel jitter, accumulated by the temporal resolve.
-        let k = Int(frameIndex) % 8 + 1
+        // Halton(2,3) subpixel jitter, accumulated by the temporal resolve; upsampling needs more phases to
+        // cover every output pixel.
+        let phases = min(64, Int((8 / min(renderScale * renderScale, 1)).rounded(.up)))
+        let k = Int(frameIndex) % phases + 1
         func halton(_ i: Int, _ b: Int) -> Double { var f = 1.0, r = 0.0, i = i; while i > 0 { f /= Double(b); r += f * Double(i % b); i /= b }; return r }
         f.jitter = SIMD4(Float((halton(k, 2) - 0.5) * 2 / size.width), Float((halton(k, 3) - 0.5) * 2 / size.height), 0, 0)
         return f
@@ -353,11 +355,14 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     func encode(into cb: MTLCommandBuffer, output: MTLTexture, outputSize: CGSize) {
         let w = max(16, Int(outputSize.width * renderScale)), h = max(16, Int(outputSize.height * renderScale))
-        if sceneTex?.width != w || sceneTex?.height != h {
+        let ow = Int(outputSize.width), oh = Int(outputSize.height)
+        if sceneTex?.width != w || sceneTex?.height != h || history.first?.width != ow || history.first?.height != oh {
             let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: w, height: h, mipmapped: false)
             td.usage = [.renderTarget, .shaderRead]
             td.storageMode = .private
             sceneTex = device.makeTexture(descriptor: td)
+            td.width = ow
+            td.height = oh
             history = (0..<2).compactMap { _ in device.makeTexture(descriptor: td) }
             prevCamera = nil
         }
@@ -463,18 +468,25 @@ enum Snapshot {
             if let phase = settings.phase { r.clock.phase = phase }
             simulated = t
             var times: [Double] = []
-            for _ in 0..<(ProcessInfo.processInfo.environment["VR_MOTION"] != nil ? 48 : 12) {
-                if ProcessInfo.processInfo.environment["VR_MOTION"] != nil { r.simulate(1.0 / 60) }
+            let env = ProcessInfo.processInfo.environment
+            let frames = env["VR_MOTION"] != nil ? 48 : 12
+            // VR_FRAMES=n also writes each of the last n frames, for measuring frame-to-frame crawl.
+            let dump = min(Int(env["VR_FRAMES"] ?? "") ?? 0, frames)
+            var bytes = [UInt8](repeating: 0, count: w * h * 4)
+            let out = settings.screenshotTimes.count > 1 ? path.replacingOccurrences(of: ".png", with: "_t\(Int(t)).png") : path
+            for i in 0..<frames {
+                if env["VR_MOTION"] != nil { r.simulate(1.0 / 60) }
                 let cb = r.queue.makeCommandBuffer()!
-                let t0 = CACurrentMediaTime()
                 r.encode(into: cb, output: tex, outputSize: CGSize(width: w, height: h))
                 cb.commit()
                 cb.waitUntilCompleted()
-                times.append((CACurrentMediaTime() - t0) * 1000)
+                times.append((cb.gpuEndTime - cb.gpuStartTime) * 1000)
+                if i >= frames - dump {
+                    tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+                    write(bytes: bytes, width: w, height: h, to: out.replacingOccurrences(of: ".png", with: "_f\(i - frames + dump).png"))
+                }
             }
-            var bytes = [UInt8](repeating: 0, count: w * h * 4)
             tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
-            let out = settings.screenshotTimes.count > 1 ? path.replacingOccurrences(of: ".png", with: "_t\(Int(t)).png") : path
             write(bytes: bytes, width: w, height: h, to: out)
             print(String(format: "t=%.0f phase=%.3f sunY=%.2f exposure=%.2f cam=(%.0f,%.0f,%.0f) gpu=%.1fms -> %@", t, r.clock.phase,
                          r.clock.sunDirection.y, r.exposure, r.camera.position.x, r.camera.position.y, r.camera.position.z, times.min()!, out))
