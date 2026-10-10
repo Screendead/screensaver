@@ -319,7 +319,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     private let lightMap: MTLTexture
     private let lightDir: MTLTexture
     static let lightTexels = 512, hazeLamps = 16
-    private var hazeRefs = [Int32](repeating: 0, count: 16)
+    // Lamp indices: 16 haze lamps, then 12 smoke sources (and 4 spare).
+    private var hazeRefs = [Int32](repeating: 0, count: 32)
+    static let smokePlumes = 12
+    private var smokeCount = 0
     static let ditherCells = 864.0
     private var historyIndex = 0
     private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
@@ -465,6 +468,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         let progress = ph < 0.25 ? 1.0 : min(max((ph - 0.52) / 0.46, 0), 1)
         f.lights = SIMD4(Float(sunY), Float(progress), Float(clock.day), Float(min(max((0.08 - sunY) / 0.1, 0), 1)))
         f.refs = SIMD4(Int32(f.lights.w > 0 ? hazeCount : 0), 0, 0, 0)
+        pickSmoke()
+        f.refs.y = Int32(smokeCount)
         if let pc = prevCamera {
             let pp = pc.pos - o
             f.prevPos = SIMD4(Float(pp.x), Float(pp.y), Float(pp.z), 1)
@@ -525,7 +530,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentTexture(lightDir, index: 5)
             enc.setFragmentBuffer(lampPos, offset: 0, index: 2)
             enc.setFragmentBuffer(lampState, offset: 0, index: 3)
-            enc.setFragmentBytes(&hazeRefs, length: 64, index: 4)
+            enc.setFragmentBytes(&hazeRefs, length: 128, index: 4)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
         }
@@ -570,6 +575,23 @@ final class Renderer: NSObject, MTKViewDelegate {
         near.sort { $0.0 < $1.0 }
         hazeCount = min(near.count, Renderer.hazeLamps)
         for i in 0..<hazeCount { hazeRefs[i] = Int32(near[i].1) }
+    }
+
+    // Fires and chimneys within 600 that the camera can see, nearest first.
+    private func pickSmoke() {
+        let cam = camera.position
+        let fwd = camera.basis.fwd
+        var near: [(Double, Int)] = []
+        for site in world.sites {
+            for l in site.lamps where l.rise > 0 {
+                let v = l.pos + SIMD3(0, l.rise, 0) - cam
+                let d = simd_length(v)
+                if d < 600, d < 40 || simd_dot(v, fwd) > -0.2 * d { near.append((d, l.index)) }
+            }
+        }
+        near.sort { $0.0 < $1.0 }
+        smokeCount = min(near.count, Renderer.smokePlumes)
+        for i in 0..<smokeCount { hazeRefs[16 + i] = Int32(near[i].1) }
     }
 
     private func bakeLamps(into cb: MTLCommandBuffer, frame f: inout Frame) {

@@ -19,7 +19,7 @@ struct Frame {
     float4 jitter;     // xy subpixel jitter in NDC
     float4 cloud;      // xy cloud field origin in drifted world xz, z field texel size (0: no field)
     float4 lights;     // x sun elevation, y night progress (0 dusk .. 1 dawn), z day index, w lamp light on the land (0 by day)
-    int4   refs;       // x lamps in the haze list
+    int4   refs;       // x lamps in the haze list, y smoke plumes
 };
 
 constant float SEA = 19.85;
@@ -2329,6 +2329,52 @@ static float3 softCloudSky(thread const Ctx& x, float3 o, float3 r) {
     return mix(sky, lit, dens * 0.4 * exp(-t / 2600.0));
 }
 
+// Smoke from the nearest fires and chimneys: each plume bends downwind as it rises (two straight pieces) and
+// thins out by 28 voxels up. Rays take the plume's density at their closest approach to its axis.
+static float4 smoke(thread const Ctx& x, device const Site* sites, device const float4* pos, device const float4* state,
+                    constant int4* refs, int count, float3 o, float3 d, float tSurf) {
+    const float2 wind = float2(0.825336, 0.564642);
+    float3 acc = 0;
+    float a = 0;
+    for (int i = 0; i < count; i++) {
+        int li = refs[4 + i / 4][i % 4];
+        float4 lp = pos[li];
+        float rise = floor(sites[li / MAX_LAMPS].lamps[li % MAX_LAMPS].w / 16.0);
+        float3 b0 = lp.xyz + float3(0, rise, 0);
+        float strength = int(lp.w) == L_WINDOW ? 0.55 : 1.0;
+        // The whole plume lies within 16 of a point 14 up and 6 downwind.
+        float3 mid = b0 + float3(wind.x * 6.0, 14.0, wind.y * 6.0) - o;
+        float tm = dot(mid, d);
+        if (dot(mid, mid) - tm * tm > 256.0 && dot(mid, mid) > 256.0) continue;
+        for (int k = 0; k < 2; k++) {
+            float h0 = k == 0 ? 0.0 : 10.0, h1 = k == 0 ? 10.0 : 28.0;
+            float3 A = b0 + float3(wind.x, 0, wind.y) * (0.15 * h0 + 0.012 * h0 * h0) + float3(0, h0, 0);
+            float3 B = b0 + float3(wind.x, 0, wind.y) * (0.15 * h1 + 0.012 * h1 * h1) + float3(0, h1, 0);
+            // Closest points between the ray and the segment AB.
+            float3 u = B - A, w0 = o - A;
+            float bb = dot(d, u), cc = dot(u, u), dd = dot(d, w0), ee = dot(u, w0);
+            float den = cc - bb * bb;
+            float sP = den > 1e-4 ? saturate((ee - bb * dd) / den) : 0.0;
+            float tR = dot(A + u * sP - o, d);
+            if (tR <= 0.0 || tR >= tSurf) continue;
+            float dist = length(o + d * tR - (A + u * sP));
+            float hgt = mix(h0, h1, sP);
+            float r = 0.6 + 0.12 * hgt;
+            float dens = exp(-(dist / r) * (dist / r)) * (1.0 - hgt / 28.0) * strength;
+            if (dens < 0.01) continue;
+            float3 wp = o + d * tR + float3(float(x.origin.x), 0, float(x.origin.y));
+            dens *= saturate(0.55 + 0.8 * perlin3(wp / 2.5 - float3(0, x.time * 1.2, 0), x.seed + 330u));
+            float al = min(0.28, dens * 0.35) * (1.0 - a);
+            // Grey by day; fire-lit from below at night, over a faint moonlit grey.
+            float3 day = (x.L.zenith * 0.6 + x.L.horizon * 0.5 + x.L.keyCol * 0.25 * max(x.L.key.y, 0.0)) * 0.9;
+            float3 night = state[li].rgb * LAMP_I[int(lp.w)] * 0.12 * (1.0 - smoothstep(0.0, 12.0, hgt)) + float3(0.012, 0.014, 0.02);
+            acc += al * mix(day, night, x.L.night);
+            a += al;
+        }
+    }
+    return float4(acc, a);
+}
+
 fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0)]],
                               texture2d<float> hm [[texture(0)]], texture2d<float> cloudTex [[texture(1)]],
                               texture2d<float> clim [[texture(2)]], texture2d<uint> st [[texture(3)]],
@@ -2465,6 +2511,10 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     } else {
         float4 sky = skyWithClouds(x, o, d);
         if (x.lights.w > 0.0 && f.refs.x > 0) sky.rgb += lampHaze(lampPos, lampState, refs, f.refs.x, o, d, 2500.0) * 0.05 * x.lights.w;
+        if (f.refs.y > 0) {
+            float4 sm = smoke(x, sites, lampPos, lampState, refs, f.refs.y, o, d, 1e9);
+            sky.rgb = sky.rgb * (1.0 - sm.a) + sm.rgb;
+        }
         return sky;
     }
     if (f.misc2.z == 8) {
@@ -2488,6 +2538,13 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     // The sea runs on past the map, so by night it reflects the sky out to the horizon.
     if (f.misc2.z != 2) col = applyFog(x, col, o, d, tSurf, water ? 1.0 - x.L.night : 1.0);
     if (x.lights.w > 0.0 && f.refs.x > 0) col += lampHaze(lampPos, lampState, refs, f.refs.x, o, d, tSurf) * 0.05 * x.lights.w;
+    if (f.refs.y > 0) {
+        float4 sm = smoke(x, sites, lampPos, lampState, refs, f.refs.y, o, d, tSurf);
+        if (sm.a > 0.0) {
+            float T = fogTransmittance(x, o, d, min(tSurf, 600.0));
+            col = col * (1.0 - sm.a * T) + sm.rgb * T;
+        }
+    }
     return float4(col, tSurf);
 }
 
