@@ -121,6 +121,10 @@ static inline float desertAmount(Climate c) {
     return smoothstep(0.45, 0.68, c.temp) * smoothstep(0.7, 0.4, c.moist);
 }
 
+static inline float lagoonAmount(Climate c) {
+    return smoothstep(0.47, 0.65, c.temp) * smoothstep(0.47, 0.65, c.moist);
+}
+
 // Column = (height, gapLo, gapHi): solid where y < height, except inside [gapLo, gapHi).
 static inline float3 terrainColumn(int2 w, uint seed) {
     float2 p = float2(w) + seedOffset(seed);
@@ -141,7 +145,8 @@ static inline float3 terrainColumn(int2 w, uint seed) {
     h = (lv + smoothstep(mix(0.55, 0.9, hi), 1.0, hn2 - lv)) * td;
 
     // Canyon country: in hot, dry regions the land steps into flat-topped mesas with sheer risers.
-    float canyon = smoothstep(0.35, 0.7, desertAmount(climate(float2(w), seed)));
+    Climate cl = climate(float2(w), seed);
+    float canyon = smoothstep(0.35, 0.7, desertAmount(cl));
     float tier = 13.0 + 4.0 * perlin2(p / 700.0, seed + 7);
     float hn = h / tier;
     float level = floor(hn);
@@ -151,9 +156,17 @@ static inline float3 terrainColumn(int2 w, uint seed) {
     // Long meandering valleys with flat water floors: the camera follows these.
     float river = abs(fbm2((p + warp * 0.6) / 1400.0, 3, seed + 6));
     float valley = smoothstep(0.02, 0.30 + 0.10 * hi, river);
-    h = floor(max(mix(SEA - 3.0, h, valley), 2.0));
+    h = mix(SEA - 3.0, h, valley);
+    // Lagoon shallows: the land sinks to a sandy bed rolling a few voxels either side of the surface,
+    // so sand bars and islets break it and channels run deeper between them.
+    float lagoon = lagoonAmount(cl);
+    if (lagoon > 0.0) {
+        float bed = fbm2((p + warp * 0.3) / 210.0, 3, seed + 15u) + 0.25 * perlin2(p / 600.0, seed + 16u);
+        h = mix(h, SEA - 2.5 + bed * 14.0, lagoon);
+    }
+    h = floor(max(h, 2.0));
     // Lake beds are one flat shelf: submerged terraces read as stepping stones under the surface.
-    if (h < SEA) h = floor(SEA) - 2.0;
+    if (h < SEA) h = floor(mix(floor(SEA) - 2.0, h, lagoon) + 0.5);
 
     // Arches and undercuts: noise blobs hollow out a band low in each mesa tier.
     float gl = 0, gh = 0;
@@ -211,8 +224,10 @@ static inline float groveDensity(float2 w, float g, uint seed) {
     float open = 1.0 - smoothstep(0.2, 0.5, desertAmount(c));
     float wet = smoothstep(0.25, 0.6, c.moist) * open;
     float snowline = mix(160.0, 92.0, smoothstep(0.42, 0.18, c.temp));
-    float band = smoothstep(SEA + 2.0, SEA + 6.0, g) * smoothstep(snowline - 4.0, snowline - 30.0, g);
-    float dense = smoothstep(0.22, 0.44, grove + 0.35 * (wet - 0.5));
+    // Lagoon islets are only a few voxels high, so their groves start right above the sand.
+    float lagoon = lagoonAmount(c);
+    float band = smoothstep(mix(SEA + 2.0, SEA + 1.0, lagoon), mix(SEA + 6.0, SEA + 2.5, lagoon), g) * smoothstep(snowline - 4.0, snowline - 30.0, g);
+    float dense = smoothstep(0.22, 0.44, grove + 0.35 * (wet - 0.5) + 0.3 * lagoon);
     // Lone trees dot even dry grassland; groves need moisture.
     return (0.02 * open + 0.32 * dense * wet) * band;
 }
@@ -671,7 +686,9 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
 
     float3 grassWet = float3(0.12, 0.20, 0.13), grassDry = float3(0.40, 0.34, 0.16), grassCold = float3(0.20, 0.23, 0.17);
     float3 grass = mix(mix(grassDry, grassWet, smoothstep(0.3, 0.7, c.moist)), grassCold, cold);
-    float3 sand = float3(0.47, 0.41, 0.29);
+    float lagoon = smoothstep(0.0, 0.35, lagoonAmount(c));
+    grass = mix(grass, float3(0.14, 0.20, 0.12), lagoon);
+    float3 sand = mix(float3(0.47, 0.41, 0.29), float3(0.60, 0.53, 0.39), lagoon);
     float3 desertTop = float3(0.54, 0.34, 0.19);
     float3 tread = mix(grass, desertTop, desert) * (0.95 + 0.1 * perlin2(wq / 40.0, seed + 30u));
     // Broad, soft mottling: a little warmer and drier in one drift, cooler and lusher in the next.
@@ -1049,7 +1066,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         float e0 = perlin3(float3(ww * 0.3, x.time * 0.25), x.seed + 60u);
         float ex = perlin3(float3((ww + float2(0.05, 0)) * 0.3, x.time * 0.25), x.seed + 60u);
         float ez = perlin3(float3((ww + float2(0, 0.05)) * 0.3, x.time * 0.25), x.seed + 60u);
-        float rs = max(0.35 * saturate(1.0 - tw * x.pixelAngle * 4.0), 0.08 * x.L.night);
+        float lagoon = smoothstep(0.0, 0.35, lagoonAmount(climate(ww, x.seed)));
+        float rs = max(0.35 * saturate(1.0 - tw * x.pixelAngle * 4.0) * (1.0 - 0.6 * lagoon), 0.08 * x.L.night);
         float3 n = normalize(float3(-(ex - e0) * rs, 1.0, -(ez - e0) * rs));
         float3 r = reflect(d, n);
         r.y = abs(r.y);
@@ -1065,8 +1083,26 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         float3 under = deep;
         if (h.hit) {
             float path = h.t - tw;
-            float3 lit = shade(x, o, d, h, false);
+            // Lagoon beds are lit by sunlight refracted steeply down through the surface. Flux per horizontal
+            // area is kept (less what the surface reflects), so the light is redistributed from risers to treads.
+            Ctx xr = x;
+            float2 kh = x.L.key.xz / 1.33;
+            float3 kr = float3(kh.x, sqrt(max(1.0 - dot(kh, kh), 0.0)), kh.y);
+            float ky = max(x.L.key.y, 0.0);
+            xr.L.key = normalize(mix(x.L.key, kr, lagoon));
+            xr.L.keyCol *= mix(1.0, ky / kr.y * (0.98 - 0.98 * pow(1.0 - ky, 5.0)), lagoon);
+            float3 lit = shade(xr, o, d, h, false);
             under = mix(deep, lit * float3(0.55, 0.8, 0.85), exp(-path * 0.35));
+            if (lagoon > 0.0) {
+                // Clear water over sand: red is absorbed first, so the bed turns aquamarine, then teal, then blue.
+                // Light crosses the water twice: down to the bed, then up along the view path.
+                float3 T = exp(-(path + SEA - (o.y + d.y * h.t)) * float3(0.30, 0.09, 0.065));
+                float3 glow = (x.L.zenith * 0.6 + x.L.keyCol * max(x.L.key.y, 0.0) * 0.12) * float3(0.06, 0.30, 0.50);
+                float3 lag = lit * T + glow * (1.0 - T.g);
+                // Keep the shallows soft rather than swimming-pool cyan; moonlit, only a hint of colour remains.
+                lag = mix(lag, float3(dot(lag, float3(0.3, 0.59, 0.11))), 0.35 + 0.25 * x.L.night) * 0.9;
+                under = mix(under, lag, lagoon);
+            }
         }
         under *= 1.0 - 0.4 * x.L.night;
         float cosi = saturate(-dot(d, n));
