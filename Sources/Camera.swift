@@ -113,6 +113,8 @@ final class FlightCamera {
         // screen stays sky (or land) for long. Smoothstep dwells at each extreme.
         var s = 0.5 + 0.5 * sin(time * 2 * .pi / 230 + 0.6 * sin(time * 0.0047))
         if sun.y < -0.2 { s *= 0.65 } // keep stars and moon in the upper frame at night
+        // High sun flattens a straight-down view; favour horizon vistas with ridges and cloud shadows.
+        if sun.y > 0.35 { s *= 0.55 }
         // Facing a low sun or moon: lift the view so the light and its water path stay in frame.
         s *= 1 - 0.6 * facing
         // Twilight looking away from the light: look down at the backlit lips rather than an empty wash.

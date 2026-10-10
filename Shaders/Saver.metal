@@ -152,6 +152,8 @@ static inline float3 terrainColumn(int2 w, uint seed) {
     float river = abs(fbm2((p + warp * 0.6) / 1400.0, 3, seed + 6));
     float valley = smoothstep(0.02, 0.30 + 0.10 * hi, river);
     h = floor(max(mix(SEA - 3.0, h, valley), 2.0));
+    // Lake beds are one flat shelf: submerged terraces read as stepping stones under the surface.
+    if (h < SEA) h = floor(SEA) - 2.0;
 
     // Arches and undercuts: noise blobs hollow out a band low in each mesa tier.
     float gl = 0, gh = 0;
@@ -532,7 +534,7 @@ static inline float cloudDensity(float2 q, uint seed, float time, float cover) {
 static inline float cloudShadow(float3 p, float3 L, int2 mapOrigin, uint seed, float time, float cover) {
     if (L.y <= 0.02) return 1.0;
     float2 q = p.xz + L.xz / L.y * (CLOUD_Y - p.y) + float2(mapOrigin);
-    return mix(1.0, 0.6, smoothstep(0.0, 0.14, cloudDensity(q, seed, time, cover)));
+    return mix(1.0, mix(0.6, 0.5, smoothstep(0.3, 0.6, L.y)), smoothstep(0.0, 0.14, cloudDensity(q, seed, time, cover)));
 }
 
 struct Ctx {
