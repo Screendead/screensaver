@@ -601,7 +601,7 @@ static bool buildHamlet(texture2d<float, access::read> hm, thread SiteGen& G, in
         int ridge = flat ? floorY + 3 : eave + (Dt - 1) / 2 + 1;
         bool chim = !flat && ((hh >> 3) & 1u) != 0u;
         int lamp = addLamp(G, float3(float(pos.x - c.x) + 0.5, float(floorY) + 1.2, float(pos.y - c.y) + 0.5), L_WINDOW,
-                           chim || flat ? float(ridge) + 1.0 - (float(floorY) + 1.2) : 0.0);
+                           chim ? float(ridge) + 1.0 - (float(floorY) + 1.2) : 0.0);
         int flags = (axisZ ? F_AXISZ : 0) | (flat ? F_FLAT : 0) | (stilt ? F_STILT | F_WATER : 0) | (chim ? F_CHIMNEY : 0)
                   | ((lamp + 1) << 8) | (variant << 12);
         int wall = variant == 2 ? M_STONE : flat ? M_PLASTER : ((hh >> 4) & 3u) == 0u ? M_TIMBER : M_PLASTER;
@@ -2341,7 +2341,11 @@ static float4 smoke(thread const Ctx& x, device const Site* sites, device const 
         float4 lp = pos[li];
         float rise = floor(sites[li / MAX_LAMPS].lamps[li % MAX_LAMPS].w / 16.0);
         float3 b0 = lp.xyz + float3(0, rise, 0);
-        float strength = int(lp.w) == L_WINDOW ? 0.55 : 1.0;
+        int kind = int(lp.w);
+        float strength = kind == L_WINDOW ? 0.4 : 0.8;
+        // Beacons and ritual fires smoke only on the nights they burn.
+        if (kind == L_BEACON || kind == L_RITUAL) strength *= saturate(dot(state[li].rgb, float3(0.3, 0.59, 0.11)) * 4.0);
+        if (strength <= 0.0) continue;
         // The whole plume lies within 16 of a point 14 up and 6 downwind.
         float3 mid = b0 + float3(wind.x * 6.0, 14.0, wind.y * 6.0) - o;
         float tm = dot(mid, d);
