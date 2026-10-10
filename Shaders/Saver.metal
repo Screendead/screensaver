@@ -1489,7 +1489,8 @@ static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t) 
     float clear = mix(1.0, 0.15, smoothstep(0.2, 0.45, x.L.sun.y));
     // Night air is crisp: moonlit ridges stay legible to the horizon.
     clear *= mix(1.0, 0.35, x.L.night);
-    float air = K * (1.0 - exp(-c2 * t * t / K)) + lambda * t;
+    // The tail eases in, leaving the haze within a few percent of the old quadratic out to ~600.
+    float air = K * (1.0 - exp(-c2 * t * t / K)) + lambda * t * t / (t + 1500.0);
     return exp(-((heightTerm + air + mist) * clear + 6.0 * smoothstep(x.tr.fadeStart, x.tr.rmax, r)));
 }
 
@@ -1497,7 +1498,7 @@ static float3 applyFog(thread const Ctx& x, float3 col, float3 o, float3 d, floa
     float T = fogTransmittance(x, o, d, t);
     // Thin haze in-scatters less than the full horizon radiance; only thick fog converges on the sky.
     // Forward scatter fades out above the horizon as the sky's does, so fully hazed land matches the sky behind it.
-    float scatter = min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night) * mix(1.0, smoothstep(0.1, 0.0, d.y), 1.0 - T);
+    float scatter = min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night) * mix(1.0, smoothstep(0.1, 0.0, d.y), smoothstep(0.5, 0.0, T));
     float3 f = (fogColor(x, d, T) + x.L.keyCol * scatter) * mix(mix(0.3, 0.12, x.L.gold), 1.0, smoothstep(0.1, 0.9, 1.0 - T));
     return mix(f, col, T);
 }
