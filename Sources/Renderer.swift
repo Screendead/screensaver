@@ -595,7 +595,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     // coordinates) and re-baked when the camera nears its edge.
     private var cloudTex: MTLTexture?
     private var cloudCenter: SIMD2<Double>?
-    static let cloudTexels = 2048, cloudTexel = 4.0
+    static let cloudTexels = 2048, cloudTexel = 14.0
     private var history: [MTLTexture] = []
     // Lamps: per-frame position and state (schedule, flicker), and their light baked onto the map.
     private let lampPipeline: MTLComputePipelineState
@@ -1050,7 +1050,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         guard let cloudTex else { return }
         // Must match CLOUD_DRIFT in Shaders/Saver.metal.
-        let drift = SIMD2(cos(0.6), sin(0.6)) * 1.6 * Double(Float(simTime))
+        let drift = SIMD2(cos(0.6), sin(0.6)) * 4.8 * Double(Float(simTime))
         let cam = SIMD2(camera.position.x, camera.position.z) - drift
         if cloudCenter.map({ simd_length(cam - $0) > span * 0.2 }) ?? true,
            let enc = cb.makeComputeCommandEncoder() {

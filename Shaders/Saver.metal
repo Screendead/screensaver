@@ -1861,10 +1861,13 @@ static inline float3 strataTone(float y, float2 w, uint seed, float desertAmt, f
         float f = saturate(perlin2(float2(yd / 170.0 + 0.6 * perlin2(w / 2600.0, seed + 29u), 0.13), seed + 30u) * 0.8 + 0.5) * 3.0;
         float fi = min(floor(f), 2.0), ff = smoothstep(0.35, 0.65, f - fi);
         const float3 warm[4] = { float3(0.62, 0.56, 0.47), float3(0.55, 0.31, 0.21), float3(0.34, 0.31, 0.30), float3(0.60, 0.47, 0.33) };
-        const float3 cool[4] = { float3(0.46, 0.46, 0.45), float3(0.30, 0.30, 0.32), float3(0.40, 0.37, 0.33), float3(0.22, 0.23, 0.25) };
+        const float3 cool[4] = { float3(0.48, 0.47, 0.44), float3(0.27, 0.28, 0.31), float3(0.42, 0.36, 0.29), float3(0.20, 0.21, 0.24) };
         float wm = saturate(desertAmt + 0.5);
         float3 fa = mix(cool[int(fi)], warm[int(fi)], wm), fb = mix(cool[int(fi) + 1], warm[int(fi) + 1], wm);
         base = mix(base, mix(fa, fb, ff), 0.7 * fz);
+        // Weathering: stains and lichen in broad drifts, so a great face never reads as one flat grey plane.
+        float st = perlin2(w / 70.0, seed + 34u) + 0.5 * perlin2(w / 23.0 + yd / 40.0, seed + 35u) * (1.0 - smoothstep(1.0, 4.0, fp));
+        base *= 1.0 + 0.22 * fz * st;
     }
 
     float yb = yd / 2.4;
@@ -1965,7 +1968,9 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     // Painted-hill beds belong to low mounds; on the great walls their 11-voxel bands would read as stripes.
     float painted = smoothstep(0.0, 0.6, paintedAmount(c)) * (1.0 - smoothstep(150.0, 350.0, H));
     float snowline = snowlineAt(c.temp) + 5.0 * perlin2(w / 160.0, seed + 21u)
-                   + 60.0 * perlin2(w / 700.0, seed + 28u) * smoothstep(150.0, 400.0, H);
+                   + 60.0 * perlin2(w / 700.0, seed + 28u) * smoothstep(150.0, 400.0, H)
+    // On the ranges rock breaks through the lower snowfields in drifts, so a massif is not one white sheet.
+                   + 260.0 * saturate(perlin2(w / 90.0, seed + 33u) * 0.9 + 0.45) * smoothstep(150.0, 450.0, H);
     c.temp = altitudeTemp(c.temp, H);
     float cold = smoothstep(0.42, 0.18, c.temp);
     float autumn = autumnAmount(c);
@@ -2301,13 +2306,17 @@ static inline float2 faceUV(float3 p, int3 n, float s) {
 
 // MARK: - Clouds
 
-constant float CLOUD_Y = 240.0; // above the tallest peaks
+// Cumulus base about 1100, over all but the alpine summits and the tepuis, which pierce it. The whole cloud field
+// is scaled by CLOUD_S from its original 240-high design, so from cruise height the sky looks as before.
+constant float CLOUD_Y = 1100.0;
+constant float CLOUD_S = 3.5;
+constant float CLOUD_Y0 = CLOUD_Y - 10.0 * CLOUD_S, CLOUD_Y1 = CLOUD_Y + 34.0 * CLOUD_S;
 
 // Coverage = a fine fbm part, which only drifts with the wind, and a slow part (one broad, slowly evolving
 // octave plus the cover offset).
-constant float2 CLOUD_DRIFT = float2(0.825336, 0.564642) * 1.6; // (cos 0.6, sin 0.6) units per second
+constant float2 CLOUD_DRIFT = float2(0.825336, 0.564642) * 4.8; // (cos 0.6, sin 0.6) units per second
 
-static inline float cloudFineAt(float2 qd, uint seed) { return fbm2(qd / 300.0, 3, seed + 40u); }
+static inline float cloudFineAt(float2 qd, uint seed) { return fbm2(qd / (300.0 * CLOUD_S), 3, seed + 40u); }
 
 static inline float cloudFine(float2 q, uint seed, float time) { return cloudFineAt(q - CLOUD_DRIFT * time, seed); }
 
@@ -2320,8 +2329,8 @@ kernel void cloudField(texture2d<float, access::write> out [[texture(0)]],
 }
 
 static inline float cloudSlow(float2 q, uint seed, float time, float cover) {
-    q -= float2(cos(0.6), sin(0.6)) * time * 1.6;
-    return perlin3(float3(q / 520.0, time * 0.004), seed + 41u) * 0.35 + cover - 0.5;
+    q -= float2(cos(0.6), sin(0.6)) * time * 4.8;
+    return perlin3(float3(q / (520.0 * CLOUD_S), time * 0.004), seed + 41u) * 0.35 + cover - 0.5;
 }
 
 static inline float cloudDensity(float2 q, uint seed, float time, float cover) {
@@ -2363,10 +2372,11 @@ static inline float cloudFineBaked(thread const Ctx& x, float2 q) {
 }
 
 static inline float cloudShadow(thread const Ctx& x, float3 p, float3 L) {
-    if (L.y <= 0.02) return 1.0;
+    if (L.y <= 0.02 || p.y >= CLOUD_Y1) return 1.0;
     float2 q = p.xz + L.xz / L.y * (CLOUD_Y - p.y) + float2(x.origin);
     float dens = cloudFineBaked(x, q) + cloudSlow(q, x.seed, x.time, x.cover);
-    return mix(1.0, mix(0.6, 0.32, smoothstep(0.3, 0.5, L.y)), smoothstep(0.0, 0.14, dens));
+    // Land inside the slab is in its cloud; land above it is in sunlight.
+    return mix(1.0, mix(0.6, 0.32, smoothstep(0.3, 0.5, L.y)), smoothstep(0.0, 0.14, dens) * smoothstep(CLOUD_Y1, CLOUD_Y0, p.y));
 }
 
 // MARK: - Shadow-height maps
@@ -2734,21 +2744,22 @@ struct CloudSample { float3 col; float a; float t; };
 // Clouds: a volumetric slab above the peaks, marched in a few steps. The same noise field sets the
 // coverage; tops tower where it is dense, and each sample is self-shadowed toward the sun, so clouds have
 // lit crowns and shaded bases instead of reading as flat cut-outs.
-static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d) {
+// tEnd clips the march at terrain that rises into the slab, so a peak disappears into the cloud base.
+static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float tEnd = 1e9) {
     CloudSample c;
     c.col = 0; c.a = 0; c.t = 6e4;
     if (d.y < 0.01) return c;
-    float y0 = CLOUD_Y - 10.0, y1 = CLOUD_Y + 34.0;
+    float y0 = CLOUD_Y0, y1 = CLOUD_Y1;
     float ta = (y0 - o.y) / d.y, tb = (y1 - o.y) / d.y;
-    float t0 = max(min(ta, tb), 0.0), t1 = max(ta, tb);
-    if (t0 > 7000.0) return c;
+    float t0 = max(min(ta, tb), 0.0), t1 = min(max(ta, tb), tEnd);
+    if (t0 > 7000.0 * CLOUD_S || t1 <= t0) return c;
     // Night steps are dithered, so fewer suffice.
     int steps = x.quality > 0.5 ? (x.L.night > 0.99 ? 9 : 14) : 8;
     float dt = (t1 - t0) / float(steps);
     float lowSun = 1.0 - smoothstep(0.02, 0.28, abs(x.L.sun.y));
     float2 dh = normalize(d.xz + 1e-5), sh2 = normalize(x.L.sun.xz + 1e-5);
     float toSun = 0.5 + 0.5 * dot(dh, sh2);
-    float2 sunStep = x.L.key.xz / max(x.L.key.y, 0.2) * 14.0;
+    float2 sunStep = x.L.key.xz / max(x.L.key.y, 0.2) * 14.0 * CLOUD_S;
     float3 ambient = x.L.zenith * 1.0 + x.L.horizon * 0.35;
     float3 moonGlow = float3(0.10, 0.13, 0.22) * pow(saturate(dot(d, x.L.moon)), 16.0) * 0.9;
     float glowAmt = lowSun * smoothstep(-0.14, -0.02, x.L.sun.y);
@@ -2758,7 +2769,7 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d) {
     float jit = 0.5 + x.L.night * (x.dither - 0.5);
     // The slow part varies over hundreds of units: sample it at knots ~40 units apart along the ray (or one
     // per step, if those are further apart) and interpolate; only the fine part is evaluated per step.
-    float kt = max(40.0 / max(length(d.xz), 1e-4), dt);
+    float kt = max(40.0 * CLOUD_S / max(length(d.xz), 1e-4), dt);
     float ka = t0, kb = t0 + kt;
     float2 qa = (o.xz + d.xz * ka) + float2(x.origin), qb = (o.xz + d.xz * kb) + float2(x.origin);
     float sa = cloudSlow(qa, x.seed, x.time, x.cover), sb = cloudSlow(qb, x.seed, x.time, x.cover);
@@ -2780,7 +2791,7 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d) {
         // Night: a finer octave frays the edges into wisps for the moon to light through. Its octaves are turned off
         // the grid axes, or thresholded lattice cells read as boxes, and it fades in, or its gate draws an edge.
         if (x.L.night > 0.0 && base > -0.15) {
-            float2 qd = q - float2(x.time * 1.3, 0);
+            float2 qd = (q - float2(x.time * 1.3 * 3.0, 0)) / CLOUD_S;
             float fray = 0.16 * perlin2(OCT_ROT * qd / 90.0, x.seed + 42u) + 0.07 * perlin2(transpose(OCT_ROT) * qd / 33.0, x.seed + 43u)
                        + 0.035 * perlin2(OCT_ROT * OCT_ROT * qd / 13.0, x.seed + 44u);
             base += x.L.night * fray * smoothstep(-0.15, -0.05, base);
@@ -2806,7 +2817,7 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d) {
         lit += float3(1.6, 0.55, 0.20) * glowAmt * mix(toSun, toSun * toSun * 1.2, x.L.gold) * (1.0 - h01) * 0.9;
         // Moonlit cloud is a dim blue-grey, only a little above the sky behind it.
         lit = mix(lit, float3(0.022, 0.027, 0.042) * (0.5 + 0.7 * shadow) + x.L.skyHor * 0.8 + moonGlow, x.L.night);
-        float a = 1.0 - exp(-dens * dt * mix(0.05, 0.045, x.L.night));
+        float a = 1.0 - exp(-dens * dt * mix(0.05, 0.045, x.L.night) / CLOUD_S);
         acc += T * a * lit;
         silver += T * a * shadow;
         T *= 1.0 - a;
@@ -2821,7 +2832,7 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d) {
     float fringe = silver / max(cover, 1e-3) * (1.0 - cover);
     c.col += float3(0.70, 0.80, 1.0) * x.L.night * min(hg(cm, 0.92) * 0.25, 1.5) * fringe;
     c.col *= mix(1.0, 0.9, smoothstep(0.3, 0.5, x.L.sun.y));
-    c.a = cover * mix(1.0, 0.6, x.L.night) * exp(-t0 / 3000.0) * smoothstep(7000.0, 2500.0, t0) * smoothstep(0.02, 0.1, d.y);
+    c.a = cover * mix(1.0, 0.6, x.L.night) * exp(-t0 / (3000.0 * CLOUD_S)) * smoothstep(7000.0 * CLOUD_S, 2500.0 * CLOUD_S, t0) * smoothstep(0.02, 0.1, d.y);
     return c;
 }
 
@@ -2847,7 +2858,7 @@ static float3 softCloudSky(thread const Ctx& x, float3 o, float3 r) {
     // Soft coverage, blurred as if by ripples, matching the volumetric sky.
     float dens = smoothstep(0.0, 0.3, cloudDensity(q, x.seed, x.time, x.cover) - 0.07 * x.L.night);
     float3 lit = mix(x.L.keyCol * 0.4 + x.L.zenith * 1.2 + x.L.horizon * 0.4, float3(0.04, 0.047, 0.07), x.L.night);
-    return mix(sky, lit, dens * 0.4 * exp(-t / 2600.0));
+    return mix(sky, lit, dens * 0.4 * exp(-t / (2600.0 * CLOUD_S)));
 }
 
 // Smoke from the nearest fires and chimneys: each plume bends downwind as it rises (two straight pieces) and
@@ -3306,6 +3317,11 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     }
     if (f.misc2.z == 3) return float4(float3(fogTransmittance(x, o, d, tSurf)), 1);
     if (f.misc2.z != 2) col = applyFog(x, col, o, d, tSurf);
+    // A summit above the cloud base is seen through the slab in front of it.
+    if (!water && h.hit && o.y < CLOUD_Y0 && o.y + d.y * h.t > CLOUD_Y0) {
+        CloudSample cl = cloudSheet(x, o, d, h.t);
+        col = mix(col, cl.col, cl.a);
+    }
     col = hazeAndSmoke(x, col, sites, lampPos, lampState, refs, f.refs, o, d, tSurf);
     return float4(col, birdRefl ? -tSurf : tSurf);
 }
