@@ -445,6 +445,7 @@ struct Light {
     float3 moon;
     float sunAmt;
     float night;
+    float gold;     // golden and blue hour; 0 at noon and deep night
 };
 
 // Keyframes by sun elevation: night, blue hour, sunrise, golden, midday.
@@ -455,6 +456,8 @@ static inline float3 key5(float e, float3 a, float3 b, float3 c, float3 d, float
     if (e < k3) return mix(c, d, smoothstep(k2, k3, e));
     return mix(d, f, smoothstep(k3, k4, e));
 }
+
+static inline float goldAmount(float e) { return smoothstep(0.30, 0.12, e) * smoothstep(-0.16, -0.04, e); }
 
 static Light makeLight(float3 sunDir) {
     Light L;
@@ -472,6 +475,7 @@ static Light makeLight(float3 sunDir) {
     float3 sunCol = key5(e, float3(0), float3(0), float3(1.8, 0.6, 0.22), float3(3.0, 1.45, 0.55), float3(3.0, 2.7, 2.2));
     L.sunAmt = smoothstep(-0.02, 0.05, e);
     L.night = smoothstep(-0.04, -0.20, e);
+    L.gold = goldAmount(e);
     if (e > -0.02) {
         L.key = sunDir;
         L.keyCol = sunCol * L.sunAmt + float3(1.3, 0.5, 0.3) * 0.4 * (1.0 - L.sunAmt);
@@ -499,17 +503,24 @@ static float3 skyColor(float3 d, Light L, bool withDiscs, uint seed, float time)
     float3 hor = L.skyHor;
     // Low sun: gold toward the sun, a cooler pink-lavender band opposite it.
     float2 dh = normalize(d.xz + 1e-5), sh2 = normalize(L.sun.xz + 1e-5);
-    hor *= mix(float3(1.0), mix(float3(0.75, 0.6, 0.85), float3(1.0), 0.5 + 0.5 * dot(dh, sh2)), lowSun);
-    float3 c = mix(hor, L.skyZen, 1.0 - exp(-up * mix(5.0, 7.0, saturate(L.sun.y / 0.4))));
+    float toward = 0.5 + 0.5 * dot(dh, sh2);
+    hor *= mix(float3(1.0), mix(float3(0.75, 0.6, 0.85), float3(1.0), toward), lowSun);
+    // Golden hour: the horizon band burns amber under the sun and cools to dusty rose and slate opposite it.
+    hor *= mix(float3(1.0), mix(float3(0.70, 0.70, 1.0), float3(0.92, 0.68, 0.42), toward * toward), L.gold * mix(0.5, 1.0, L.sunAmt));
+    float3 c = mix(hor, L.skyZen, 1.0 - exp(-up * mix(mix(5.0, 7.0, saturate(L.sun.y / 0.4)), 8.0, L.gold)));
     if (d.y < 0) c = hor * mix(1.0, 0.75, saturate(-d.y * 4));
     float s = max(dot(d, L.sun), 0.0);
     float3 glowCol = key5(L.sun.y, float3(0), float3(0.45, 0.18, 0.12), float3(1.2, 0.40, 0.12), float3(1.0, 0.65, 0.35), float3(0.5, 0.45, 0.4));
-    c += glowCol * (pow(s, 6.0) * 0.35 + pow(s, 64.0) * 0.6) * (1.0 - 0.5 * up);
+    glowCol = mix(glowCol, glowCol * float3(1.0, 0.78, 0.5), L.gold);
+    c += glowCol * (pow(s, 6.0) * mix(0.35, 0.22, L.gold) + pow(s, 64.0) * 0.6) * (1.0 - 0.5 * up);
+    // A tighter aureole and a dome that deepens away from the sun, so the sun sits in its own pool of light.
+    c *= mix(float3(1.0), float3(0.70, 0.70, 0.95), L.gold * mix(0.5, 1.0, L.sunAmt) * (1.0 - toward) * smoothstep(-0.05, 0.25, d.y));
+    c += glowCol * pow(s, 24.0) * 0.5 * L.gold * (1.0 - 0.5 * up);
     if (!withDiscs) return c;
     // Disc takes the key light's hue (amber near the horizon) and blooms into the haze.
     float3 tint = L.keyCol / max(max(L.keyCol.r, max(L.keyCol.g, L.keyCol.b)), 1e-3);
     c += tint * 12.0 * smoothstep(0.99955, 0.9998, s) * L.sunAmt;
-    c += L.keyCol * (pow(s, 1200.0) * 0.8 + pow(s, 180.0) * 0.25) * L.sunAmt;
+    c += L.keyCol * (pow(s, 1200.0) * mix(0.8, 0.35, L.gold) + pow(s, 180.0) * 0.25) * L.sunAmt;
 
     if (L.night > 0.0) {
         float md = max(dot(d, L.moon), 0.0);
@@ -780,15 +791,18 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
         Hit sHit = trace(x.hm, so, x.L.key, 700.0, x.quality > 0.5 ? 120 : 48, x.globalMax, x.size);
         // Contact shadows from single-voxel steps draw sawtooth noise; keep them faint, cliffs full.
         sh = sHit.hit ? 0.35 * (1.0 - smoothstep(2.0, 8.0, sHit.t)) : 1.0;
-        sh = mix(sh, mix(0.5, 0.25, hiSun) + mix(0.5, 0.75, hiSun) * sh, wf);
+        float floorSh = mix(mix(0.5, 0.25, hiSun), 0.32, x.L.gold);
+        sh = mix(sh, floorSh + (1.0 - floorSh) * sh, wf);
         sh = mix(sh, 1.0, 0.3 * x.L.night);
     }
     sh *= mix(1.0, cloudShadow(p, x.L.key, x.origin, x.seed, x.time, x.cover), x.L.sunAmt);
     float lowFill = mix(0.9, 1.0, smoothstep(0.1, 0.4, x.L.key.y));
     // Low light: shadows take the cool zenith, against warm key light.
     // High sun: fill is the deep zenith, so shade reads blue against warm key light.
-    float zw = mix(0.55, 0.8, hiSun);
+    float zw = mix(mix(0.55, 0.8, hiSun), 0.85, x.L.gold);
     float3 skyFill = mix(x.L.horizon, x.L.zenith, saturate(zw + 0.15 * nl.y)) * 0.9 * lowFill * mix(1.0, 0.85, hiSun);
+    // Golden hour: shade is the violet dome opposite the sun, well below the key, so hillsides keep dark values.
+    skyFill *= mix(float3(1.0), float3(0.62, 0.58, 0.85), x.L.gold * x.L.sunAmt);
     skyFill *= mix(1.0, skyVisibility(x.hm, x.size, h.voxel, h.normal, p.y), mix(0.55, 0.85, hiSun));
     float3 bounce = (1.0 - saturate(nl.y)) * 0.35 * alb * x.L.keyCol * max(x.L.key.y, 0.0);
     // High sun: risers sit in cooler shade so terraces keep their modelling at noon.
@@ -830,7 +844,8 @@ static inline float3 fogColor(thread const Ctx& x, float3 d, float T) {
     float3 c = skyColor(float3(d.x, mix(y, y * 0.5 + 0.12, T), d.z), x.L, false, x.seed, x.time);
     // Aerial colour cools away from the sun so far ridges separate from the sky.
     float away = saturate(dot(normalize(d.xz + 1e-5), normalize(x.L.sun.xz + 1e-5)) * 0.5 + 0.5);
-    return c * mix(float3(1.0), mix(float3(0.80, 0.82, 0.95), float3(1.0), away), T);
+    float3 cool = mix(float3(0.80, 0.82, 0.95), float3(0.52, 0.55, 0.88), x.L.gold);
+    return c * mix(float3(1.0), mix(cool, float3(1.0), away * away), T);
 }
 
 // Exponential height fog plus a slow-drifting noise modulation that pools mist in valleys.
@@ -863,7 +878,7 @@ static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t) 
 static float3 applyFog(thread const Ctx& x, float3 col, float3 o, float3 d, float t) {
     float T = fogTransmittance(x, o, d, t);
     // Thin haze in-scatters less than the full horizon radiance; only thick fog converges on the sky.
-    float3 f = (fogColor(x, d, T) + x.L.keyCol * min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night)) * mix(0.3, 1.0, smoothstep(0.1, 0.9, 1.0 - T));
+    float3 f = (fogColor(x, d, T) + x.L.keyCol * min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night)) * mix(mix(0.3, 0.12, x.L.gold), 1.0, smoothstep(0.1, 0.9, 1.0 - T));
     return mix(f, col, T);
 }
 
@@ -918,7 +933,12 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d) {
         float toward = towardC;
         float shadow = exp(-saturate((toward - 0.04) * 3.0) * 2.2) * (0.55 + 0.45 * h01);
         float3 lit = x.L.keyCol * (mix(0.15, 0.4, x.L.night) + mix(0.85, 0.6, x.L.night) * shadow) * mix(1.0, 0.32, x.L.night) * (0.6 + 0.4 * toSun) + ambient * (0.6 + 0.4 * h01);
-        lit += float3(1.6, 0.55, 0.20) * glowAmt * toSun * (1.0 - h01) * 0.9;
+        // Golden hour: bodies sit in violet shade and only sun-facing crowns take the gold.
+        float3 litG = x.L.keyCol * (0.04 + 0.7 * shadow * shadow) * (0.2 + 0.8 * toSun * toSun) + ambient * float3(0.62, 0.55, 0.85) * (0.5 + 0.5 * h01);
+        // Forward scatter: cloud in front of a low sun glows instead of hiding it as a grey patch.
+        litG += x.L.keyCol * min(hg(dot(d, x.L.sun), 0.75), 1.5) * 0.9 * shadow;
+        lit = mix(lit, litG, x.L.gold);
+        lit += float3(1.6, 0.55, 0.20) * glowAmt * mix(toSun, toSun * toSun * 1.2, x.L.gold) * (1.0 - h01) * 0.9;
         float a = 1.0 - exp(-dens * dt * mix(0.05, 0.08, x.L.night));
         acc += T * a * lit;
         silver += T * a * shadow;
@@ -1015,7 +1035,9 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         float fres = 0.02 + 0.98 * pow(1.0 - cosi, 5.0);
         col = mix(under, refl, fres);
         // Glitter path toward the sun or moon: the main EDR highlight.
-        col += x.L.keyCol * 6.0 * pow(max(dot(r, x.L.key), 0.0), mix(900.0, 4000.0, x.L.night)) * fres * (x.L.shadows ? 1.0 : 0.3) * (1.0 + 0.5 * x.L.night);
+        col += x.L.keyCol * 6.0 * pow(max(dot(r, x.L.key), 0.0), mix(mix(900.0, 4000.0, x.L.night), 350.0, x.L.gold)) * fres * (x.L.shadows ? 1.0 : 0.3) * (1.0 + 0.5 * x.L.night);
+        // Golden hour: a broad sheen of the aureole on the water under the sun.
+        col += x.L.keyCol * 0.5 * pow(max(dot(r, x.L.key), 0.0), 40.0) * fres * x.L.gold;
         if (x.L.night > 0.0) {
             // Moon path: the chance that some ripple facet mirrors the moon (a slope distribution, so it is
             // smooth and TAA-stable), broken into glitter by fine ripples that fade with pixel footprint.
@@ -1117,7 +1139,9 @@ static inline float3 srgbToLinear(float3 c) {
 fragment float4 postFragment(VOut in [[stage_in]], texture2d<float> scene [[texture(0)]],
                              constant Frame& f [[buffer(0)]]) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
-    float3 x = scene.sample(s, in.uv).rgb * f.misc.x;
+    // Golden hour sits lower on the curve, below the shoulder where ACES bleaches warm skies to cream.
+    float sunUp = smoothstep(-0.04, 0.04, f.sunDir.y);
+    float3 x = scene.sample(s, in.uv).rgb * f.misc.x * mix(1.0, 0.75, goldAmount(f.sunDir.y) * sunUp);
     float3 c = acesFit(x);
     // Noon light is the flattest; restore a little chroma the tonemap shoulder takes away.
     float l = dot(c, float3(0.2126, 0.7152, 0.0722));
