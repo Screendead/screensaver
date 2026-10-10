@@ -287,9 +287,10 @@ final class Wildlife {
                 let q = c2 + (p - c2) * sfrac
                 alt = max(alt, cam.y + (ground(q.x, q.y) + 4 - cam.y) / sfrac)
             }
-            if alt <= 190 || attempt == 3 { break }
+            if alt <= max(190, g + 120) || attempt == 3 { break }
         }
-        alt = min(alt, 200)
+        // Under the cloud base, unless the ground itself rises past it.
+        alt = max(min(alt, FlightCamera.ceiling - 20), min(alt, ground(p.x, p.y) + 2 * fl.clearance))
         if !crossing { heading = rand(0...(2 * .pi)) }
         let speed: Double
         switch kind {
@@ -407,8 +408,10 @@ final class Wildlife {
         for d in [20.0, 45.0, 80.0] {
             gAhead = max(gAhead, ground(f.anchor.x + vA.x / max(f.speed, 0.1) * d, f.anchor.z + vA.z / max(f.speed, 0.1) * d) - d * 0.15)
         }
-        let yT = min(max(f.altitude, gAhead + fl.clearance * (f.kind == .raptor ? 2 : 1.5)), 205)
-        f.anchor.y += (yT - f.anchor.y) * min(1, dt * 0.4)
+        // Ground-relative: flocks rise with the land (over a wall, before it) and otherwise keep under the clouds.
+        let lift = gAhead + fl.clearance * (f.kind == .raptor ? 2 : 1.5)
+        let yT = max(min(f.altitude, FlightCamera.ceiling - 20), lift)
+        f.anchor.y += (yT - f.anchor.y) * min(1, dt * (yT > f.anchor.y && lift > f.anchor.y - 5 ? 1.5 : 0.4))
 
         // Murmuration: a falcon-like disturbance loops through the flock, so it folds, splits and pulses.
         let hawk = f.anchor + SIMD3(sin(time * 0.31 + f.seedPhase) * 28, sin(time * 0.53) * 9, sin(time * 0.23 + 1.7) * 28)
