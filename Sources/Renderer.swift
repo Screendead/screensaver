@@ -234,7 +234,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var cloudCenter: SIMD2<Double>?
     static let cloudTexels = 2048, cloudTexel = 4.0
     private var history: [MTLTexture] = []
-    static let ditherCells = 690.0
+    static let ditherCells = 864.0
     private var historyIndex = 0
     private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
     let world: World
