@@ -15,6 +15,7 @@ final class FlightCamera {
     private var facing: Double = 0
     private var shotYaw: Double?
     private var nextShot: Double = 0
+    private var rimLift: Double = 0
     var sun = SIMD3<Double>(0, 1, 0)
     var pitchOverride: Double?
 
@@ -64,9 +65,17 @@ final class FlightCamera {
 
     // Shot director: score a candidate heading by what the frame would hold. Relief across the middle
     // distance gives a subject; some water is welcome but a frame full of it is not; facing a low sun or
-    // the moon puts the light in shot; large turns cost a little so motion stays calm.
+    // the moon puts the light in shot; large turns cost a little so motion stays calm; land rising past eye
+    // height close ahead would fill the frame with a wall.
     private func shotScore(_ heading: Double, lightYaw: Double, lightW: Double) -> Double {
         let p = SIMD2(position.x, position.z)
+        var rise = -Double.infinity
+        for dist in stride(from: 30.0, through: 100.0, by: 14.0) {
+            for off in [-0.25, 0.0, 0.25] {
+                rise = max(rise, h(p.x + sin(heading + off) * dist, p.y + cos(heading + off) * dist) - position.y)
+            }
+        }
+        let wall = -0.8 * min(max(rise / 15, 0), 1)
         var sum = 0.0, sum2 = 0.0, wet = 0.0, n = 0.0
         for dist in stride(from: 80.0, through: 400.0, by: 40.0) {
             for off in [-0.3, -0.15, 0.0, 0.15, 0.3] {
@@ -82,7 +91,7 @@ final class FlightCamera {
         let water = wf < 0.1 ? 0 : (wf < 0.45 ? 0.4 : 0.4 - 2.0 * (wf - 0.45))
         let light = lightW * max(0, cos(heading - lightYaw)) * 0.8
         let turn = -0.25 * abs(FlightCamera.angleDiff(heading, yaw))
-        return relief + water + light + turn
+        return relief + water + light + turn + wall
     }
 
     func placeAtStart() {
@@ -160,7 +169,29 @@ final class FlightCamera {
         }
         let roughClimb = min(max((hi - lo - 6) * 1.5, 0), 30)
         let clearance = roughClimb + 12 + 12 * (wander(time + 500, 0.7) + 0.6) + 10 * surveyAmount + 40 * max(0, min(1, -mode / 0.6))
-        let target = max(ahead, 19.85) + clearance
+        // Canyon and mesa country: down among the walls they fill the frame, so rise to look across the rims.
+        // The rim level is the upper quartile of a 150-voxel neighbourhood, so a lone peak off to the side does
+        // not lift the flight, or the highest rim ahead, out to where a wall would still fill the frame. Eased
+        // in, so a rim coming into range is a climb, not a pop; let go slowly, so the flight does not sink back
+        // between rims it has just cleared.
+        var ring: [Double] = []
+        var rimAhead = -Double.infinity
+        for r in [50.0, 100.0, 150.0, 200.0, 250.0] {
+            for k in 0..<8 where r <= 150 || k <= 1 || k == 7 {
+                let a = yaw + Double(k) * .pi / 4
+                let hq = h(p.x + sin(a) * r, p.y + cos(a) * r)
+                if r <= 150 { ring.append(hq) }
+                if k <= 1 || k == 7 { rimAhead = max(rimAhead, hq) }
+            }
+        }
+        ring.sort()
+        let rim = max(ring[ring.count * 3 / 4], rimAhead)
+        let rough = min(max((ring.last! - ring.first! - 25) / 30, 0), 1)
+        let base = max(ahead, 19.85) + clearance
+        let lift = rough * max(0, rim + 18 - base)
+        rimLift += (lift - rimLift) * min(1, dt * (lift > rimLift ? 0.3 : 0.04))
+        // The lift stops well under the cloud slab (base 230).
+        let target = base + min(rimLift, max(0, 200 - base))
         let kc = 0.35
         climbRate += (kc * kc * (target - position.y) - 2 * kc * climbRate) * dt
         position.y += climbRate * dt

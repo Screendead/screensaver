@@ -1131,8 +1131,10 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     float drop = s.H - min(min(s.nh.x, s.nh.y), min(s.nh.z, s.nh.w));
     // Cliffs several pixels tall keep their strata; only sub-pixel stairs take the tread colour. Keyed to the
     // column's deepest drop, not this face's: the faces of a wall running diagonal to the grid alternate
-    // between shallow and deep neighbours, which would stripe it strata, tread, strata.
-    float cliff = s.riser > 0.0 ? drop : 0.0;
+    // between shallow and deep neighbours, which would stripe it strata, tread, strata. A wall built of steps a
+    // few voxels each is as much a cliff as a sheer one; by drop alone it turns a pale tread-coloured band.
+    float steep = 0.5 * length(float2(s.nh.x - s.nh.y, s.nh.z - s.nh.w));
+    float cliff = s.riser > 0.0 ? max(drop, 2.0 * steep) : 0.0;
     float keep = smoothstep(6.0, 14.0, cliff / fp) * smoothstep(3.0, 5.0, cliff);
     // A riser face only a column wide (a jog in a step edge) is a lone cube face: lit, it is a bright cube; in shade,
     // stone against sand, a dark notch. With the footprint it fades to the tread it stands for, colour and light.
@@ -1304,10 +1306,13 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d) {
         float kf = saturate((t - ka) / kt);
         // Night skies stay mostly clear: fewer, thinner banks.
         float base = cloudFineBaked(x, q) + mix(sa, sb, kf) - 0.07 * x.L.night;
-        // Night: a finer octave frays the edges into wisps for the moon to light through.
+        // Night: a finer octave frays the edges into wisps for the moon to light through. Its octaves are turned off
+        // the grid axes, or thresholded lattice cells read as boxes, and it fades in, or its gate draws an edge.
         if (x.L.night > 0.0 && base > -0.15) {
             float2 qd = q - float2(x.time * 1.3, 0);
-            base += x.L.night * (0.16 * perlin2(qd / 90.0, x.seed + 42u) + 0.07 * perlin2(qd / 33.0, x.seed + 43u) + 0.035 * perlin2(qd / 13.0, x.seed + 44u));
+            float fray = 0.16 * perlin2(OCT_ROT * qd / 90.0, x.seed + 42u) + 0.07 * perlin2(transpose(OCT_ROT) * qd / 33.0, x.seed + 43u)
+                       + 0.035 * perlin2(OCT_ROT * OCT_ROT * qd / 13.0, x.seed + 44u);
+            base += x.L.night * fray * smoothstep(-0.15, -0.05, base);
         }
         float h01 = (p.y - y0) / (y1 - y0);
         float top = 0.35 + 0.65 * saturate(base * 2.5);
@@ -1415,7 +1420,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         float3 refl;
         if (x.quality > 0.5) {
             Hit rh = trace(hm, wp + float3(0, 0.02, 0), r, 1500.0, 220, x.globalMax, x.size);
-            refl = rh.hit ? applyFog(x, shade(x, wp, r, rh, false), wp, r, rh.t)
+            // Shadowed: unshadowed, a sun-facing wall in the shade of the far rim mirrors as a pale streak.
+            refl = rh.hit ? applyFog(x, shade(x, wp, r, rh, true), wp, r, rh.t)
                            : softCloudSky(x, wp, r);
         } else {
             refl = softCloudSky(x, wp, r);
