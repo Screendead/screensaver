@@ -678,6 +678,7 @@ struct Surface {
     float riser;    // drop below this face, for side faces
     float autumn;
     float level;    // 1 shades the face as dead-level ground: up normal, no corner AO
+    float pale;     // sand, salt crust or snow
 };
 
 // Autumn foliage: a slow Perlin hue field runs lingering green, gold, orange, scarlet to crimson;
@@ -769,6 +770,7 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
     s.slope = 0;
     s.mat = 0;
     s.level = 0;
+    s.pale = 0;
     float4 col4 = hm.read(uint2(clamp(v.xz, int2(0), int2(size - 1))), 0);
     float3 col = col4.rgb;
     bool tree = col4.a > 0.0;
@@ -878,12 +880,14 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
         if (float(v.y + 1) > snowline) s.albedo = snow;
         else s.albedo = tread;
         float sandy = float(v.y + 1) > snowline ? 0.0 : beach ? 1.0 - crustW : smoothstep(0.35, 0.7, desert);
+        s.pale = float(v.y + 1) > snowline || beach ? 1.0 : sandy;
         if (sandy > 0.0) {
             float3 rp = sandRipples(v.xz + mapOrigin, uv, w, fpA, time, seed) * sandy;
             s.albedo *= 1.0 + rp.x;
             s.slope = rp.yz;
         }
     } else if (n.y == 0 && !underGap) {
+        s.pale = beach || snowy ? 1.0 : 0.0;
         if (beach) s.albedo = tread * 0.85;
         else if (slope < 4.0 && !snowy) s.albedo = mix(mix(tread, stone, 0.5) * 0.9, stone * 0.95, painted);
         else s.albedo = snowy ? mix(stone, snow, 0.45) : stone;
@@ -1019,7 +1023,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     // Moonlight drains colour.
     alb = mix(alb, float3(dot(alb, float3(0.3, 0.59, 0.11))), 0.4 * x.L.night);
     // Pale sand, salt and stone would glow under the moon brighter than the sky above them.
-    if (s.mat == 0) alb *= 1.0 - 0.55 * x.L.night * smoothstep(0.08, 0.3, dot(alb, float3(0.3, 0.59, 0.11)));
+    if (s.mat == 0) alb *= 1.0 - 0.5 * x.L.night * s.pale;
     // Canopies would otherwise drop to cut-out silhouettes under the moon.
     if (s.mat == 1 || s.mat == 2) alb *= 1.0 + 1.4 * x.L.night * (1.0 - 0.5 * s.autumn);
     float ndl = max(dot(nl, x.L.key), 0.0);

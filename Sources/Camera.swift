@@ -165,7 +165,7 @@ final class FlightCamera {
         }
         let roughClimb = min(max((hi - lo - 6) * 1.5, 0), 30)
         // Flat ground under the lens (sand, salt pans, snowfields, valley floors): rise and look out to the horizon.
-        let flat = hi > 20 ? min(max((4 - (hi - lo)) / 3, 0), 1) : 0
+        let flat = hi >= 19.9 ? min(max((4 - (hi - lo)) / 3, 0), 1) : 0
         let clearance = roughClimb + 16 + 12 * (wander(time + 500, 0.7) + 0.6) + 10 * surveyAmount + 40 * max(0, min(1, -mode / 0.6)) + 14 * flat
         let target = max(ahead, 19.85) + clearance
         let kc = 0.35
