@@ -1,0 +1,702 @@
+#include <metal_stdlib>
+using namespace metal;
+
+// Must match `Frame` in Sources/Renderer.swift.
+struct Frame {
+    float4 camPos;     // xyz map-local position, w tan(fovY/2)
+    float4 camFwd;     // w aspect
+    float4 camRight;   // w wrapped time (s)
+    float4 camUp;      // w quality (0 battery, 1 full)
+    float4 sunDir;     // xyz direction to sun, w unused
+    float4 resolution; // xy pixels, zw inverse
+    int4   mapInfo;    // xy world xz of texel 0, z size, w seed
+    float4 misc;       // x exposure, y global max height, z wind angle, w cloud cover
+    float4 misc2;      // x frame index, y fog density scale, z debug mode
+};
+
+constant float SEA = 19.85;
+constant int MAX_LEVEL = 6;
+
+// MARK: - Hash & noise
+
+static inline uint pcg(uint v) {
+    uint state = v * 747796405u + 2891336453u;
+    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+static inline uint hash2i(int2 p, uint s) { return pcg(uint(p.x) * 1597334677u ^ pcg(uint(p.y) * 3812015801u ^ s)); }
+static inline uint hash3i(int3 p, uint s) { return pcg(uint(p.x) * 1597334677u ^ pcg(uint(p.y) * 3812015801u ^ pcg(uint(p.z) * 2798796415u ^ s))); }
+static inline float hashf(uint h) { return float(h & 0xffffffu) / 16777215.0; }
+
+static inline float2 grad2(int2 c, uint s) {
+    float a = hashf(hash2i(c, s)) * 6.2831853;
+    return float2(cos(a), sin(a));
+}
+
+static inline float perlin2(float2 p, uint s) {
+    float2 i = floor(p), f = p - i;
+    int2 c = int2(i);
+    float2 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float a = dot(grad2(c, s), f);
+    float b = dot(grad2(c + int2(1, 0), s), f - float2(1, 0));
+    float cc = dot(grad2(c + int2(0, 1), s), f - float2(0, 1));
+    float d = dot(grad2(c + int2(1, 1), s), f - float2(1, 1));
+    return mix(mix(a, b, u.x), mix(cc, d, u.x), u.y) * 1.414;
+}
+
+static inline float3 grad3(int3 c, uint s) {
+    uint h = hash3i(c, s);
+    float z = hashf(h) * 2.0 - 1.0;
+    float a = hashf(pcg(h)) * 6.2831853;
+    float r = sqrt(max(0.0, 1.0 - z * z));
+    return float3(r * cos(a), r * sin(a), z);
+}
+
+static inline float perlin3(float3 p, uint s) {
+    float3 i = floor(p), f = p - i;
+    int3 c = int3(i);
+    float3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float n000 = dot(grad3(c, s), f);
+    float n100 = dot(grad3(c + int3(1, 0, 0), s), f - float3(1, 0, 0));
+    float n010 = dot(grad3(c + int3(0, 1, 0), s), f - float3(0, 1, 0));
+    float n110 = dot(grad3(c + int3(1, 1, 0), s), f - float3(1, 1, 0));
+    float n001 = dot(grad3(c + int3(0, 0, 1), s), f - float3(0, 0, 1));
+    float n101 = dot(grad3(c + int3(1, 0, 1), s), f - float3(1, 0, 1));
+    float n011 = dot(grad3(c + int3(0, 1, 1), s), f - float3(0, 1, 1));
+    float n111 = dot(grad3(c + int3(1, 1, 1), s), f - float3(1, 1, 1));
+    float x0 = mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y);
+    float x1 = mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y);
+    return mix(x0, x1, u.z) * 1.15;
+}
+
+constant float2x2 OCT_ROT = float2x2(float2(0.8, 0.6), float2(-0.6, 0.8));
+
+static inline float fbm2(float2 p, int oct, uint s) {
+    float sum = 0, amp = 0.5, norm = 0;
+    for (int i = 0; i < oct; i++) {
+        sum += amp * perlin2(p, s + uint(i) * 1013u);
+        norm += amp;
+        p = OCT_ROT * p * 2.0 + 17.3;
+        amp *= 0.5;
+    }
+    return sum / norm;
+}
+
+static inline float ridged2(float2 p, int oct, uint s) {
+    float sum = 0, amp = 0.5, norm = 0, w = 1;
+    for (int i = 0; i < oct; i++) {
+        float n = 1.0 - abs(perlin2(p, s + uint(i) * 7919u));
+        n *= n;
+        sum += amp * n * w;
+        w = saturate(n * 1.5);
+        norm += amp;
+        p = OCT_ROT * p * 2.0 + 31.7;
+        amp *= 0.5;
+    }
+    return sum / norm;
+}
+
+// MARK: - World
+
+struct Climate { float temp; float moist; };
+
+static inline float2 seedOffset(uint seed) {
+    return float2(hashf(pcg(seed)), hashf(pcg(seed ^ 0x9e3779b9u))) * 50000.0;
+}
+
+static inline Climate climate(float2 w, uint seed) {
+    float2 p = w + seedOffset(seed);
+    Climate c;
+    c.temp = saturate(fbm2(p / 3000.0, 2, seed + 11) * 1.6 + 0.5);
+    c.moist = saturate(fbm2(p / 2600.0 + 91.0, 2, seed + 12) * 1.6 + 0.5);
+    return c;
+}
+
+static inline float desertAmount(Climate c) {
+    return smoothstep(0.52, 0.72, c.temp) * smoothstep(0.65, 0.35, c.moist);
+}
+
+// Column = (height, gapLo, gapHi): solid where y < height, except inside [gapLo, gapHi).
+static inline float3 terrainColumn(int2 w, uint seed) {
+    float2 p = float2(w) + seedOffset(seed);
+    float2 warp = float2(fbm2(p / 900.0, 2, seed + 1), fbm2(p / 900.0 + 37.1, 2, seed + 2)) * 300.0;
+    float c = saturate(fbm2((p + warp) / 2000.0, 3, seed + 3) * 1.4 + 0.5);
+    float hi = smoothstep(0.45, 0.85, c);
+    float rough = fbm2((p + warp * 0.3) / 350.0, 5, seed + 4) * 0.5 + 0.5;
+    float ridge = ridged2((p + warp * 0.2) / 520.0, 4, seed + 5);
+    float r = mix(rough, ridge, hi);
+    float h = mix(16.0, 62.0, c) + mix(26.0, 115.0, hi) * r;
+
+    // Canyon country: in hot, dry regions the land steps into flat-topped mesas with sheer risers.
+    float canyon = smoothstep(0.35, 0.7, desertAmount(climate(float2(w), seed)));
+    float tier = 13.0 + 4.0 * perlin2(p / 700.0, seed + 7);
+    float hn = h / tier;
+    float level = floor(hn);
+    float mesa = (level + smoothstep(0.62, 0.9, hn - level)) * tier;
+    h = mix(h, mesa, canyon);
+
+    // Long meandering valleys with flat water floors: the camera follows these.
+    float river = abs(fbm2((p + warp * 0.6) / 1400.0, 3, seed + 6));
+    float valley = smoothstep(0.012, 0.11 + 0.07 * hi, river);
+    h = floor(max(mix(SEA - 3.0, h, valley), 2.0));
+
+    // Arches and undercuts: noise blobs hollow out a band low in each mesa tier.
+    float gl = 0, gh = 0;
+    if (canyon > 0.2) {
+        float blob = fbm2(p / 34.0, 3, seed + 8) + 0.25 * perlin2(p / 9.0, seed + 9);
+        float g = (blob - 0.12) * canyon;
+        if (g > 0.0) {
+            float base = max(level * tier - tier, SEA + 1.0);
+            gl = floor(base + 2.0 + 3.0 * perlin2(p / 60.0, seed + 10));
+            gh = gl + floor(min(g * 40.0, tier * 0.8));
+            if (gh > h - 3.0 || gh <= gl || gl < SEA + 1.0) { gl = 0; gh = 0; }
+        }
+    }
+    return float3(h, gl, gh);
+}
+
+kernel void generateHeight(texture2d<float, access::write> out [[texture(0)]],
+                           constant int4& info [[buffer(0)]],
+                           uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= uint(info.z) || gid.y >= uint(info.z)) return;
+    int2 w = int2(gid) + info.xy;
+    out.write(float4(terrainColumn(w, uint(info.w)), 0), gid);
+}
+
+kernel void reduceMax(texture2d<float, access::read> src [[texture(0)]],
+                      texture2d<float, access::write> dst [[texture(1)]],
+                      uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
+    uint2 s = gid * 2;
+    float m = max(max(src.read(s).r, src.read(s + uint2(1, 0)).r), max(src.read(s + uint2(0, 1)).r, src.read(s + uint2(1, 1)).r));
+    dst.write(float4(m, 0, 0, 0), gid);
+}
+
+// MARK: - Traversal
+
+struct Hit {
+    bool hit;
+    float t;
+    int3 voxel;
+    int3 normal;
+    int iters;
+};
+
+static inline float heightAt(texture2d<float> hm, int2 c, int size) {
+    c = clamp(c, int2(0), int2(size - 1));
+    return hm.read(uint2(c), 0).r;
+}
+
+static inline float3 columnAt(texture2d<float> hm, int2 c, int size) {
+    c = clamp(c, int2(0), int2(size - 1));
+    return hm.read(uint2(c), 0).rgb;
+}
+
+static inline bool solid(texture2d<float> hm, int3 v, int size) {
+    float3 col = columnAt(hm, v.xz, size);
+    float y = float(v.y);
+    return y < col.x && !(y >= col.y && y < col.z);
+}
+
+// Max-mip quadtree walk over the column heightfield; columns are stacks of unit voxels.
+static Hit trace(texture2d<float> hm, float3 o, float3 d, float tMax, int maxIter, float globalMax, int size) {
+    Hit h;
+    h.hit = false;
+    h.t = tMax;
+    h.iters = -1;
+    float3 inv = 1.0 / select(d, copysign(float3(1e-6), d), abs(d) < 1e-6);
+
+    // Clip to the map box in xz and to [0, globalMax] in y.
+    float3 lo = float3(0, -1, 0), hi = float3(size, globalMax, size);
+    float3 t0 = (lo - o) * inv, t1 = (hi - o) * inv;
+    float3 tn = min(t0, t1), tf = max(t0, t1);
+    float tEnter = max(max(tn.x, tn.y), max(tn.z, 0.0));
+    float tExit = min(min(tf.x, tf.y), min(tf.z, tMax));
+    if (tEnter >= tExit) return h;
+
+    float t = tEnter;
+    int level = MAX_LEVEL;
+    int lastAxis = (tn.x > tn.z) ? 0 : 2;
+    // Spatial nudge across the boundary just crossed; a t-epsilon vanishes at large map coords.
+    float2 nudge = float2(0);
+    for (int i = 0; i < maxIter; i++) {
+        h.iters = i;
+        if (t >= tExit) return h;
+        float3 p = o + d * t;
+        int sz = 1 << level;
+        int2 cell = int2(floor((p.xz + nudge) / float(sz)));
+        float2 cLo = float2(cell * sz), cHi = cLo + float(sz);
+        float2 tb = (select(cLo, cHi, d.xz > 0.0) - o.xz) * inv.xz;
+        float tCell = min(min(tb.x, tb.y), tExit);
+        float hmax = hm.read(uint2(clamp(cell, int2(0), int2((size >> level) - 1))), level).r;
+        float yA = o.y + d.y * t, yB = o.y + d.y * tCell;
+        if (min(yA, yB) >= hmax) {
+            lastAxis = tb.x < tb.y ? 0 : 2;
+            nudge = select(float2(0), sign(d.xz) * 0.01, tb <= tCell + 1e-4);
+            t = tCell;
+            level = min(level + 1, MAX_LEVEL);
+            continue;
+        }
+        if (level > 0) { level--; continue; }
+
+        // Level 0: one column, solid in [0, gl) and [gh, H).
+        float3 col = hm.read(uint2(clamp(cell, int2(0), int2(size - 1))), 0).rgb;
+        float H = col.x, gl = col.y, gh = col.z;
+        bool inGap = yA >= gl && yA < gh;
+        if (yA < H && !inGap) {
+            h.hit = true;
+            h.t = t;
+            h.normal = lastAxis == 0 ? int3(d.x > 0 ? -1 : 1, 0, 0) : int3(0, 0, d.z > 0 ? -1 : 1);
+            h.voxel = int3(cell.x, int(floor(yA)), cell.y);
+            return h;
+        }
+        float floorY = inGap ? gl : H;
+        if (d.y < 0 && yB < floorY) {
+            h.hit = true;
+            h.t = (floorY - o.y) * inv.y;
+            h.normal = int3(0, 1, 0);
+            h.voxel = int3(cell.x, int(floorY) - 1, cell.y);
+            return h;
+        }
+        if (inGap && d.y > 0 && yB > gh) {
+            h.hit = true;
+            h.t = (gh - o.y) * inv.y;
+            h.normal = int3(0, -1, 0);
+            h.voxel = int3(cell.x, int(gh), cell.y);
+            return h;
+        }
+        lastAxis = tb.x < tb.y ? 0 : 2;
+        nudge = select(float2(0), sign(d.xz) * 0.01, tb <= tCell + 1e-4);
+        t = tCell;
+        level = 1;
+    }
+    return h;
+}
+
+// MARK: - Fullscreen
+
+struct VOut { float4 pos [[position]]; float2 uv; };
+
+vertex VOut fullscreenVertex(uint vid [[vertex_id]]) {
+    float2 p = float2((vid << 1) & 2, vid & 2);
+    VOut o;
+    o.pos = float4(p * 2.0 - 1.0, 0.0, 1.0);
+    o.uv = float2(p.x, 1.0 - p.y);
+    return o;
+}
+
+// MARK: - Sky & light
+
+struct Light {
+    float3 key;     // direction to the current key light (sun or moon)
+    float3 keyCol;
+    float3 zenith;
+    float3 horizon;
+    float3 sun;
+    float sunAmt;
+    float night;
+};
+
+// Keyframes by sun elevation: night, blue hour, sunrise, golden, midday.
+static inline float3 key5(float e, float3 a, float3 b, float3 c, float3 d, float3 f) {
+    float k0 = -0.30, k1 = -0.10, k2 = 0.0, k3 = 0.12, k4 = 0.45;
+    if (e < k1) return mix(a, b, smoothstep(k0, k1, e));
+    if (e < k2) return mix(b, c, smoothstep(k1, k2, e));
+    if (e < k3) return mix(c, d, smoothstep(k2, k3, e));
+    return mix(d, f, smoothstep(k3, k4, e));
+}
+
+static Light makeLight(float3 sunDir) {
+    Light L;
+    float e = sunDir.y;
+    L.sun = sunDir;
+    L.zenith = key5(e, float3(0.004, 0.006, 0.016), float3(0.035, 0.04, 0.10), float3(0.08, 0.10, 0.24),
+                    float3(0.10, 0.20, 0.45), float3(0.09, 0.24, 0.58));
+    L.horizon = key5(e, float3(0.012, 0.017, 0.036), float3(0.22, 0.19, 0.33), float3(0.80, 0.45, 0.28),
+                     float3(0.70, 0.58, 0.45), float3(0.42, 0.56, 0.72));
+    float3 sunCol = key5(e, float3(0), float3(0), float3(1.6, 0.55, 0.22), float3(2.8, 1.75, 1.0), float3(3.1, 2.9, 2.6));
+    L.sunAmt = smoothstep(-0.02, 0.05, e);
+    L.night = smoothstep(-0.06, -0.22, e);
+    if (e > -0.04) {
+        L.key = sunDir;
+        L.keyCol = sunCol * L.sunAmt;
+    } else {
+        L.key = normalize(float3(-sunDir.x, max(-sunDir.y, 0.08), -sunDir.z));
+        L.keyCol = float3(0.16, 0.21, 0.32) * L.night;
+    }
+    return L;
+}
+
+static inline float hg(float c, float g) {
+    float g2 = g * g;
+    return (1.0 - g2) / (12.566 * pow(1.0 + g2 - 2.0 * g * c, 1.5));
+}
+
+static float3 skyColor(float3 d, Light L, bool withDiscs, uint seed) {
+    float up = saturate(d.y);
+    float3 c = mix(L.horizon, L.zenith, 1.0 - exp(-up * 7.0));
+    if (d.y < 0) c = L.horizon * mix(1.0, 0.75, saturate(-d.y * 4));
+    float s = max(dot(d, L.sun), 0.0);
+    float3 glowCol = key5(L.sun.y, float3(0), float3(0.25, 0.12, 0.10), float3(1.4, 0.55, 0.25), float3(1.0, 0.65, 0.35), float3(0.5, 0.45, 0.4));
+    c += glowCol * (pow(s, 6.0) * 0.35 + pow(s, 64.0) * 0.6) * (1.0 - 0.5 * up);
+    if (!withDiscs) return c;
+    c += float3(14.0, 11.0, 8.0) * smoothstep(0.99955, 0.9998, s) * L.sunAmt;
+
+    if (L.night > 0.0) {
+        // Stars: one hashed point per cell of a direction grid.
+        float3 q = d * 260.0;
+        int3 cell = int3(floor(q));
+        uint h = hash3i(cell, seed + 77u);
+        if (hashf(h) > 0.985) {
+            float3 sp = float3(cell) + float3(hashf(pcg(h)), hashf(pcg(h + 1)), hashf(pcg(h + 2)));
+            float dd = length(q - sp);
+            float b = pow(hashf(pcg(h + 3)), 6.0) * 2.5 + 0.08;
+            c += float3(0.9, 0.95, 1.1) * b * smoothstep(0.55, 0.0, dd) * L.night * smoothstep(0.0, 0.25, d.y);
+        }
+        // Moon: a disc quantized to a 16x16 block grid.
+        float3 m = L.key;
+        float md = dot(d, m);
+        if (md > 0.99) {
+            float3 mu = normalize(cross(m, float3(0, 1, 0)));
+            float3 mv = cross(mu, m);
+            float2 xy = float2(dot(d, mu), dot(d, mv)) / 0.03;
+            float2 qd = (floor(xy * 8.0) + 0.5) / 8.0;
+            if (length(qd) < 1.0) {
+                float lum = 0.75 + 0.25 * hashf(hash2i(int2(floor(xy * 8.0)), 5u)) - 0.25 * smoothstep(0.2, 0.6, perlin2(xy * 1.7 + 3.0, 9u) + 0.2);
+                c = mix(c, float3(0.75, 0.80, 0.92) * 1.6 * lum, L.night);
+            }
+        }
+    }
+    return c;
+}
+
+// MARK: - Surface
+
+struct Surface {
+    float3 albedo;
+    float glint;    // step-lip highlight weight
+};
+
+static inline float3 strataTone(float band, bool desert, float desertAmt) {
+    uint h = pcg(uint(int(band) + 100000));
+    int i = int(h % 5u);
+    float3 grey[5] = { float3(0.30, 0.31, 0.33), float3(0.38, 0.38, 0.39), float3(0.25, 0.26, 0.29), float3(0.43, 0.42, 0.40), float3(0.34, 0.34, 0.36) };
+    float3 sand[5] = { float3(0.60, 0.36, 0.21), float3(0.72, 0.50, 0.32), float3(0.52, 0.29, 0.19), float3(0.78, 0.63, 0.46), float3(0.66, 0.43, 0.29) };
+    return mix(grey[i], sand[i], desertAmt);
+}
+
+static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float3 pos, float2 uv, float detail, int2 mapOrigin, uint seed, float time) {
+    Surface s;
+    s.glint = 0;
+    float H = heightAt(hm, v.xz, size);
+    float hx0 = heightAt(hm, v.xz + int2(-1, 0), size), hx1 = heightAt(hm, v.xz + int2(1, 0), size);
+    float hz0 = heightAt(hm, v.xz + int2(0, -1), size), hz1 = heightAt(hm, v.xz + int2(0, 1), size);
+    float slope = max(max(H - hx0, H - hx1), max(H - hz0, H - hz1));
+    float2 w = float2(v.xz + mapOrigin);
+    Climate c = climate(w, seed);
+    float desert = smoothstep(0.52, 0.72, c.temp) * smoothstep(0.65, 0.35, c.moist);
+    float cold = smoothstep(0.42, 0.18, c.temp);
+    int depth = int(H) - 1 - v.y;
+    int2 texel = int2(floor(uv * 16.0));
+    float jitter = hashf(hash3i(int3(v.x * 16 + texel.x, v.y * 16 + texel.y, v.z * 16 + texel.x * 7), seed + uint(n.x + 3 * n.z + 9)));
+
+    float snowline = mix(118.0, 58.0, cold) + 7.0 * perlin2(w / 20.0, seed + 21u);
+    float strataY = float(v.y) + (floor(uv.y * 16.0) + 0.5) / 16.0;
+    float band = floor(strataY * 0.5 + 3.0 * perlin2(w * 0.01, seed + 22u) + 1.5 * perlin2(w * 0.003, seed + 23u));
+    float3 stone = strataTone(band, desert > 0.5, desert);
+
+    bool top = n.y > 0;
+    bool beach = H <= SEA + 1.2;
+    float3 grassWet = float3(0.13, 0.21, 0.08), grassDry = float3(0.36, 0.33, 0.15), grassCold = float3(0.20, 0.23, 0.17);
+    float3 grass = mix(mix(grassDry, grassWet, smoothstep(0.3, 0.7, c.moist)), grassCold, cold);
+    float3 dirt = float3(0.24, 0.16, 0.10);
+    float3 sand = float3(0.47, 0.41, 0.29);
+    float3 desertTop = float3(0.54, 0.34, 0.19);
+
+    if (top) {
+        if (float(v.y + 1) > snowline) {
+            s.albedo = float3(0.86, 0.89, 0.94);
+        } else if (beach) {
+            s.albedo = sand;
+        } else if (slope >= 2.0) {
+            s.albedo = stone;
+        } else {
+            float3 g = mix(grass, desertTop, desert);
+            float tone = floor(saturate(perlin2((w * 16.0 + float2(texel)) * 0.09, seed + 30u) * 0.7 + 0.5 + (jitter - 0.5) * 0.35) * 3.99);
+            s.albedo = g * (0.9 + tone * 0.065);
+        }
+        // Step-lip glint: the texel row along an edge that drops away.
+        float2 e = float2(hx0 < H ? 1.0 - uv.x : 9.0, hx1 < H ? uv.x : 9.0);
+        float2 e2 = float2(hz0 < H ? 1.0 - uv.y : 9.0, hz1 < H ? uv.y : 9.0);
+        float edge = min(min(e.x, e.y), min(e2.x, e2.y));
+        s.glint = edge > 8.0 ? 0.0 : step(edge, 1.0 / 16.0);
+    } else {
+        bool snowy = float(int(H)) > snowline;
+        if (beach || (desert > 0.5 && depth < 1 && slope <= 2.5)) {
+            s.albedo = beach ? sand * 0.92 : desertTop * 0.95;
+        } else if (depth == 0 && slope < 2.0 && !snowy) {
+            // Moss wraps over the lip: a darker band of the tread colour, then stone.
+            float fringe = 4.0 + floor(hashf(hash2i(int2(texel.x, v.x * 31 + v.z * 17), seed)) * 4.0);
+            s.albedo = (16.0 - float(texel.y) - 0.5) < fringe ? mix(grass, desertTop, desert) * 0.8 : mix(stone, dirt, 0.35);
+        } else {
+            s.albedo = stone;
+        }
+    }
+    s.albedo *= mix(1.0, 0.92 + 0.16 * jitter, detail);
+    return s;
+}
+
+static inline float vao(float s1, float s2, float c) { return (s1 > 0.5 && s2 > 0.5) ? 0.0 : 3.0 - (s1 + s2 + c); }
+
+// Minecraft-style per-corner AO, bilinearly interpolated across the face.
+static float cornerAO(texture2d<float> hm, int size, int3 v, int3 n, float2 uv) {
+    int3 a = v + n;
+    int3 tu = n.x != 0 ? int3(0, 0, 1) : int3(1, 0, 0);
+    int3 tv = n.y != 0 ? int3(0, 0, 1) : int3(0, 1, 0);
+    float su0 = solid(hm, a - tu, size), su1 = solid(hm, a + tu, size);
+    float sv0 = solid(hm, a - tv, size), sv1 = solid(hm, a + tv, size);
+    float c00 = solid(hm, a - tu - tv, size), c10 = solid(hm, a + tu - tv, size);
+    float c01 = solid(hm, a - tu + tv, size), c11 = solid(hm, a + tu + tv, size);
+    float a00 = vao(su0, sv0, c00), a10 = vao(su1, sv0, c10), a01 = vao(su0, sv1, c01), a11 = vao(su1, sv1, c11);
+    float ao = mix(mix(a00, a10, uv.x), mix(a01, a11, uv.x), uv.y) / 3.0;
+    return mix(0.42, 1.0, pow(ao, 0.8));
+}
+
+static inline float2 faceUV(float3 p, int3 n) {
+    float3 f = fract(p);
+    if (n.y != 0) return f.xz;
+    if (n.x != 0) return float2(f.z, f.y);
+    return float2(f.x, f.y);
+}
+
+// MARK: - Clouds
+
+constant float CLOUD_Y = 150.0;
+constant float CLOUD_CELL = 6.0;
+
+// Cloud thickness in steps for a cloud cell (0 = clear). Shared by the cloud layer and its shadows.
+static inline float cloudSteps(float2 cellWorld, uint seed, float time, float cover) {
+    float2 q = cellWorld * CLOUD_CELL - float2(cos(0.6), sin(0.6)) * time * 1.6;
+    float d = fbm2(q / 240.0, 3, seed + 40u) + perlin3(float3(q / 420.0, time * 0.004), seed + 41u) * 0.35 + cover - 0.5;
+    return d > 0.06 ? min(floor((d - 0.06) / 0.045) + 1.0, 6.0) : 0.0;
+}
+
+static inline float2 cloudSlab(float steps) {
+    return float2(CLOUD_Y - 1.5 * min(steps, 2.0), CLOUD_Y + 2.0 * steps);
+}
+
+struct CloudHit { bool hit; float t; float3 n; };
+
+// 2D DDA over cloud cells, intersecting each cell's stepped slab.
+static CloudHit traceClouds(float3 o, float3 d, int2 origin, uint seed, float time, float cover, float tMax) {
+    CloudHit c;
+    c.hit = false;
+    float lo = CLOUD_Y - 3.0, hi = CLOUD_Y + 12.0;
+    if (abs(d.y) < 1e-4) return c;
+    float ta = (lo - o.y) / d.y, tb = (hi - o.y) / d.y;
+    float t0 = max(min(ta, tb), 0.0), t1 = min(max(ta, tb), tMax);
+    if (t0 >= t1) return c;
+    float2 ow = (o.xz + float2(origin)) / CLOUD_CELL;
+    float2 dw = d.xz / CLOUD_CELL;
+    float2 inv = 1.0 / select(dw, copysign(float2(1e-6), dw), abs(dw) < 1e-6);
+    float t = t0;
+    float2 nudge = float2(0);
+    int lastAxis = 1;
+    for (int i = 0; i < 72 && t < t1; i++) {
+        float2 pw = ow + dw * t;
+        float2 cell = floor(pw + nudge);
+        float2 tbs = (select(cell, cell + 1.0, dw > 0.0) - ow) * inv;
+        float tc = min(min(tbs.x, tbs.y), t1);
+        float steps = cloudSteps(cell, seed, time, cover);
+        if (steps > 0.0) {
+            float2 slab = cloudSlab(steps);
+            float yA = o.y + d.y * t, yB = o.y + d.y * tc;
+            if (yA >= slab.x && yA <= slab.y) {
+                c.hit = true; c.t = t;
+                c.n = lastAxis == 1 ? float3(0, -sign(d.y), 0) : (lastAxis == 0 ? float3(-sign(d.x), 0, 0) : float3(0, 0, -sign(d.z)));
+                return c;
+            }
+            if (d.y > 0 && yA < slab.x && yB >= slab.x) { c.hit = true; c.t = (slab.x - o.y) / d.y; c.n = float3(0, -1, 0); return c; }
+            if (d.y < 0 && yA > slab.y && yB <= slab.y) { c.hit = true; c.t = (slab.y - o.y) / d.y; c.n = float3(0, 1, 0); return c; }
+        }
+        lastAxis = tbs.x < tbs.y ? 0 : 2;
+        nudge = select(float2(0), sign(dw) * 0.001, tbs <= tc + 1e-5);
+        t = tc;
+    }
+    return c;
+}
+
+static inline float cloudShadow(float3 p, float3 L, int2 mapOrigin, uint seed, float time, float cover) {
+    if (L.y <= 0.02) return 1.0;
+    float2 q = p.xz + L.xz / L.y * (CLOUD_Y - p.y) + float2(mapOrigin);
+    return cloudSteps(floor(q / CLOUD_CELL), seed, time, cover) > 0.0 ? 0.4 : 1.0;
+}
+
+struct Ctx {
+    texture2d<float> hm;
+    int size;
+    int2 origin;
+    uint seed;
+    float time;
+    float quality;
+    float globalMax;
+    float pixelAngle;
+    float cover;
+    Light L;
+};
+
+static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows) {
+    float3 p = o + d * h.t;
+    float3 n = float3(h.normal);
+    float2 uv = faceUV(p, h.normal);
+    if (h.normal.y == 0) uv.y = fract(p.y);
+    float detail = saturate(1.6 - h.t * x.pixelAngle * 16.0);
+    Surface s = surfaceAt(x.hm, x.size, h.voxel, h.normal, p, uv, detail, x.origin, x.seed, x.time);
+    float ao = cornerAO(x.hm, x.size, h.voxel, h.normal, uv);
+    float ndl = max(dot(n, x.L.key), 0.0);
+    float sh = 1.0;
+    if (shadows && ndl > 0.0) {
+        Hit sHit = trace(x.hm, p + n * 0.02, x.L.key, 700.0, x.quality > 0.5 ? 120 : 48, x.globalMax, x.size);
+        sh = sHit.hit ? 0.0 : 1.0;
+    }
+    sh *= mix(1.0, cloudShadow(p, x.L.key, x.origin, x.seed, x.time, x.cover), x.L.sunAmt);
+    float3 skyFill = (x.L.zenith * (1.1 + 0.4 * n.y) + x.L.horizon * 0.18) * 0.75;
+    float3 bounce = (1.0 - saturate(n.y)) * 0.18 * float3(0.45, 0.38, 0.28) * x.L.keyCol * max(x.L.key.y, 0.0);
+    float3 col = s.albedo * (x.L.keyCol * ndl * sh + (skyFill + bounce) * ao);
+    // Lips of steps catch low light.
+    float low = 1.0 - smoothstep(0.05, 0.4, x.L.key.y);
+    col += s.glint * detail * x.L.keyCol * sh * (0.08 + 0.25 * low) * s.albedo * 2.0;
+    return col;
+}
+
+static inline float3 fogColor(thread const Ctx& x, float3 d) {
+    float3 c = skyColor(float3(d.x, max(d.y, 0.0) * 0.5, d.z), x.L, false, x.seed);
+    return c;
+}
+
+// Exponential height fog plus a slow-drifting noise modulation that pools mist in valleys.
+static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t) {
+    float hf = 30.0;
+    float a = 0.0012, b = 0.0, c2 = 1.3e-6;
+    float k = exp(-(o.y - SEA) / hf);
+    float dy = abs(d.y) < 1e-4 ? 1e-4 : d.y;
+    float heightTerm = a * hf * k * (1.0 - exp(-dy * t / hf)) / dy;
+    float mist = 0;
+    int samples = x.quality > 0.5 ? 4 : 2;
+    for (int i = 0; i < samples; i++) {
+        float st = min(t, 400.0) * (float(i) + 0.5) / float(samples);
+        float3 sp = o + d * st;
+        float3 wp = float3(sp.x + float(x.origin.x), sp.y, sp.z + float(x.origin.y));
+        mist += saturate(perlin3(wp * float3(0.012, 0.03, 0.012) + float3(x.time * 0.01, 0, x.time * 0.006), x.seed + 50u) + 0.2)
+              * exp(-max(sp.y - SEA, 0.0) / 10.0);
+    }
+    mist = mist / float(samples) * min(t, 400.0) * 0.0035;
+    // The last term hides the map edge (>= ~720 voxels from the camera).
+    return exp(-(heightTerm + b * t + c2 * t * t + mist + 4.0 * smoothstep(520.0, 760.0, t)));
+}
+
+static float3 applyFog(thread const Ctx& x, float3 col, float3 o, float3 d, float t) {
+    float T = fogTransmittance(x, o, d, t);
+    // Thin haze in-scatters less than the full horizon radiance; only thick fog converges on the sky.
+    float3 f = (fogColor(x, d) + x.L.keyCol * min(hg(dot(d, x.L.key), 0.6), 0.3) * 0.35) * mix(0.45, 1.0, smoothstep(0.1, 0.9, 1.0 - T));
+    return mix(f, col, T);
+}
+
+// Sky with the cloud layer composited in front, fogged by distance.
+static float3 skyWithClouds(thread const Ctx& x, float3 o, float3 d, float tLimit) {
+    float3 sky = skyColor(d, x.L, true, x.seed);
+    CloudHit c = traceClouds(o, d, x.origin, x.seed, x.time, x.cover, tLimit);
+    if (!c.hit) return sky;
+    float ndl = max(dot(c.n, x.L.key), 0.0);
+    float3 lit = x.L.keyCol * (0.35 + 0.65 * ndl) + x.L.zenith * 1.6 + x.L.horizon * 0.5;
+    lit *= c.n.y < 0 ? 0.62 : 1.0;
+    float3 col = mix(lit * 0.95, sky, 0.12);
+    float T = exp(-c.t / 900.0) * smoothstep(2400.0, 900.0, c.t);
+    return mix(sky, col, T);
+}
+
+fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0)]],
+                              texture2d<float> hm [[texture(0)]]) {
+    float2 ndc = in.uv * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+    float tanH = f.camPos.w;
+    float3 d = normalize(f.camFwd.xyz + f.camRight.xyz * ndc.x * tanH * f.camFwd.w + f.camUp.xyz * ndc.y * tanH);
+    float3 o = f.camPos.xyz;
+
+    Ctx x { hm, f.mapInfo.z, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w, f.misc.y,
+            2.0 * tanH * f.resolution.w, f.misc.w, makeLight(f.sunDir.xyz) };
+
+    Hit h = trace(hm, o, d, 4000.0, 400, x.globalMax, x.size);
+    if (f.misc2.z == 1) return float4(float(h.iters) / 400.0, h.hit ? 0.3 : 0.0, h.iters >= 399 ? 1 : 0, 1);
+
+    float tw = d.y < 0 ? (SEA - o.y) / d.y : 1e9;
+    bool water = tw > 0 && (!h.hit || tw < h.t);
+    float3 col;
+    float tSurf;
+    if (water) {
+        float3 wp = o + d * tw;
+        float2 ww = wp.xz + float2(x.origin);
+        float e0 = perlin3(float3(ww * 0.3, x.time * 0.25), x.seed + 60u);
+        float ex = perlin3(float3((ww + float2(0.05, 0)) * 0.3, x.time * 0.25), x.seed + 60u);
+        float ez = perlin3(float3((ww + float2(0, 0.05)) * 0.3, x.time * 0.25), x.seed + 60u);
+        float3 n = normalize(float3(-(ex - e0) * 0.35, 1.0, -(ez - e0) * 0.35));
+        float3 r = reflect(d, n);
+        r.y = abs(r.y);
+        float3 refl;
+        if (x.quality > 0.5) {
+            Hit rh = trace(hm, wp + float3(0, 0.02, 0), r, 1500.0, 220, x.globalMax, x.size);
+            refl = rh.hit ? applyFog(x, shade(x, wp, r, rh, false), wp, r, rh.t) : skyWithClouds(x, wp, r, 2500.0);
+        } else {
+            refl = skyColor(r, x.L, false, x.seed);
+        }
+        float3 deep = x.L.zenith * 0.18 + x.L.horizon * 0.06 + float3(0.004, 0.014, 0.018);
+        float3 under = deep;
+        if (h.hit) {
+            float path = h.t - tw;
+            float3 lit = shade(x, o, d, h, false);
+            under = mix(deep, lit * float3(0.55, 0.8, 0.85), exp(-path * 0.22));
+        }
+        float cosi = saturate(-dot(d, n));
+        float fres = 0.02 + 0.98 * pow(1.0 - cosi, 5.0);
+        col = mix(under, refl, fres);
+        tSurf = tw;
+    } else if (h.hit) {
+        col = shade(x, o, d, h, true);
+        tSurf = h.t;
+    } else {
+        return float4(skyWithClouds(x, o, d, 2500.0), 1);
+    }
+    if (f.misc2.z == 3) return float4(float3(fogTransmittance(x, o, d, tSurf)), 1);
+    if (f.misc2.z != 2) col = applyFog(x, col, o, d, tSurf);
+    return float4(col, 1);
+}
+
+static inline float3 acesFit(float3 x) {
+    return saturate((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14));
+}
+
+static inline float3 linearToSRGB(float3 c) {
+    return select(1.055 * pow(c, 1.0 / 2.4) - 0.055, c * 12.92, c <= 0.0031308);
+}
+
+static inline float3 srgbToLinear(float3 c) {
+    return select(pow((c + 0.055) / 1.055, 2.4), c / 12.92, c <= 0.04045);
+}
+
+// misc2.w is the display's EDR headroom; 0 means SDR output (sRGB-encoded 8-bit).
+fragment float4 postFragment(VOut in [[stage_in]], texture2d<float> scene [[texture(0)]],
+                             constant Frame& f [[buffer(0)]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float3 x = scene.sample(s, in.uv).rgb * f.misc.x;
+    float3 c = acesFit(x);
+    float ign = fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715))));
+    float3 enc = linearToSRGB(saturate(c)) + (ign - 0.5) / 255.0;
+    float headroom = f.misc2.w;
+    if (headroom <= 1.0) return float4(enc, 1);
+    // EDR: identical to SDR below the ACES shoulder; only true highlights rise into the headroom.
+    float peak = max(max(x.r, x.g), x.b);
+    float over = max(peak - 1.6, 0.0);
+    float lift = (headroom - 1.0) * (1.0 - exp(-over / 3.0));
+    float3 lin = srgbToLinear(saturate(enc));
+    return float4(lin * (1.0 + lift), 1);
+}
