@@ -826,7 +826,8 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
 
 // Converges on the actual sky colour as fog thickens (T -> 0), so fogged land meets the sky with no seam.
 static inline float3 fogColor(thread const Ctx& x, float3 d, float T) {
-    float y = max(d.y, 0.0);
+    // At night the sky's horizon gradient is mirrored below it, so far land and sea dim smoothly downward.
+    float y = max(d.y, -d.y * x.L.night);
     float3 c = skyColor(float3(d.x, mix(y, y * 0.5 + 0.12, T), d.z), x.L, false, x.seed, x.time);
     // Aerial colour cools away from the sun so far ridges separate from the sky.
     float away = saturate(dot(normalize(d.xz + 1e-5), normalize(x.L.sun.xz + 1e-5)) * 0.5 + 0.5);
@@ -834,7 +835,7 @@ static inline float3 fogColor(thread const Ctx& x, float3 d, float T) {
 }
 
 // Exponential height fog plus a slow-drifting noise modulation that pools mist in valleys.
-static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t) {
+static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, float edgeFog = 1.0) {
     float hf = 30.0;
     float a = 0.0009, b = 0.0, c2 = 1.3e-6;
     float k = exp(-(o.y - SEA) / hf);
@@ -857,11 +858,11 @@ static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t) 
     float clear = mix(1.0, 0.15, smoothstep(0.2, 0.45, x.L.sun.y));
     // Night air is crisp: moonlit ridges stay legible to the horizon.
     clear *= mix(1.0, 0.35, x.L.night);
-    return exp(-((heightTerm + b * t + c2 * t * t + mist) * clear + 5.0 * smoothstep(110.0, 10.0, edgeDist)));
+    return exp(-((heightTerm + b * t + c2 * t * t + mist) * clear + 5.0 * edgeFog * smoothstep(mix(110.0, 180.0, x.L.night), 10.0, edgeDist)));
 }
 
-static float3 applyFog(thread const Ctx& x, float3 col, float3 o, float3 d, float t) {
-    float T = fogTransmittance(x, o, d, t);
+static float3 applyFog(thread const Ctx& x, float3 col, float3 o, float3 d, float t, float edgeFog = 1.0) {
+    float T = fogTransmittance(x, o, d, t, edgeFog);
     // Thin haze in-scatters less than the full horizon radiance; only thick fog converges on the sky.
     float3 f = (fogColor(x, d, T) + x.L.keyCol * min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night)) * mix(0.3, 1.0, smoothstep(0.1, 0.9, 1.0 - T));
     return mix(f, col, T);
@@ -880,33 +881,28 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d) {
     float ta = (y0 - o.y) / d.y, tb = (y1 - o.y) / d.y;
     float t0 = max(min(ta, tb), 0.0), t1 = max(ta, tb);
     if (t0 > 7000.0) return c;
-    // Night clouds have crisp edges, which need finer, dithered steps to show no slices at grazing angles.
-    int steps = (x.quality > 0.5 ? 14 : 8) + int(x.L.night * 0.0);
+    // Night steps are dithered, so fewer suffice.
+    int steps = x.quality > 0.5 ? (x.L.night > 0.99 ? 9 : 14) : 8;
     float dt = (t1 - t0) / float(steps);
     float lowSun = 1.0 - smoothstep(0.02, 0.28, abs(x.L.sun.y));
     float2 dh = normalize(d.xz + 1e-5), sh2 = normalize(x.L.sun.xz + 1e-5);
     float toSun = 0.5 + 0.5 * dot(dh, sh2);
     float2 sunStep = x.L.key.xz / max(x.L.key.y, 0.2) * 14.0;
     float3 ambient = x.L.zenith * 1.0 + x.L.horizon * 0.35;
+    float3 moonGlow = float3(0.10, 0.13, 0.22) * pow(saturate(dot(d, x.L.moon)), 16.0) * 0.9;
     float glowAmt = lowSun * smoothstep(-0.14, -0.02, x.L.sun.y);
     float T = 1.0;
     float3 acc = 0;
     float silver = 0;
     float jit = 0.5 + x.L.night * (x.dither - 0.5);
-    float2 lastQ = float2(1e9);
-    float coarse = 0, towardC = -1e9;
-    float reuse = x.L.night > 0.0 ? 400.0 : -1.0;
     for (int i = 0; i < steps; i++) {
         float t = t0 + (float(i) + jit) * dt;
         float3 p = o + d * t;
         float2 q = p.xz + float2(x.origin);
-        // Night: steep rays cross the slab within a few units, so the coarse field is reused between
-        // nearby steps.
-        bool fresh = distance_squared(q, lastQ) > reuse;
-        if (fresh) { lastQ = q; coarse = cloudDensity(q, x.seed, x.time, x.cover); towardC = -1e9; }
-        float base = coarse;
+        // Night skies stay mostly clear: fewer, thinner banks.
+        float base = cloudDensity(q, x.seed, x.time, x.cover) - 0.07 * x.L.night;
         // Night: a finer octave frays the edges into wisps for the moon to light through.
-        if (x.L.night > 0.0 && base > -0.3) {
+        if (x.L.night > 0.0 && base > -0.15) {
             float2 qd = q - float2(x.time * 1.3, 0);
             base += x.L.night * (0.16 * perlin2(qd / 90.0, x.seed + 42u) + 0.07 * perlin2(qd / 33.0, x.seed + 43u) + 0.035 * perlin2(qd / 13.0, x.seed + 44u));
         }
@@ -914,12 +910,14 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d) {
         float top = 0.35 + 0.65 * saturate(base * 2.5);
         float dens = saturate((base - 0.04) * mix(3.0, 9.0, x.L.night)) * smoothstep(0.0, 0.2, h01) * (1.0 - smoothstep(top * 0.7, top, h01));
         if (dens < 0.01) continue;
-        if (towardC < -1e8) towardC = cloudDensity(q + sunStep, x.seed, x.time, x.cover);
-        float toward = towardC;
+        // Under the moon the sample's own density stands in for the occlusion toward the light.
+        float toward = x.L.night > 0.99 ? base : cloudDensity(q + sunStep, x.seed, x.time, x.cover);
         float shadow = exp(-saturate((toward - 0.04) * 3.0) * 2.2) * (0.55 + 0.45 * h01);
-        float3 lit = x.L.keyCol * (mix(0.15, 0.4, x.L.night) + mix(0.85, 0.6, x.L.night) * shadow) * mix(1.0, 0.32, x.L.night) * (0.6 + 0.4 * toSun) + ambient * (0.6 + 0.4 * h01);
+        float3 lit = x.L.keyCol * (0.15 + 0.85 * shadow) * (0.6 + 0.4 * toSun) + ambient * (0.6 + 0.4 * h01);
         lit += float3(1.6, 0.55, 0.20) * glowAmt * toSun * (1.0 - h01) * 0.9;
-        float a = 1.0 - exp(-dens * dt * mix(0.05, 0.08, x.L.night));
+        // Moonlit cloud is a dim blue-grey, only a little above the sky behind it.
+        lit = mix(lit, float3(0.022, 0.027, 0.042) * (0.5 + 0.7 * shadow) + x.L.skyHor * 0.8 + moonGlow, x.L.night);
+        float a = 1.0 - exp(-dens * dt * mix(0.05, 0.045, x.L.night));
         acc += T * a * lit;
         silver += T * a * shadow;
         T *= 1.0 - a;
@@ -932,9 +930,9 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d) {
     // the moon.
     float cm = dot(d, x.L.moon);
     float fringe = silver / max(cover, 1e-3) * (1.0 - cover);
-    c.col += float3(0.78, 0.86, 1.0) * x.L.night * hg(cm, 0.9) * 2.0 * fringe;
+    c.col += float3(0.70, 0.80, 1.0) * x.L.night * min(hg(cm, 0.92) * 0.25, 1.5) * fringe;
     c.col *= mix(1.0, 0.9, smoothstep(0.3, 0.5, x.L.sun.y));
-    c.a = cover * mix(1.0, 0.7, x.L.night) * exp(-t0 / 3000.0) * smoothstep(7000.0, 2500.0, t0) * smoothstep(0.02, 0.1, d.y);
+    c.a = cover * mix(1.0, 0.6, x.L.night) * exp(-t0 / 3000.0) * smoothstep(7000.0, 2500.0, t0) * smoothstep(0.02, 0.1, d.y);
     return c;
 }
 
@@ -958,8 +956,8 @@ static float3 softCloudSky(thread const Ctx& x, float3 o, float3 r) {
     float t = (CLOUD_Y - o.y) / r.y;
     float2 q = o.xz + r.xz * t + float2(x.origin);
     // Soft coverage, blurred as if by ripples, matching the volumetric sky.
-    float dens = smoothstep(0.0, 0.3, cloudDensity(q, x.seed, x.time, x.cover));
-    float3 lit = x.L.keyCol * 0.4 * mix(1.0, 0.35, x.L.night) + x.L.zenith * 1.2 + x.L.horizon * 0.4;
+    float dens = smoothstep(0.0, 0.3, cloudDensity(q, x.seed, x.time, x.cover) - 0.07 * x.L.night);
+    float3 lit = mix(x.L.keyCol * 0.4 + x.L.zenith * 1.2 + x.L.horizon * 0.4, float3(0.04, 0.047, 0.07), x.L.night);
     return mix(sky, lit, dens * 0.4 * exp(-t / 2600.0));
 }
 
@@ -1034,7 +1032,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         return skyWithClouds(x, o, d);
     }
     if (f.misc2.z == 3) return float4(float3(fogTransmittance(x, o, d, tSurf)), 1);
-    if (f.misc2.z != 2) col = applyFog(x, col, o, d, tSurf);
+    // The sea runs on past the map, so by night it reflects the sky out to the horizon.
+    if (f.misc2.z != 2) col = applyFog(x, col, o, d, tSurf, water ? 1.0 - x.L.night : 1.0);
     return float4(col, tSurf);
 }
 
