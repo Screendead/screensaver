@@ -119,6 +119,9 @@ final class FlightCamera {
         s *= 1 - 0.6 * facing
         // Twilight looking away from the light: look down at the backlit lips rather than an empty wash.
         if abs(sun.y) < 0.1 && facing < 0.3 { s = min(1, s + 0.25) }
+        // Over open water, look out at the far shore rather than down at a featureless mirror.
+        let look = p + fwdFlat * 70
+        if h(look.x, look.y) <= 20.0 { s *= 0.35 }
         let targetPitch = -0.08 - 0.40 * s + 0.05 * facing + 0.03 * wander(time + 900, 1.3) + max(-0.04, min(0.06, climbRate * 0.03))
         surveyAmount = s
         pitch += ((pitchOverride ?? targetPitch) - pitch) * min(1, dt * 0.25)
