@@ -212,9 +212,9 @@ static inline float groveDensity(float2 w, float g, uint seed) {
     float wet = smoothstep(0.25, 0.6, c.moist) * open;
     float snowline = mix(160.0, 92.0, smoothstep(0.42, 0.18, c.temp));
     float band = smoothstep(SEA + 2.0, SEA + 6.0, g) * smoothstep(snowline - 4.0, snowline - 30.0, g);
-    float dense = smoothstep(0.12, 0.34, grove + 0.35 * (wet - 0.5));
+    float dense = smoothstep(0.22, 0.44, grove + 0.35 * (wet - 0.5));
     // Lone trees dot even dry grassland; groves need moisture.
-    return (0.025 * open + 0.55 * dense * wet) * band;
+    return (0.02 * open + 0.32 * dense * wet) * band;
 }
 
 struct Tree { bool ok; int2 c; float g; int lo; int top; int kind; };
