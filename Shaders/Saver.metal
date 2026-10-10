@@ -400,27 +400,30 @@ static float3 skyColor(float3 d, Light L, bool withDiscs, uint seed, float time)
     if (L.night > 0.0) {
         float md = max(dot(d, L.moon), 0.0);
         c += float3(0.10, 0.13, 0.22) * (pow(md, 24.0) * 0.6 + pow(md, 400.0) * 1.5) * L.night;
-        // Stars: one hashed point per cell of a direction grid.
+        // Stars: one hashed point per cell, thinned by low-frequency noise into clusters and voids and
+        // denser along a band (a galactic plane at a seed-dependent tilt).
         float3 q = d * 260.0;
         int3 cell = int3(floor(q));
         uint h = hash3i(cell, seed + 77u);
-        if (hashf(h) > 0.982) {
+        float3 gp = normalize(float3(0.35, 0.9, 0.25 + hashf(pcg(seed + 3u)) * 0.5));
+        float band = exp(-pow(dot(d, gp) / 0.18, 2.0));
+        float clump = saturate(perlin3(d * 3.0, seed + 78u) * 0.9 + 0.5);
+        float density = mix(0.004, 0.035, saturate(clump * 0.8 + band * 0.7));
+        if (hashf(h) > 1.0 - density) {
             float3 sp = float3(cell) + float3(hashf(pcg(h)), hashf(pcg(h + 1)), hashf(pcg(h + 2)));
             float dd = length(q - sp);
-            float b = pow(hashf(pcg(h + 3)), 6.0) * 5.0 + 0.2;
+            float b = pow(hashf(pcg(h + 3)), 9.0) * 7.0 + 0.12;
             float twinkle = 0.7 + 0.3 * sin(time * 1.3 + hashf(pcg(h + 4)) * 40.0);
             c += float3(0.9, 0.95, 1.1) * b * twinkle * smoothstep(0.55, 0.0, dd) * L.night * smoothstep(0.0, 0.05, d.y);
         }
-        // Moon: a disc quantized to a 16x16 block grid.
+        // Moon: a clean disc whose maria are Perlin noise.
         if (md > 0.99) {
             float3 mu = normalize(cross(L.moon, float3(0, 1, 0)));
             float3 mv = cross(mu, L.moon);
             float2 xy = float2(dot(d, mu), dot(d, mv)) / 0.03;
-            float2 qd = (floor(xy * 8.0) + 0.5) / 8.0;
-            if (length(qd) < 1.0) {
-                float lum = 0.75 + 0.25 * hashf(hash2i(int2(floor(xy * 8.0)), 5u)) - 0.25 * smoothstep(0.2, 0.6, perlin2(xy * 1.7 + 3.0, 9u) + 0.2);
-                c = mix(c, float3(0.75, 0.80, 0.92) * 2.4 * lum, L.night);
-            }
+            float disc = 1.0 - smoothstep(0.96, 1.0, length(xy));
+            float lum = 0.92 - 0.3 * smoothstep(0.15, 0.55, fbm2(xy * 1.3 + 3.0, 3, 9u) + 0.25);
+            c = mix(c, float3(0.75, 0.80, 0.92) * 2.4 * lum, L.night * disc);
         }
     }
     return c;
