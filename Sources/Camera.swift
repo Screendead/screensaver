@@ -66,16 +66,28 @@ final class FlightCamera {
     // Shot director: score a candidate heading by what the frame would hold. Relief across the middle
     // distance gives a subject; some water is welcome but a frame full of it is not; facing a low sun or
     // the moon puts the light in shot; large turns cost a little so motion stays calm; land rising past eye
-    // height close ahead would fill the frame with a wall.
-    private func shotScore(_ heading: Double, lightYaw: Double, lightW: Double) -> Double {
+    // height close ahead would fill the frame with a wall. Under a high sun close slopes read as blocks, so
+    // the shot looks out: open sightlines and water count for more, and near land climbing into the lower
+    // half of the frame (bottom edge 0.436 rad under the pitch) costs.
+    private func shotScore(_ heading: Double, lightYaw: Double, lightW: Double, noon: Double) -> Double {
         let p = SIMD2(position.x, position.z)
-        var rise = -Double.infinity
+        var rise = -Double.infinity, nearAngle = -Double.infinity
         for dist in stride(from: 30.0, through: 100.0, by: 14.0) {
             for off in [-0.25, 0.0, 0.25] {
-                rise = max(rise, h(p.x + sin(heading + off) * dist, p.y + cos(heading + off) * dist) - position.y)
+                let dh = h(p.x + sin(heading + off) * dist, p.y + cos(heading + off) * dist) - position.y
+                rise = max(rise, dh)
+                nearAngle = max(nearAngle, atan2(dh, dist))
             }
         }
         let wall = -0.8 * min(max(rise / 15, 0), 1)
+        let fill = -0.6 * noon * min(max((nearAngle - (pitch - 0.25)) / 0.25, 0), 1)
+        var sight = 400.0
+        for dist in stride(from: 40.0, through: 400.0, by: 20.0)
+        where h(p.x + sin(heading) * dist, p.y + cos(heading) * dist) > position.y + dist * tan(pitch) {
+            sight = dist
+            break
+        }
+        let open = 0.4 * noon * sight / 400
         var sum = 0.0, sum2 = 0.0, wet = 0.0, n = 0.0
         for dist in stride(from: 80.0, through: 400.0, by: 40.0) {
             for off in [-0.3, -0.15, 0.0, 0.15, 0.3] {
@@ -88,10 +100,11 @@ final class FlightCamera {
         let mean = sum / n
         let relief = min(sqrt(max(sum2 / n - mean * mean, 0)) / 25, 1)
         let wf = wet / n
-        let water = wf < 0.1 ? 0 : (wf < 0.45 ? 0.4 : 0.4 - 2.0 * (wf - 0.45))
+        let pool = 0.4 + 0.25 * noon
+        let water = wf < 0.1 ? 0 : (wf < 0.45 ? pool : pool - 2.0 * (wf - 0.45))
         let light = lightW * max(0, cos(heading - lightYaw)) * 0.8
         let turn = -0.25 * abs(FlightCamera.angleDiff(heading, yaw))
-        return relief + water + light + turn + wall
+        return relief + water + light + turn + wall + fill + open
     }
 
     func placeAtStart() {
@@ -129,6 +142,7 @@ final class FlightCamera {
         let moonOff = abs(FlightCamera.angleDiff(moonYaw, yaw))
         // The moon sits fully in frame within ~0.5 rad of the heading (horizontal half-field ~0.62 rad).
         let facingMoon = nightW * min(max((1.0 - moonOff) / 0.5, 0), 1)
+        let noon = min(max((sun.y - 0.28) / 0.12, 0), 1)
         if time >= nextShot {
             let lightW = max(w, nightW)
             let lightYaw = nightW > w ? moonYaw : keyYaw
@@ -136,7 +150,7 @@ final class FlightCamera {
             // relief outvote the moon wherever the land happens to rise away from it.
             let (center, span, step) = nightW > 0.5 ? (moonYaw, 3, 0.15) : (yaw, 3, 0.5)
             let headings: [Double] = (-span...span).map { center + Double($0) * step }
-            shotYaw = headings.max { shotScore($0, lightYaw: lightYaw, lightW: lightW) < shotScore($1, lightYaw: lightYaw, lightW: lightW) }
+            shotYaw = headings.max { shotScore($0, lightYaw: lightYaw, lightW: lightW, noon: noon) < shotScore($1, lightYaw: lightYaw, lightW: lightW, noon: noon) }
             nextShot = time + 12
         }
         let steerShot = shotYaw.map { sin(FlightCamera.angleDiff($0, yaw)) * 0.05 } ?? 0
@@ -168,7 +182,7 @@ final class FlightCamera {
             lo = min(lo, hq); hi = max(hi, hq)
         }
         let roughClimb = min(max((hi - lo - 6) * 1.5, 0), 30)
-        let clearance = roughClimb + 12 + 12 * (wander(time + 500, 0.7) + 0.6) + 10 * surveyAmount + 40 * max(0, min(1, -mode / 0.6))
+        let clearance = roughClimb + 12 + 12 * (wander(time + 500, 0.7) + 0.6) + 10 * surveyAmount + 40 * max(0, min(1, -mode / 0.6)) + 14 * noon
         // Canyon and mesa country: down among the walls they fill the frame, so rise to look across the rims.
         // The rim level is the upper quartile of a 150-voxel neighbourhood, so a lone peak off to the side does
         // not lift the flight, or the highest rim ahead, out to where a wall would still fill the frame. Eased
@@ -204,6 +218,7 @@ final class FlightCamera {
         if sun.y < -0.2 { s *= 0.65 } // keep stars and moon in the upper frame at night
         // High sun flattens a straight-down view; favour horizon vistas with ridges and cloud shadows.
         if sun.y > 0.35 { s *= 0.55 }
+        s *= 1 - 0.4 * noon
         // Facing a low sun or moon: lift the view so the light and its water path stay in frame.
         s *= 1 - 0.6 * facing
         // Golden and blue hour: keep the horizon in frame; the sky and aerial perspective carry these moments.
@@ -211,7 +226,7 @@ final class FlightCamera {
         // Over open water, look out at the far shore rather than down at a featureless mirror.
         let look = p + fwdFlat * 70
         if h(look.x, look.y) <= 20.0 { s *= 0.35 }
-        var targetPitch = -0.08 - 0.40 * s + 0.05 * facing + 0.03 * wander(time + 900, 1.3) + max(-0.04, min(0.06, climbRate * 0.03))
+        var targetPitch = -0.08 + 0.03 * noon - 0.40 * s + 0.05 * facing + 0.03 * wander(time + 900, 1.3) + max(-0.04, min(0.06, climbRate * 0.03))
         // Facing the moon: it sits just inside the top edge (vertical half-field 0.436 rad), leaving the lower
         // frame to land and the moon's path across the water.
         let moonPitch = min(asin(moon.y) - 0.38, 0.13)
