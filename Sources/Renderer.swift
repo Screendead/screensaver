@@ -18,6 +18,8 @@ struct Frame {
     var prevUp = SIMD4<Float>()
     var jitter = SIMD4<Float>()
     var cloud = SIMD4<Float>()
+    var lights = SIMD4<Float>()
+    var refs = SIMD4<Int32>()
 }
 
 enum GPU {
@@ -33,6 +35,7 @@ enum GPU {
 // Day cycle with a time-warp that lingers in golden and blue hour.
 struct SkyClock {
     var phase: Double = -0.035 // just before sunrise: open on blue hour
+    var day = 0
     static let dayLength: Double = 24 * 60
 
     // Peak day is held to a long-afternoon sun (flat high noon judged weakest); night keeps its full depth
@@ -54,7 +57,7 @@ struct SkyClock {
         // Linger in golden and blue hour, hurry through midday and deep night.
         let warp = y < -0.25 ? 5.0 : 0.5 + 1.5 * s * s * (3 - 2 * s)
         phase += dt / SkyClock.dayLength * warp * 1.05
-        if phase > 1 { phase -= 1 }
+        if phase > 1 { phase -= 1; day += 1 }
     }
 }
 
@@ -308,6 +311,15 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var cloudCenter: SIMD2<Double>?
     static let cloudTexels = 2048, cloudTexel = 4.0
     private var history: [MTLTexture] = []
+    // Lamps: per-frame position and state (schedule, flicker), and their light baked onto the map.
+    private let lampPipeline: MTLComputePipelineState
+    private let lightPipeline: MTLComputePipelineState
+    private let lampPos: MTLBuffer
+    private let lampState: MTLBuffer
+    private let lightMap: MTLTexture
+    private let lightDir: MTLTexture
+    static let lightTexels = 512, hazeLamps = 16
+    private var hazeRefs = [Int32](repeating: 0, count: 16)
     static let ditherCells = 864.0
     private var historyIndex = 0
     private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
@@ -354,6 +366,10 @@ final class Renderer: NSObject, MTKViewDelegate {
               let tp = try? device.makeRenderPipelineState(descriptor: taa),
               let pp = try? device.makeRenderPipelineState(descriptor: post),
               let cf = lib.makeFunction(name: "cloudField").flatMap({ try? device.makeComputePipelineState(function: $0) }),
+              let lampP = lib.makeFunction(name: "updateLamps").flatMap({ try? device.makeComputePipelineState(function: $0) }),
+              let lightP = lib.makeFunction(name: "bakeLights").flatMap({ try? device.makeComputePipelineState(function: $0) }),
+              let lpos = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.maxLamps * 16, options: .storageModePrivate),
+              let lstate = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.maxLamps * 16, options: .storageModePrivate),
               let world = World(device: device, library: lib, seed: seed) else { return nil }
         self.device = device
         self.queue = queue
@@ -361,6 +377,16 @@ final class Renderer: NSObject, MTKViewDelegate {
         postPipeline = pp
         taaPipeline = tp
         cloudPipeline = cf
+        lampPipeline = lampP
+        lightPipeline = lightP
+        lampPos = lpos
+        lampState = lstate
+        let ld = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: Renderer.lightTexels, height: Renderer.lightTexels, mipmapped: false)
+        ld.usage = [.shaderRead, .shaderWrite]
+        ld.storageMode = .private
+        guard let lmT = device.makeTexture(descriptor: ld), let ldT = device.makeTexture(descriptor: ld) else { return nil }
+        lightMap = lmT
+        lightDir = ldT
         self.world = world
         // Spec offset displays by 90 s of the same flight; steering reads GPU heights, so displays
         // instead start at different places in the same world.
@@ -433,6 +459,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         f.mapInfo = SIMD4(world.origin.x, world.origin.y, Int32(World.size), Int32(bitPattern: world.seed))
         f.misc = SIMD4(Float(exposure), world.globalMax, 0.6, Float(cloudCover))
         f.misc2 = SIMD4(frameIndex, 1, debugMode, headroom)
+        let sunY = clock.sunDirection.y
+        let ph = clock.phase - floor(clock.phase)
+        let progress = ph < 0.25 ? 1.0 : min(max((ph - 0.52) / 0.46, 0), 1)
+        f.lights = SIMD4(Float(sunY), Float(progress), Float(clock.day), Float(min(max((0.08 - sunY) / 0.1, 0), 1)))
+        f.refs = SIMD4(Int32(f.lights.w > 0 ? hazeCount : 0), 0, 0, 0)
         if let pc = prevCamera {
             let pp = pc.pos - o
             f.prevPos = SIMD4(Float(pp.x), Float(pp.y), Float(pp.z), 1)
@@ -471,6 +502,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         var f = makeFrame(size: CGSize(width: w, height: h))
         frameIndex = (frameIndex + 1).truncatingRemainder(dividingBy: 4096)
         bakeClouds(into: cb, frame: &f)
+        bakeLamps(into: cb, frame: &f)
         let b = camera.basis
         prevCamera = (camera.position, b.fwd, b.right, b.up)
         let histIn = history[historyIndex], histOut = history[1 - historyIndex]
@@ -488,6 +520,11 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentTexture(world.climateTex, index: 2)
             enc.setFragmentBuffer(world.siteBuffer, offset: 0, index: 1)
             enc.setFragmentTexture(world.structTex, index: 3)
+            enc.setFragmentTexture(lightMap, index: 4)
+            enc.setFragmentTexture(lightDir, index: 5)
+            enc.setFragmentBuffer(lampPos, offset: 0, index: 2)
+            enc.setFragmentBuffer(lampState, offset: 0, index: 3)
+            enc.setFragmentBytes(&hazeRefs, length: 64, index: 4)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
         }
@@ -514,6 +551,45 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
         }
+    }
+
+    private var hazeCount = 0
+
+    // The lamps nearest the camera that glow in their own haze; the shader reads their state, so the list
+    // needs no schedule.
+    private func pickHazeLamps() {
+        let cam = SIMD2(camera.position.x, camera.position.z)
+        var near: [(Double, Int)] = []
+        for site in world.sites {
+            for l in site.lamps where l.kind != 3 {
+                let d = simd_length(SIMD2(l.pos.x, l.pos.z) - cam)
+                if d < 1200 { near.append((d, l.index)) }
+            }
+        }
+        near.sort { $0.0 < $1.0 }
+        hazeCount = min(near.count, Renderer.hazeLamps)
+        for i in 0..<hazeCount { hazeRefs[i] = Int32(near[i].1) }
+    }
+
+    private func bakeLamps(into cb: MTLCommandBuffer, frame f: inout Frame) {
+        guard let enc = cb.makeComputeCommandEncoder() else { return }
+        let n = World.siteGrid * World.siteGrid * World.maxLamps
+        enc.setComputePipelineState(lampPipeline)
+        enc.setBuffer(world.siteBuffer, offset: 0, index: 0)
+        enc.setBuffer(lampPos, offset: 0, index: 1)
+        enc.setBuffer(lampState, offset: 0, index: 2)
+        enc.setBytes(&f, length: MemoryLayout<Frame>.stride, index: 3)
+        enc.dispatchThreads(MTLSize(width: n, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
+        if f.lights.w > 0 {
+            pickHazeLamps()
+            f.refs.x = Int32(hazeCount)
+            enc.setComputePipelineState(lightPipeline)
+            enc.setTexture(lightMap, index: 0)
+            enc.setTexture(lightDir, index: 1)
+            let t = Renderer.lightTexels
+            enc.dispatchThreads(MTLSize(width: t, height: t, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+        }
+        enc.endEncoding()
     }
 
     private func bakeClouds(into cb: MTLCommandBuffer, frame f: inout Frame) {

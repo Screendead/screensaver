@@ -7,7 +7,7 @@ struct Frame {
     float4 camFwd;     // w aspect
     float4 camRight;   // w wrapped time (s)
     float4 camUp;      // w quality (0 battery, 1 full)
-    float4 sunDir;     // xyz direction to sun, w unused
+    float4 sunDir;     // xyz direction to sun, w day phase
     float4 resolution; // xy pixels, zw inverse
     int4   mapInfo;    // xy world xz of texel 0, z size, w seed
     float4 misc;       // x exposure, y global max height, z wind angle, w cloud cover
@@ -18,6 +18,8 @@ struct Frame {
     float4 prevUp;
     float4 jitter;     // xy subpixel jitter in NDC
     float4 cloud;      // xy cloud field origin in drifted world xz, z field texel size (0: no field)
+    float4 lights;     // x sun elevation, y night progress (0 dusk .. 1 dawn), z day index, w lamp light on the land (0 by day)
+    int4   refs;       // x lamps in the haze list
 };
 
 constant float SEA = 19.85;
@@ -1081,6 +1083,126 @@ kernel void stampStructures(texture2d<float, access::read> src [[texture(0)]],
     st.write(uint4(0), gid);
 }
 
+// MARK: - Lamps
+
+// Per kind (index = lamp kind): colour, light on the land (intensity at the source, reach in voxels), and the
+// emission of the lamp's own faces. Scene units, before exposure (night exposure is 1.6-2.4).
+constant float3 LAMP_COL[7] = { float3(0), float3(1.0, 0.42, 0.12), float3(1.0, 0.45, 0.14), float3(1.0, 0.60, 0.26),
+                                float3(1.0, 0.66, 0.32), float3(1.0, 0.50, 0.16), float3(1.0, 0.40, 0.11) };
+constant float LAMP_I[7] = { 0, 3.0, 2.2, 0.7, 1.4, 4.0, 3.0 };
+constant float LAMP_R[7] = { 1, 20, 16, 8, 10, 24, 22 };
+constant float LAMP_EMIT[7] = { 0, 7.0, 6.0, 1.4, 2.6, 11.0, 8.0 };
+
+// Slow flicker that survives the temporal resolve: under ~2 Hz, with a rare gust.
+static inline float flicker(float t, float i, uint seed) {
+    float gust = smoothstep(0.55, 0.8, perlin2(float2(t * 0.15, i), seed + 401u)) * 0.3 * perlin2(float2(t * 4.0, i + 3.1), seed + 402u);
+    return 1.0 + 0.12 * perlin2(float2(t * 0.9, i), seed + 403u) + 0.08 * perlin2(float2(t * 2.3, 2.0 * i), seed + 404u) + gust;
+}
+
+// How far a lamp is lit: lights come on through golden and blue hour, and some go out late in the night.
+// lights: x sun elevation, y night progress (0 dusk .. 1 dawn), z day index.
+static float lampLevel(int kind, uint h, float4 lights) {
+    float sunY = lights.x, prog = lights.y;
+    float on = mix(0.03, -0.10, hashf(h));
+    float dark = smoothstep(on + 0.015, on - 0.015, sunY);
+    if (kind == L_WINDOW) {
+        float off = hashf(pcg(h + 1u)) < 0.55 ? smoothstep(0.0, 0.03, prog - 0.45 - 0.4 * hashf(pcg(h + 2u))) : 0.0;
+        float relight = hashf(pcg(h + 3u)) < 0.15 ? smoothstep(0.9, 0.93, prog) : 0.0;
+        return dark * max(1.0 - off, relight);
+    }
+    // Fires burn by day too (they smoke); their light only shows as the sun sinks.
+    if (kind == L_FIRE) return 1.0 - (hashf(pcg(h + 1u)) < 0.3 ? 0.7 * smoothstep(0.7, 0.74, prog) : 0.0);
+    if (kind == L_HEARTH) return 1.0 - 0.75 * smoothstep(0.6, 0.66, prog);
+    if (kind == L_LANTERN) return dark;
+    uint nightH = hash2i(int2(int(lights.z), 7), h);
+    if (kind == L_BEACON) return dark * step(hashf(nightH), 0.35);
+    if (kind == L_RITUAL) return dark * step(hashf(nightH), 0.3);
+    return 0.0;
+}
+
+// One thread per lamp: its map-local position and kind (pos), and its colour times level and flicker plus its
+// reach (state). Fires burn low by day.
+kernel void updateLamps(device const Site* sites [[buffer(0)]],
+                        device float4* pos [[buffer(1)]],
+                        device float4* state [[buffer(2)]],
+                        constant Frame& f [[buffer(3)]],
+                        uint id [[thread_position_in_grid]]) {
+    if (id >= uint(SITE_GRID * SITE_GRID * MAX_LAMPS)) return;
+    device const Site& s = sites[id / uint(MAX_LAMPS)];
+    int li = int(id % uint(MAX_LAMPS));
+    if (s.head.z == 0 || float(li) >= s.info.w) { pos[id] = float4(0); state[id] = float4(0); return; }
+    float4 L = s.lamps[li];
+    int kind = int(L.w) % 16;
+    float3 p = float3(float(s.head.x - f.mapInfo.x) + L.x, L.y, float(s.head.y - f.mapInfo.y) + L.z);
+    uint h = pcg(uint(s.head.w) + uint(li) * 7717u);
+    float lvl = lampLevel(kind, h, f.lights);
+    float t = f.camRight.w;
+    float fl = flicker(t, float(li) * 3.7 + hashf(h) * 40.0, uint(f.mapInfo.w));
+    float k = kind == L_WINDOW ? 1.0 + (fl - 1.0) * 0.3 : kind == L_LANTERN ? 1.0 + (fl - 1.0) * 0.25 : fl;
+    float sunAmt = smoothstep(-0.02, 0.05, f.lights.x);
+    float day = kind == L_WINDOW || kind == L_LANTERN ? 1.0 : mix(1.0, 0.15, sunAmt);
+    pos[id] = float4(p, float(kind));
+    state[id] = float4(LAMP_COL[kind] * lvl * k * day, LAMP_R[kind]);
+}
+
+// Light from every lamp on a 4-voxel grid over the map: rgb irradiance, and the lamp position weighted by it
+// (xyz) with the weight (w), so shading can face it and fall off with height.
+kernel void bakeLights(texture2d<float, access::write> lm [[texture(0)]],
+                       texture2d<float, access::write> ld [[texture(1)]],
+                       device const Site* sites [[buffer(0)]],
+                       device const float4* pos [[buffer(1)]],
+                       device const float4* state [[buffer(2)]],
+                       constant Frame& f [[buffer(3)]],
+                       uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= lm.get_width() || gid.y >= lm.get_height()) return;
+    float texel = float(f.mapInfo.z) / float(lm.get_width());
+    float2 p = (float2(gid) + 0.5) * texel;
+    int2 home = int2(floor((p + float2(f.mapInfo.xy)) / float(SITE_CELL))) - siteCell0(f.mapInfo.xy);
+    float3 E = 0;
+    float4 P = 0;
+    for (int j = -1; j <= 1; j++)
+        for (int i = -1; i <= 1; i++) {
+            int2 gi = home + int2(i, j);
+            if (any(gi < 0) || any(gi >= SITE_GRID)) continue;
+            int si = gi.y * SITE_GRID + gi.x;
+            device const Site& s = sites[si];
+            if (s.head.z == 0 || s.info.w < 1.0) continue;
+            float2 dc = p - float2(s.head.xy - f.mapInfo.xy);
+            if (dot(dc, dc) > (s.info.x + 30.0) * (s.info.x + 30.0)) continue;
+            for (int l = 0; l < int(s.info.w); l++) {
+                float4 lp = pos[si * MAX_LAMPS + l], ls = state[si * MAX_LAMPS + l];
+                float R = ls.w;
+                float dd = length(p - lp.xz);
+                if (dd >= R || all(ls.rgb == 0.0)) continue;
+                float3 e = ls.rgb * LAMP_I[int(lp.w)] / (1.0 + (dd / (0.25 * R)) * (dd / (0.25 * R))) * smoothstep(R, 0.6 * R, dd);
+                float wgt = dot(e, float3(0.3, 0.59, 0.11));
+                E += e;
+                P += float4(lp.xyz, 1.0) * wgt;
+            }
+        }
+    lm.write(float4(E, 0), gid);
+    ld.write(P, gid);
+}
+
+// In-scatter of the nearest lamps' light along a ray to tEnd: the closed-form integral of 1/(r^2 + 4) along the
+// ray, so a hamlet or a fire hangs in a soft glow of its own haze, and the glow stops at whatever hides it.
+static float3 lampHaze(device const float4* pos, device const float4* state, constant int4* refs, int count,
+                       float3 o, float3 d, float tEnd) {
+    float3 sum = 0;
+    for (int i = 0; i < count; i++) {
+        int li = refs[i / 4][i % 4];
+        float4 ls = state[li];
+        if (all(ls.rgb == 0.0)) continue;
+        float4 lp = pos[li];
+        float3 v = lp.xyz - o;
+        float tc = dot(v, d);
+        float hh = sqrt(max(dot(v, v) - tc * tc, 0.0) + 4.0);
+        float I = (atan((tEnd - tc) / hh) - atan(-tc / hh)) / hh;
+        sum += ls.rgb * LAMP_I[int(lp.w)] * I;
+    }
+    return sum;
+}
+
 // MARK: - Traversal
 
 struct Hit {
@@ -1454,7 +1576,7 @@ static inline float3 sandRipples(int2 v, float2 uv, float2 w, float fp, float ti
 }
 
 static Surface surfaceAt(texture2d<float> hm, texture2d<float> clim, texture2d<uint> st, device const Site* sites,
-                         int size, int3 v, int3 n, float2 uv, float fp, float fpA, int2 mapOrigin, uint seed, float time) {
+                         device const float4* lampState, int size, int3 v, int3 n, float2 uv, float fp, float fpA, int2 mapOrigin, uint seed, float time) {
     Surface s;
     s.slope = 0;
     s.mat = 0;
@@ -1699,6 +1821,7 @@ static Surface surfaceAt(texture2d<float> hm, texture2d<float> clim, texture2d<u
         }
         if (P.kind == P_BOAT && n.y > 0) a *= 0.55;
         // Windows and doors on the wall faces of houses.
+        float winM = 0.0;
         if (house && n.y == 0 && !roof) {
             uint side = n.x < 0 ? 0u : n.x > 0 ? 1u : n.z < 0 ? 2u : 3u;
             float fy = wy - float(P.y0);
@@ -1708,10 +1831,26 @@ static Surface surfaceAt(texture2d<float> hm, texture2d<float> clim, texture2d<u
                         * smoothstep(0.55 - e, 0.55 + e, fy) * smoothstep(1.45 + e, 1.45 - e, fy);
                 m = mix(m, 0.2, smoothstep(0.05, 0.3, fpA));
                 a = mix(a, float3(0.025, 0.025, 0.03), m);
+                winM = m;
             }
             if (((sb >> 26) & 7u) == side + 1u) {
                 float m = smoothstep(0.25 - e, 0.25 + e, uv.x) * smoothstep(0.75 + e, 0.75 - e, uv.x) * smoothstep(1.6 + e, 1.6 - e, fy);
                 a = mix(a, float3(0.045, 0.035, 0.028), mix(m, 0.4, smoothstep(0.05, 0.3, fpA)));
+            }
+        }
+        // Lamps: flame on a fire's top course, a lantern atop its post, light in the windows.
+        int li = ((P.flags >> 8) & 15) - 1;
+        if (li >= 0) {
+            float3 E = lampState[((sb >> 13) & 511u) * uint(MAX_LAMPS) + uint(li)].rgb * LAMP_EMIT[int(site.lamps[li].w) % 16];
+            bool topCourse = float(v.y) >= Ht - 1.0;
+            if (P.kind == P_FIRE && topCourse) {
+                float flame = perlin3(float3(wq * 2.5, wy * 1.6 - time * 1.4), seed + 320u) * 0.5 + 0.5;
+                flame = mix(flame, 0.5, smoothstep(0.05, 0.3, fpA));
+                s.emit = E * (n.y > 0 ? 1.0 : mix(0.3, 1.0, flame) * (0.55 + 0.45 * fract(wy)));
+            } else if (P.kind == P_BOX && topCourse) {
+                s.emit = E * (n.y > 0 ? 1.0 : 0.6 * smoothstep(0.3, 0.8, fract(wy)));
+            } else if (house) {
+                s.emit = E * winM;
             }
         }
         s.albedo = a;
@@ -1821,6 +1960,11 @@ struct Ctx {
     texture2d<float> clim;
     texture2d<uint> st;
     device const Site* sites;
+    device const float4* lampPos;
+    device const float4* lampState;
+    texture2d<float> lightMap;
+    texture2d<float> lightDir;
+    float4 lights;
 };
 
 // Baked fine cloud field where it covers q, else evaluated.
@@ -1881,7 +2025,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     float fp = h.t * x.pixelAngle; // voxels per pixel
     // Footprint stretched across a grazing face, for detail that must fade before it aliases along the view.
     float fpA = fp / max(abs(dot(n, d)), 0.15);
-    Surface s = surfaceAt(x.hm, x.clim, x.st, x.sites, x.size, h.voxel, h.normal, uv, fp, fpA, x.origin, x.seed, x.time);
+    Surface s = surfaceAt(x.hm, x.clim, x.st, x.sites, x.lampState, x.size, h.voxel, h.normal, uv, fp, fpA, x.origin, x.seed, x.time);
     // Prefilter: from ~1/10 voxel per pixel, relax AO and shadows and give risers their tread colour, so
     // distant stairs read as contour bands, not moire.
     float wf = smoothstep(0.025, 0.20, fp);
@@ -2001,7 +2145,22 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
         float graze = 1.0 - abs(dot(n, d));
         col += alb * mix(float3(0.9, 1.3, 0.3), float3(1.3, 0.9, 0.4), s.autumn) * x.L.keyCol * back * (1.0 - ndl) * (1.0 - abs(n.y)) * graze * graze * sh;
     }
-    return col;
+    // Lamplight is added in absolute terms, outside the moonlight grade, so firelit ground stays warm in a blue night.
+    if (x.lights.w > 0.0) {
+        constexpr sampler bl(filter::linear, address::clamp_to_edge);
+        float2 mu = p.xz / float(x.size);
+        float3 Lm = x.lightMap.sample(bl, mu, level(0)).rgb;
+        if (any(Lm > 1e-4)) {
+            float4 Ld = x.lightDir.sample(bl, mu, level(0));
+            float3 lp = Ld.xyz / max(Ld.w, 1e-6);
+            // Hills above a fire and valleys below it stay dark.
+            float dy = (p.y - lp.y) / 5.0;
+            float face = 0.3 + 0.7 * saturate(dot(nl, normalize(lp - p + float3(0, 0.3, 0))));
+            float glow = s.mat == M_CLOTH ? 0.2 : 0.0;
+            col += s.albedo * Lm * ((face * mix(1.0, ao, 0.5)) / (1.0 + dy * dy) + glow) * x.lights.w;
+        }
+    }
+    return col + s.emit;
 }
 
 // Converges on the actual sky colour as fog thickens (T -> 0), so fogged land meets the sky with no seam.
@@ -2173,7 +2332,9 @@ static float3 softCloudSky(thread const Ctx& x, float3 o, float3 r) {
 fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0)]],
                               texture2d<float> hm [[texture(0)]], texture2d<float> cloudTex [[texture(1)]],
                               texture2d<float> clim [[texture(2)]], texture2d<uint> st [[texture(3)]],
-                              device const Site* sites [[buffer(1)]]) {
+                              texture2d<float> lightMap [[texture(4)]], texture2d<float> lightDir [[texture(5)]],
+                              device const Site* sites [[buffer(1)]], device const float4* lampPos [[buffer(2)]],
+                              device const float4* lampState [[buffer(3)]], constant int4* refs [[buffer(4)]]) {
     float2 ndc = in.uv * 2.0 - 1.0;
     ndc.y = -ndc.y;
     ndc += f.jitter.xy;
@@ -2184,7 +2345,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     Ctx x { hm, f.mapInfo.z, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w, f.misc.y,
             2.0 * tanH * f.resolution.w, f.misc.w, makeLight(f.sunDir.xyz),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
-            cloudTex, f.cloud.xyz, clim, st, sites };
+            cloudTex, f.cloud.xyz, clim, st, sites, lampPos, lampState, lightMap, lightDir, f.lights };
 
     Hit h = trace(hm, o, d, 4000.0, 400, x.globalMax, x.size);
     if (f.misc2.z == 1) return float4(float(h.iters) / 400.0, h.hit ? 0.3 : 0.0, h.iters >= 399 ? 1 : 0, 1);
@@ -2280,12 +2441,31 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             float glint = mix(cover, smoothstep(thr - 0.07, thr + 0.07, rip), saturate(1.0 - fpv * 0.04));
             col += float3(0.75, 0.82, 1.0) * x.L.night * (0.05 * cover + 0.55 * glint);
         }
+        if (x.lights.w > 0.0) {
+            // Lamplight on the water: a soft pool, and a broken streak drawn toward the viewer as ripples
+            // stretch the moon's path.
+            constexpr sampler bl(filter::linear, address::clamp_to_edge);
+            float2 vh = normalize(d.xz + 1e-5);
+            float inv = 1.0 / float(x.size);
+            float3 E = x.lightMap.sample(bl, wp.xz * inv, level(0)).rgb * 0.5 + x.lightMap.sample(bl, (wp.xz + vh * 4.0) * inv, level(0)).rgb * 0.3
+                     + x.lightMap.sample(bl, (wp.xz + vh * 10.0) * inv, level(0)).rgb * 0.2;
+            if (any(E > 1e-4)) {
+                // Ripple facets elongated toward the viewer, as the moon's path is.
+                float2 rq = float2(dot(ww, vh) * 1.2, (ww.x * vh.y - ww.y * vh.x) * 4.0);
+                float ripple = perlin3(float3(rq, x.time * 0.8), x.seed + 63u) + 0.3 * e0;
+                float fpv = tw * x.pixelAngle / max(-d.y, 0.1);
+                float spark = mix(smoothstep(0.18, 0.38, ripple), 0.15, saturate(fpv * 0.5));
+                col += E * (0.04 + 0.6 * spark) * x.lights.w;
+            }
+        }
         tSurf = tw;
     } else if (h.hit) {
         col = shade(x, o, d, h, true);
         tSurf = h.t;
     } else {
-        return skyWithClouds(x, o, d);
+        float4 sky = skyWithClouds(x, o, d);
+        if (x.lights.w > 0.0 && f.refs.x > 0) sky.rgb += lampHaze(lampPos, lampState, refs, f.refs.x, o, d, 2500.0) * 0.05 * x.lights.w;
+        return sky;
     }
     if (f.misc2.z == 8) {
         // Site footprints tinted by type.
@@ -2307,6 +2487,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     if (f.misc2.z == 3) return float4(float3(fogTransmittance(x, o, d, tSurf)), 1);
     // The sea runs on past the map, so by night it reflects the sky out to the horizon.
     if (f.misc2.z != 2) col = applyFog(x, col, o, d, tSurf, water ? 1.0 - x.L.night : 1.0);
+    if (x.lights.w > 0.0 && f.refs.x > 0) col += lampHaze(lampPos, lampState, refs, f.refs.x, o, d, tSurf) * 0.05 * x.lights.w;
     return float4(col, tSurf);
 }
 
