@@ -288,6 +288,8 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
             int2 o = p - t.c;
             if (abs(o.x) > 2 || abs(o.y) > 2) continue;
             int2 s = canopySpan(t, o);
+            // Shrubs hug the ground they spill onto rather than hovering over a lower step.
+            if (t.kind == 0) s += int(col.r) - t.lo;
             if (s.y <= s.x) continue;
             lo = min(lo, s.x);
             hi = max(hi, s.y);
