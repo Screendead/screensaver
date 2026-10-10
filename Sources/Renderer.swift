@@ -35,13 +35,13 @@ struct SkyClock {
     static let dayLength: Double = 24 * 60
 
     var sunDirection: SIMD3<Double> {
-        let el = asin(sin(2 * .pi * phase) * 0.66 + 0.10)
+        let el = asin(sin(2 * .pi * phase) * 0.56 + 0.08)
         let az = 2 * .pi * phase * 0.5 + 0.9
         return SIMD3(cos(el) * sin(az), sin(el), cos(el) * cos(az))
     }
 
     mutating func advance(_ dt: Double) {
-        let y = sin(2 * .pi * phase) * 0.66 + 0.10
+        let y = sin(2 * .pi * phase) * 0.56 + 0.08
         let s = min(max((abs(y) - 0.22) / 0.35, 0), 1)
         // Linger in golden and blue hour, hurry through midday and deep night.
         let warp = y < -0.25 ? 2.5 : 0.6 + 0.9 * s * s * (3 - 2 * s)
@@ -295,7 +295,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         simTime += dt * timeScale
         let e = clock.sunDirection.y
-        let target = e > 0 ? 0.62 + 1.4 * max(0, 0.3 - e) / 0.3 : (e > -0.1 ? 2.02 + 0.4 * (-e / 0.1) : 2.2 + 0.2 * max(0, 0.3 + e) / 0.2)
+        let target = e > 0 ? 0.62 + 1.4 * max(0, 0.3 - e) / 0.3 : (e > -0.1 ? 2.02 + 0.4 * (-e / 0.1) : 1.6 + 0.4 * max(0, 0.3 + e) / 0.2)
         exposure += (target - exposure) * min(1, dt * timeScale * 0.2)
     }
 

@@ -12,6 +12,7 @@ final class FlightCamera {
     private var climbRate: Double = 0
     private var time: Double = 0
     private(set) var surveyAmount: Double = 0
+    private var facing: Double = 0
     var sun = SIMD3<Double>(0, 1, 0)
     var pitchOverride: Double?
 
@@ -76,13 +77,13 @@ final class FlightCamera {
         let mode = wander(time + 2000, 0.35)
         let m01 = min(max((mode + 0.2) / 0.6, 0), 1)
         let steerSign = m01 * m01 * (3 - 2 * m01) * 2 - 1
-        // At golden hour drift gently toward the sun, so its disc and water glitter come into frame.
-        var steerSun = 0.0
-        if sun.y > -0.05 && sun.y < 0.3 {
-            let sunYaw = atan2(sun.x, sun.z)
-            steerSun = sin(sunYaw - yaw) * 0.02 * min(max(1 - abs(sun.y - 0.1) / 0.2, 0), 1)
-        }
-        let targetRate = max(-0.09, min(0.09, steer * 0.004 * steerSign + wander(time, 1) * 0.035 + steerSun))
+        // When the sun or moon is low, turn toward it so its disc and water glitter come into frame.
+        let key = sun.y > -0.05 ? sun : SIMD3(-sun.x, max(-sun.y, 0.08), -sun.z)
+        let keyYaw = atan2(key.x, key.z)
+        let w = min(max(1 - abs(key.y - 0.15) / 0.2, 0), 1)
+        let steerKey = sin(keyYaw - yaw) * 0.06 * w
+        facing = w * max(0, cos(keyYaw - yaw))
+        let targetRate = max(-0.09, min(0.09, steer * 0.004 * steerSign * (1 - 0.6 * w) + wander(time, 1) * 0.035 + steerKey))
         // Critically damped spring on yaw rate: turns take tens of seconds.
         let k = 0.25
         yawAccel += (k * k * (targetRate - yawRate) - 2 * k * yawAccel) * dt
@@ -98,9 +99,9 @@ final class FlightCamera {
         // Altitude: clear the forward footprint by a slowly breathing margin; lifts over ridges become reveals.
         var ahead = footprintMax(position.x, position.z, radius: 8)
         for dist in [20.0, 45.0, 75.0, 110.0] {
-            ahead = max(ahead, footprintMax(position.x + fwdFlat.x * dist, position.z + fwdFlat.y * dist, radius: 8) - dist * 0.12)
+            ahead = max(ahead, footprintMax(position.x + fwdFlat.x * dist, position.z + fwdFlat.y * dist, radius: dist < 50 ? 5 : 8) - dist * 0.12)
         }
-        let clearance = 20 + 16 * (wander(time + 500, 0.7) + 0.6) + 15 * surveyAmount + 40 * max(0, min(1, -mode / 0.6))
+        let clearance = 12 + 12 * (wander(time + 500, 0.7) + 0.6) + 10 * surveyAmount + 40 * max(0, min(1, -mode / 0.6))
         let target = max(ahead, 19.85) + clearance
         let kc = 0.35
         climbRate += (kc * kc * (target - position.y) - 2 * kc * climbRate) * dt
@@ -110,9 +111,13 @@ final class FlightCamera {
 
         // Survey/vista cycle: the horizon sweeps the whole frame every few minutes so no region of the
         // screen stays sky (or land) for long. Smoothstep dwells at each extreme.
-        let s = 0.5 + 0.5 * sin(time * 2 * .pi / 230 + 0.6 * sin(time * 0.0047))
-        let nightTilt = sun.y < -0.2 ? -0.08 : 0
-        let targetPitch = -0.08 - 0.40 * s + nightTilt + 0.03 * wander(time + 900, 1.3) + max(-0.04, min(0.06, climbRate * 0.03))
+        var s = 0.5 + 0.5 * sin(time * 2 * .pi / 230 + 0.6 * sin(time * 0.0047))
+        if sun.y < -0.2 { s *= 0.65 } // keep stars and moon in the upper frame at night
+        // Facing a low sun or moon: lift the view so the light and its water path stay in frame.
+        s *= 1 - 0.6 * facing
+        // Twilight looking away from the light: look down at the backlit lips rather than an empty wash.
+        if abs(sun.y) < 0.1 && facing < 0.3 { s = min(1, s + 0.25) }
+        let targetPitch = -0.08 - 0.40 * s + 0.05 * facing + 0.03 * wander(time + 900, 1.3) + max(-0.04, min(0.06, climbRate * 0.03))
         surveyAmount = s
         pitch += ((pitchOverride ?? targetPitch) - pitch) * min(1, dt * 0.25)
         let targetRoll = max(-0.07, min(0.07, -yawRate * 0.8))
