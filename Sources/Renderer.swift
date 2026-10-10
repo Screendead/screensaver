@@ -88,7 +88,8 @@ final class World {
     private let genPipeline: MTLComputePipelineState
     private let reducePipeline: MTLComputePipelineState
     private let cleanupPipeline: MTLComputePipelineState
-    private let scratch: MTLTexture
+    private let plantPipeline: MTLComputePipelineState
+    private let scratch: [MTLTexture]
     private var buffers: [Buffer]
     private var active = 0
     private var pending = false
@@ -106,7 +107,8 @@ final class World {
         sd.usage = [.shaderRead, .shaderWrite]
         sd.storageMode = .private
         guard let gen = pipeline("generateHeight"), let red = pipeline("reduceMax"), let clean = pipeline("cleanupColumns"),
-              let scratchTex = device.makeTexture(descriptor: sd), let q = device.makeCommandQueue(),
+              let plant = pipeline("plantTrees"),
+              let s0 = device.makeTexture(descriptor: sd), let s1 = device.makeTexture(descriptor: sd), let q = device.makeCommandQueue(),
               let a = Buffer(device: device), let b = Buffer(device: device) else { return nil }
         self.device = device
         self.seed = seed
@@ -114,7 +116,8 @@ final class World {
         genPipeline = gen
         reducePipeline = red
         cleanupPipeline = clean
-        scratch = scratchTex
+        plantPipeline = plant
+        scratch = [s0, s1]
         buffers = [a, b]
     }
 
@@ -141,11 +144,15 @@ final class World {
         var info = SIMD4<Int32>(o.x, o.y, Int32(World.size), Int32(bitPattern: seed))
         let full = MTLSize(width: World.size, height: World.size, depth: 1), tg = MTLSize(width: 16, height: 16, depth: 1)
         enc.setComputePipelineState(genPipeline)
-        enc.setTexture(scratch, index: 0)
+        enc.setTexture(scratch[0], index: 0)
         enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
         enc.dispatchThreads(full, threadsPerThreadgroup: tg)
         enc.setComputePipelineState(cleanupPipeline)
-        enc.setTexture(scratch, index: 0)
+        enc.setTexture(scratch[0], index: 0)
+        enc.setTexture(scratch[1], index: 1)
+        enc.dispatchThreads(full, threadsPerThreadgroup: tg)
+        enc.setComputePipelineState(plantPipeline)
+        enc.setTexture(scratch[1], index: 0)
         enc.setTexture(buf.levels[0], index: 1)
         enc.dispatchThreads(full, threadsPerThreadgroup: tg)
         enc.setComputePipelineState(reducePipeline)
