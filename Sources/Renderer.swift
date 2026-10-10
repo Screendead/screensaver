@@ -463,18 +463,26 @@ enum Snapshot {
             if let phase = settings.phase { r.clock.phase = phase }
             simulated = t
             var times: [Double] = []
-            for _ in 0..<(ProcessInfo.processInfo.environment["VR_MOTION"] != nil ? 48 : 12) {
-                if ProcessInfo.processInfo.environment["VR_MOTION"] != nil { r.simulate(1.0 / 60) }
+            let env = ProcessInfo.processInfo.environment
+            let frames = env["VR_MOTION"] != nil ? 48 : 12
+            // VR_FRAMES=n also writes each of the last n frames, for measuring frame-to-frame crawl.
+            let dump = min(Int(env["VR_FRAMES"] ?? "") ?? 0, frames)
+            var bytes = [UInt8](repeating: 0, count: w * h * 4)
+            let out = settings.screenshotTimes.count > 1 ? path.replacingOccurrences(of: ".png", with: "_t\(Int(t)).png") : path
+            for i in 0..<frames {
+                if env["VR_MOTION"] != nil { r.simulate(1.0 / 60) }
                 let cb = r.queue.makeCommandBuffer()!
                 let t0 = CACurrentMediaTime()
                 r.encode(into: cb, output: tex, outputSize: CGSize(width: w, height: h))
                 cb.commit()
                 cb.waitUntilCompleted()
                 times.append((CACurrentMediaTime() - t0) * 1000)
+                if i >= frames - dump {
+                    tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+                    write(bytes: bytes, width: w, height: h, to: out.replacingOccurrences(of: ".png", with: "_f\(i - frames + dump).png"))
+                }
             }
-            var bytes = [UInt8](repeating: 0, count: w * h * 4)
             tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
-            let out = settings.screenshotTimes.count > 1 ? path.replacingOccurrences(of: ".png", with: "_t\(Int(t)).png") : path
             write(bytes: bytes, width: w, height: h, to: out)
             print(String(format: "t=%.0f phase=%.3f sunY=%.2f exposure=%.2f cam=(%.0f,%.0f,%.0f) gpu=%.1fms -> %@", t, r.clock.phase,
                          r.clock.sunDirection.y, r.exposure, r.camera.position.x, r.camera.position.y, r.camera.position.z, times.min()!, out))

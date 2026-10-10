@@ -321,16 +321,19 @@ struct Hit {
     int iters;
 };
 
-static inline float heightAt(texture2d<float> hm, int2 c, int size) {
-    c = clamp(c, int2(0), int2(size - 1));
-    return hm.read(uint2(c), 0).r;
-}
-
 // Terrain height under any tree.
 static inline float groundAt(texture2d<float> hm, int2 c, int size) {
     c = clamp(c, int2(0), int2(size - 1));
     float4 col = hm.read(uint2(c), 0);
     return col.a > 0.0 ? col.g : col.r;
+}
+
+// Ground bilinearly interpolated between column centres: the continuous slope under the stairs.
+static inline float groundSmooth(texture2d<float> hm, float2 p, int size) {
+    float2 q = p - 0.5, f = fract(q);
+    int2 i = int2(floor(q));
+    return mix(mix(groundAt(hm, i, size), groundAt(hm, i + int2(1, 0), size), f.x),
+               mix(groundAt(hm, i + int2(0, 1), size), groundAt(hm, i + int2(1, 1), size), f.x), f.y);
 }
 
 static inline float3 columnAt(texture2d<float> hm, int2 c, int size) {
@@ -699,17 +702,18 @@ static float cornerAO(texture2d<float> hm, int size, int3 v, int3 n, float2 uv) 
     return mix(0.6, 1.0, pow(ao, 0.8));
 }
 
-// Fraction of open sky above a face, from how far the surrounding columns rise above it within 6 voxels.
-// One value per voxel face, so it is stable under jitter and camera motion.
-static float skyVisibility(texture2d<float> hm, int size, int3 v, int3 n, float y) {
-    int2 c = v.xz + n.xz;
+// Fraction of open sky above a point, from how far the surrounding columns rise above y within 6 voxels.
+// Heights are filtered, so a c on a column centre reads exact columns.
+static float skyVisibility(texture2d<float> hm, float2 c, float y) {
+    constexpr sampler bl(filter::linear, address::clamp_to_edge);
+    float2 inv = 1.0 / float2(hm.get_width(), hm.get_height());
     float occ = 0.0;
     const int2 dirs[8] = { int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1), int2(1, 1), int2(-1, 1), int2(1, -1), int2(-1, -1) };
     for (int i = 0; i < 8; i++) {
         float m = 0.0;
         for (int r = 1; r <= 3; r++) {
             float dist = float(r * 2) * (i < 4 ? 1.0 : 1.414);
-            float rise = heightAt(hm, c + dirs[i] * (r * 2), size) - y;
+            float rise = hm.sample(bl, (c + float2(dirs[i] * (r * 2))) * inv, level(0)).r - y;
             m = max(m, rise / sqrt(rise * rise + dist * dist));
         }
         occ += m;
@@ -753,6 +757,19 @@ struct Ctx {
     float dither; // per-pixel, per-frame in [0, 1); TAA resolves it
 };
 
+// Mean light reaching a staircase of unit steps with this gradient, as seen along d: each step that rises
+// toward the light shades the strip of tread behind it (to contact level ct) and its own riser (to cr).
+// The smoothed gradient misses the local ups and downs of terraced ground; the gain of 3 matches the mean
+// of the traced step shadows it replaces.
+static float stairShadow(float2 grad, float3 L, float3 d, float ct, float cr) {
+    float2 up = grad * L.xz;
+    float2 f = saturate(max(up, 0.0) / max(L.y, 0.02));
+    float tread = 1.0 - (1.0 - (1.0 - f.x) * (1.0 - f.y)) * (1.0 - ct);
+    float2 riser = max(grad * d.xz, 0.0);
+    float2 riserSh = select(float2(1.0), float2(cr), up > 0.0);
+    return saturate(1.0 - 3.0 * (1.0 - (abs(d.y) * tread + dot(riser, riserSh)) / (abs(d.y) + riser.x + riser.y)));
+}
+
 static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows, bool lips = true) {
     float3 p = o + d * h.t;
     float3 n = float3(h.normal);
@@ -763,6 +780,16 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     // shadows, and give risers their tread colour, so distant stairs read as contour bands, not moire.
     float wf = smoothstep(0.025, 0.20, fp);
     float3 nS = normalize(float3(s.nh.x - s.nh.y, 2.0, s.nh.z - s.nh.w));
+    // Below ~2 pixels per voxel even per-column normals, step shadows and sky visibility alias into a hatch
+    // that crawls under motion; shade the continuous slope under the stairs instead.
+    float wf2 = s.mat == 0 ? smoothstep(0.2, 0.5, fp) : 0.0;
+    float2 grad = 0.0;
+    if (wf2 > 0.0) {
+        float R = max(2.0, 1.5 * fp);
+        grad = float2(groundSmooth(x.hm, p.xz + float2(R, 0), x.size) - groundSmooth(x.hm, p.xz - float2(R, 0), x.size),
+                      groundSmooth(x.hm, p.xz + float2(0, R), x.size) - groundSmooth(x.hm, p.xz - float2(0, R), x.size)) / (2.0 * R);
+        nS = normalize(mix(nS, normalize(float3(-grad.x, 1.0, -grad.y)), wf2));
+    }
     float3 nl = normalize(mix(n, nS, wf));
     float ao = mix(cornerAO(x.hm, x.size, h.voxel, h.normal, uv), 0.85, wf) * s.canopy;
     float3 alb = h.normal.y == 0 ? mix(s.albedo, s.tread, wf) : s.albedo;
@@ -777,9 +804,13 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
         // Keep the origin inside the hit voxel's footprint so boundary columns can't self-shadow.
         float3 so = p + n * 0.02;
         so.xz = clamp(so.xz, float2(h.voxel.xz) + 0.002, float2(h.voxel.xz) + 0.998);
+        // Prefiltered, the ray starts a step above the column, and single steps shade by their expected cover.
+        so.y = mix(so.y, max(so.y, s.H) + 1.0, wf2);
         Hit sHit = trace(x.hm, so, x.L.key, 700.0, x.quality > 0.5 ? 120 : 48, x.globalMax, x.size);
         // Contact shadows from single-voxel steps draw sawtooth noise; keep them faint, cliffs full.
+        float contact = 0.35 * (1.0 - smoothstep(2.0, 8.0, 0.5 / x.L.key.y));
         sh = sHit.hit ? 0.35 * (1.0 - smoothstep(2.0, 8.0, sHit.t)) : 1.0;
+        if (wf2 > 0.0) sh = mix(sh, min(sh, stairShadow(grad, x.L.key, d, contact, 0.35)), wf2);
         sh = mix(sh, mix(0.5, 0.25, hiSun) + mix(0.5, 0.75, hiSun) * sh, wf);
         sh = mix(sh, 1.0, 0.3 * x.L.night);
     }
@@ -789,7 +820,9 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     // High sun: fill is the deep zenith, so shade reads blue against warm key light.
     float zw = mix(0.55, 0.8, hiSun);
     float3 skyFill = mix(x.L.horizon, x.L.zenith, saturate(zw + 0.15 * nl.y)) * 0.9 * lowFill * mix(1.0, 0.85, hiSun);
-    skyFill *= mix(1.0, skyVisibility(x.hm, x.size, h.voxel, h.normal, p.y), mix(0.55, 0.85, hiSun));
+    float2 svAt = mix(float2(h.voxel.xz + h.normal.xz) + 0.5, p.xz, wf2);
+    float svY = wf2 > 0.0 ? mix(p.y, groundSmooth(x.hm, p.xz, x.size), wf2) : p.y;
+    skyFill *= mix(1.0, skyVisibility(x.hm, svAt, svY), mix(0.55, 0.85, hiSun));
     float3 bounce = (1.0 - saturate(nl.y)) * 0.35 * alb * x.L.keyCol * max(x.L.key.y, 0.0);
     // High sun: risers sit in cooler shade so terraces keep their modelling at noon.
     float drop = s.H - min(min(s.nh.x, s.nh.y), min(s.nh.z, s.nh.w));
