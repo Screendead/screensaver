@@ -608,6 +608,9 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     float face = abs(dot(s.lipDir, normalize(x.L.key.xz + 1e-5)));
     float lipLight = mix(mix(0.15, 1.0, smoothstep(0.15, 0.75, face)), 0.35, x.L.night);
     if (lips) col += s.glint * lipLight * (1.0 - wf) * nightFade * x.L.keyCol * sh * (0.3 + 1.25 * low) * mix(alb, float3(1.0), 0.5);
+    // Under a high moon, land sits cool and below the sky so night reads as night (won night A/B);
+    // under a low moon it is already dark and keeps its contours (darkening lost the dusk A/B).
+    col *= mix(float3(1.0), float3(0.5, 0.56, 0.72), x.L.night * smoothstep(0.32, 0.45, x.L.moon.y));
     return col;
 }
 
