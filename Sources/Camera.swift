@@ -117,8 +117,8 @@ final class FlightCamera {
         if sun.y > 0.35 { s *= 0.55 }
         // Facing a low sun or moon: lift the view so the light and its water path stay in frame.
         s *= 1 - 0.6 * facing
-        // Twilight looking away from the light: look down at the backlit lips rather than an empty wash.
-        if abs(sun.y) < 0.1 && facing < 0.3 { s = min(1, s + 0.25) }
+        // Golden and blue hour: keep the horizon in frame; the sky and aerial perspective carry these moments.
+        if abs(sun.y) < 0.18 { s = min(s, 0.55) }
         // Over open water, look out at the far shore rather than down at a featureless mirror.
         let look = p + fwdFlat * 70
         if h(look.x, look.y) <= 20.0 { s *= 0.35 }
