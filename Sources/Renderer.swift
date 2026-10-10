@@ -44,7 +44,7 @@ struct SkyClock {
         let y = sin(2 * .pi * phase) * 0.56 + 0.08
         let s = min(max((abs(y) - 0.22) / 0.35, 0), 1)
         // Linger in golden and blue hour, hurry through midday and deep night.
-        let warp = y < -0.25 ? 2.5 : 0.6 + 0.9 * s * s * (3 - 2 * s)
+        let warp = y < -0.25 ? 3.5 : 0.5 + 1.5 * s * s * (3 - 2 * s)
         phase += dt / SkyClock.dayLength * warp * 1.05
         if phase > 1 { phase -= 1 }
     }
@@ -302,7 +302,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         simTime += dt * timeScale
         let e = clock.sunDirection.y
-        let target = e > 0 ? 0.62 + 1.0 * max(0, 0.3 - e) / 0.3 : (e > -0.1 ? 2.02 + 0.4 * (-e / 0.1) : 1.25 + 0.35 * max(0, 0.3 + e) / 0.2)
+        let target = e > 0 ? 0.62 + 1.0 * max(0, 0.3 - e) / 0.3 : (e > -0.1 ? 2.02 + 0.4 * (-e / 0.1) : 1.6 + 0.4 * max(0, 0.3 + e) / 0.2)
         exposure += (target - exposure) * min(1, dt * timeScale * 0.2)
     }
 
