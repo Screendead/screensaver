@@ -101,12 +101,12 @@ final class FlightCamera {
         for dist in [20.0, 45.0, 75.0, 110.0] {
             ahead = max(ahead, footprintMax(position.x + fwdFlat.x * dist, position.z + fwdFlat.y * dist, radius: dist < 50 ? 5 : 8) - dist * 0.12)
         }
-        let clearance = 12 + 12 * (wander(time + 500, 0.7) + 0.6) + 10 * surveyAmount + 40 * max(0, min(1, -mode / 0.6))
+        let clearance = 18 + 10 * (wander(time + 500, 0.7) + 1.0) + 10 * surveyAmount + 40 * max(0, min(1, -mode / 0.6))
         let target = max(ahead, 19.85) + clearance
         let kc = 0.35
         climbRate += (kc * kc * (target - position.y) - 2 * kc * climbRate) * dt
         position.y += climbRate * dt
-        let floor = footprintMax(position.x, position.z, radius: 4) + 8
+        let floor = footprintMax(position.x, position.z, radius: 4) + 14
         if position.y < floor { position.y = floor; climbRate = max(climbRate, 0) }
 
         // Survey/vista cycle: the horizon sweeps the whole frame every few minutes so no region of the
