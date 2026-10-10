@@ -348,13 +348,13 @@ static Light makeLight(float3 sunDir) {
     L.sun = sunDir;
     L.moon = normalize(float3(-sunDir.x, max(-sunDir.y, 0.08), -sunDir.z));
     L.zenith = key5(e, float3(0.018, 0.022, 0.045), float3(0.10, 0.10, 0.22), float3(0.13, 0.16, 0.32),
-                    float3(0.10, 0.20, 0.48), float3(0.12, 0.27, 0.58));
+                    float3(0.10, 0.20, 0.48), float3(0.08, 0.23, 0.62));
     L.horizon = key5(e, float3(0.022, 0.026, 0.045), float3(0.30, 0.24, 0.36), float3(0.80, 0.45, 0.28),
-                     float3(0.95, 0.60, 0.32), float3(0.62, 0.72, 0.82));
+                     float3(0.95, 0.60, 0.32), float3(0.55, 0.66, 0.82));
     L.skyHor = key5(e, float3(0.022, 0.026, 0.045), float3(0.16, 0.10, 0.22), float3(0.50, 0.22, 0.09),
-                    float3(0.80, 0.48, 0.22), float3(0.62, 0.72, 0.82));
+                    float3(0.80, 0.48, 0.22), float3(0.58, 0.70, 0.86));
     L.skyZen = key5(e, float3(0.010, 0.013, 0.028), float3(0.03, 0.04, 0.12), float3(0.07, 0.09, 0.24),
-                    float3(0.10, 0.20, 0.48), float3(0.12, 0.27, 0.58));
+                    float3(0.10, 0.20, 0.48), float3(0.08, 0.23, 0.62));
     float3 sunCol = key5(e, float3(0), float3(0), float3(1.8, 0.6, 0.22), float3(3.0, 1.45, 0.55), float3(2.75, 2.5, 2.1));
     L.sunAmt = smoothstep(-0.02, 0.05, e);
     L.night = smoothstep(-0.04, -0.20, e);
@@ -404,7 +404,7 @@ static float3 skyColor(float3 d, Light L, bool withDiscs, uint seed, float time)
         float3 q = d * 260.0;
         int3 cell = int3(floor(q));
         uint h = hash3i(cell, seed + 77u);
-        if (hashf(h) > 0.975) {
+        if (hashf(h) > 0.982) {
             float3 sp = float3(cell) + float3(hashf(pcg(h)), hashf(pcg(h + 1)), hashf(pcg(h + 2)));
             float dd = length(q - sp);
             float b = pow(hashf(pcg(h + 3)), 6.0) * 5.0 + 0.2;
@@ -541,7 +541,7 @@ static inline float cloudDensity(float2 q, uint seed, float time, float cover) {
 static inline float cloudShadow(float3 p, float3 L, int2 mapOrigin, uint seed, float time, float cover) {
     if (L.y <= 0.02) return 1.0;
     float2 q = p.xz + L.xz / L.y * (CLOUD_Y - p.y) + float2(mapOrigin);
-    return mix(1.0, mix(0.6, 0.5, smoothstep(0.3, 0.6, L.y)), smoothstep(0.0, 0.14, cloudDensity(q, seed, time, cover)));
+    return mix(1.0, mix(0.6, 0.42, smoothstep(0.3, 0.6, L.y)), smoothstep(0.0, 0.14, cloudDensity(q, seed, time, cover)));
 }
 
 struct Ctx {
@@ -582,7 +582,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
         // Contact shadows from single-voxel steps draw sawtooth noise; keep them faint, cliffs full.
         sh = sHit.hit ? 0.35 * (1.0 - smoothstep(2.0, 8.0, sHit.t)) : 1.0;
         sh = mix(sh, 0.5 + 0.5 * sh, wf);
-        sh = mix(sh, 1.0, 0.55 * x.L.night);
+        sh = mix(sh, 1.0, 0.75 * x.L.night);
     }
     sh *= mix(1.0, cloudShadow(p, x.L.key, x.origin, x.seed, x.time, x.cover), x.L.sunAmt);
     float lowFill = mix(0.9, 1.0, smoothstep(0.1, 0.4, x.L.key.y));
@@ -594,6 +594,9 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     float drop = s.H - min(min(s.nh.x, s.nh.y), min(s.nh.z, s.nh.w));
     float3 riserShade = mix(float3(1.0), float3(0.60, 0.66, 0.80),
                             (1.0 - saturate(nl.y)) * smoothstep(0.3, 0.6, x.L.key.y) * smoothstep(1.5, 4.0, drop));
+    // Night: no pure-black riser feet; a faint indigo ambient keeps the steps readable as stone, not holes.
+    ao = mix(ao, 1.0, 0.5 * x.L.night);
+    skyFill += float3(0.025, 0.03, 0.06) * x.L.night;
     float3 col = alb * (x.L.keyCol * ndl * sh * mix(1.0, 0.7, x.L.night) + (skyFill * ao * riserShade + bounce));
     // Low sun: up-facing treads take a warm sky-dome tint instead of going to charcoal.
     col += alb * x.L.keyCol * 0.07 * (1.0 - smoothstep(0.05, 0.35, x.L.key.y)) * saturate(nl.y) * (1.0 - x.L.night);
@@ -637,7 +640,9 @@ static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t) 
     // Hide the map edge by distance to the edge itself, not to the camera.
     float3 ep = o + d * t;
     float edgeDist = min(min(ep.x, float(x.size) - ep.x), min(ep.z, float(x.size) - ep.z));
-    return exp(-(heightTerm + b * t + c2 * t * t + mist + 5.0 * smoothstep(110.0, 10.0, edgeDist)));
+    // Clear air under a high sun; haze belongs to the low light.
+    float clear = mix(1.0, 0.55, smoothstep(0.3, 0.6, x.L.sun.y));
+    return exp(-((heightTerm + b * t + c2 * t * t + mist) * clear + 5.0 * smoothstep(110.0, 10.0, edgeDist)));
 }
 
 static float3 applyFog(thread const Ctx& x, float3 col, float3 o, float3 d, float t) {
