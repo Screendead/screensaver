@@ -30,15 +30,16 @@ struct SkyClock {
     static let dayLength: Double = 24 * 60
 
     var sunDirection: SIMD3<Double> {
-        let el = asin(sin(2 * .pi * phase) * 0.72)
+        let el = asin(sin(2 * .pi * phase) * 0.66 + 0.10)
         let az = 2 * .pi * phase * 0.5 + 0.9
         return SIMD3(cos(el) * sin(az), sin(el), cos(el) * cos(az))
     }
 
     mutating func advance(_ dt: Double) {
-        let e = abs(sin(2 * .pi * phase) * 0.72)
-        let s = min(max((e - 0.22) / 0.35, 0), 1)
-        let warp = 0.6 + 0.9 * s * s * (3 - 2 * s)
+        let y = sin(2 * .pi * phase) * 0.66 + 0.10
+        let s = min(max((abs(y) - 0.22) / 0.35, 0), 1)
+        // Linger in golden and blue hour, hurry through midday and deep night.
+        let warp = y < -0.25 ? 2.5 : 0.6 + 0.9 * s * s * (3 - 2 * s)
         phase += dt / SkyClock.dayLength * warp * 1.05
         if phase > 1 { phase -= 1 }
     }
@@ -46,79 +47,145 @@ struct SkyClock {
 
 final class World {
     static let size = 2048
-    let device: MTLDevice
-    let heightTex: MTLTexture
-    private let levelViews: [MTLTexture]
-    private let genPipeline: MTLComputePipelineState
-    private let reducePipeline: MTLComputePipelineState
-    private(set) var origin = SIMD2<Int32>(Int32.min, Int32.min)
-    private(set) var globalMax: Float = 255
-    private var cpuLevel2: [Float] = []
-    let seed: UInt32
     static let cpuLevel = 2
 
-    init?(device: MTLDevice, library: MTLLibrary, seed: UInt32) {
-        let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: World.size, height: World.size, mipmapped: true)
-        td.usage = [.shaderRead, .shaderWrite, .pixelFormatView]
-        td.storageMode = .shared
-        guard let tex = device.makeTexture(descriptor: td),
-              let gen = library.makeFunction(name: "generateHeight").flatMap({ try? device.makeComputePipelineState(function: $0) }),
-              let red = library.makeFunction(name: "reduceMax").flatMap({ try? device.makeComputePipelineState(function: $0) })
-        else { return nil }
-        self.device = device
-        heightTex = tex
-        levelViews = (0..<tex.mipmapLevelCount).map {
-            tex.makeTextureView(pixelFormat: .rgba16Float, textureType: .type2D, levels: $0..<($0 + 1), slices: 0..<1)!
+    // One generated map: the column texture with its max-mip chain, and the CPU copy the camera steers by.
+    private final class Buffer {
+        let tex: MTLTexture
+        let levels: [MTLTexture]
+        var origin = SIMD2<Int32>(Int32.min, Int32.min)
+        var globalMax: Float = 255
+        var cpuHeights: [Float] = []
+
+        init?(device: MTLDevice) {
+            let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: World.size, height: World.size, mipmapped: true)
+            td.usage = [.shaderRead, .shaderWrite, .pixelFormatView]
+            td.storageMode = .shared
+            guard let t = device.makeTexture(descriptor: td) else { return nil }
+            tex = t
+            levels = (0..<t.mipmapLevelCount).map {
+                t.makeTextureView(pixelFormat: .rgba16Float, textureType: .type2D, levels: $0..<($0 + 1), slices: 0..<1)!
+            }
         }
+    }
+
+    let device: MTLDevice
+    let seed: UInt32
+    // Regeneration runs on its own queue so frames never wait behind it.
+    private let genQueue: MTLCommandQueue
+    private let genPipeline: MTLComputePipelineState
+    private let reducePipeline: MTLComputePipelineState
+    private let cleanupPipeline: MTLComputePipelineState
+    private let scratch: MTLTexture
+    private var buffers: [Buffer]
+    private var active = 0
+    private var pending = false
+    var synchronous = false
+
+    var heightTex: MTLTexture { buffers[active].tex }
+    var origin: SIMD2<Int32> { buffers[active].origin }
+    var globalMax: Float { buffers[active].globalMax }
+
+    init?(device: MTLDevice, library: MTLLibrary, seed: UInt32) {
+        func pipeline(_ name: String) -> MTLComputePipelineState? {
+            library.makeFunction(name: name).flatMap { try? device.makeComputePipelineState(function: $0) }
+        }
+        let sd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: World.size, height: World.size, mipmapped: false)
+        sd.usage = [.shaderRead, .shaderWrite]
+        sd.storageMode = .private
+        guard let gen = pipeline("generateHeight"), let red = pipeline("reduceMax"), let clean = pipeline("cleanupColumns"),
+              let scratchTex = device.makeTexture(descriptor: sd), let q = device.makeCommandQueue(),
+              let a = Buffer(device: device), let b = Buffer(device: device) else { return nil }
+        self.device = device
+        self.seed = seed
+        genQueue = q
         genPipeline = gen
         reducePipeline = red
-        self.seed = seed
+        cleanupPipeline = clean
+        scratch = scratchTex
+        buffers = [a, b]
     }
 
-    // Recentres the map on `center` when the camera drifts too far; synchronous, a few ms.
-    func ensureCentered(on center: SIMD2<Double>, queue: MTLCommandQueue) {
+    // Recentres the map when the camera drifts. The swap happens only once the new map is complete;
+    // a synchronous fallback covers startup and the case where the camera outruns generation.
+    func ensureCentered(on center: SIMD2<Double>) {
         let half = Double(World.size / 2)
-        let local = center - SIMD2(Double(origin.x), Double(origin.y))
-        if origin.x != Int32.min && abs(local.x - half) < 300 && abs(local.y - half) < 300 { return }
+        let cur = buffers[active]
+        let local = center - SIMD2(Double(cur.origin.x), Double(cur.origin.y))
+        let drift = max(abs(local.x - half), abs(local.y - half))
         let o = SIMD2<Int32>(Int32(floor((center.x - half) / 64)) * 64, Int32(floor((center.y - half) / 64)) * 64)
-        regenerate(origin: o, queue: queue)
+        if cur.origin.x == Int32.min || drift > 340 || (synchronous && drift > 220) {
+            if pending { return } // the in-flight job will land momentarily
+            generate(into: active, origin: o, wait: true)
+        } else if drift > 220 && !pending {
+            pending = true
+            generate(into: 1 - active, origin: o, wait: false)
+        }
     }
 
-    func regenerate(origin o: SIMD2<Int32>, queue: MTLCommandQueue) {
-        origin = o
-        guard let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return }
+    private func generate(into index: Int, origin o: SIMD2<Int32>, wait: Bool) {
+        let buf = buffers[index]
+        guard let cb = genQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return }
         var info = SIMD4<Int32>(o.x, o.y, Int32(World.size), Int32(bitPattern: seed))
+        let full = MTLSize(width: World.size, height: World.size, depth: 1), tg = MTLSize(width: 16, height: 16, depth: 1)
         enc.setComputePipelineState(genPipeline)
-        enc.setTexture(levelViews[0], index: 0)
+        enc.setTexture(scratch, index: 0)
         enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
-        enc.dispatchThreads(MTLSize(width: World.size, height: World.size, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+        enc.dispatchThreads(full, threadsPerThreadgroup: tg)
+        enc.setComputePipelineState(cleanupPipeline)
+        enc.setTexture(scratch, index: 0)
+        enc.setTexture(buf.levels[0], index: 1)
+        enc.dispatchThreads(full, threadsPerThreadgroup: tg)
         enc.setComputePipelineState(reducePipeline)
-        for l in 1..<levelViews.count {
-            enc.setTexture(levelViews[l - 1], index: 0)
-            enc.setTexture(levelViews[l], index: 1)
+        for l in 1..<buf.levels.count {
+            enc.setTexture(buf.levels[l - 1], index: 0)
+            enc.setTexture(buf.levels[l], index: 1)
             let s = max(1, World.size >> l)
             enc.dispatchThreads(MTLSize(width: s, height: s, depth: 1), threadsPerThreadgroup: MTLSize(width: min(16, s), height: min(16, s), depth: 1))
         }
         enc.endEncoding()
-        cb.commit()
-        cb.waitUntilCompleted()
 
+        let t0 = CACurrentMediaTime()
+        let finish = { [weak self] (heights: [Float], top: Float) in
+            guard let self else { return }
+            buf.origin = o
+            buf.cpuHeights = heights
+            buf.globalMax = top + 1
+            self.active = index
+            self.pending = false
+            if Renderer.logTiming { print(String(format: "world regen %.1f ms (%@)", (CACurrentMediaTime() - t0) * 1000, wait ? "sync" : "async")) }
+        }
+        if wait {
+            cb.commit()
+            cb.waitUntilCompleted()
+            let r = World.readBack(buf.tex)
+            finish(r.0, r.1)
+        } else {
+            cb.addCompletedHandler { _ in
+                let r = World.readBack(buf.tex)
+                DispatchQueue.main.async { finish(r.0, r.1) }
+            }
+            cb.commit()
+        }
+    }
+
+    private static func readBack(_ tex: MTLTexture) -> ([Float], Float) {
         let s = World.size >> World.cpuLevel
         var raw = [Float16](repeating: 0, count: s * s * 4)
-        heightTex.getBytes(&raw, bytesPerRow: s * 8, from: MTLRegionMake2D(0, 0, s, s), mipmapLevel: World.cpuLevel)
-        cpuLevel2 = (0..<(s * s)).map { Float(raw[$0 * 4]) }
+        tex.getBytes(&raw, bytesPerRow: s * 8, from: MTLRegionMake2D(0, 0, s, s), mipmapLevel: World.cpuLevel)
         var top = [Float16](repeating: 0, count: 4)
-        heightTex.getBytes(&top, bytesPerRow: 8, from: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: heightTex.mipmapLevelCount - 1)
-        globalMax = Float(top[0]) + 1
+        tex.getBytes(&top, bytesPerRow: 8, from: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: tex.mipmapLevelCount - 1)
+        return ((0..<(s * s)).map { Float(raw[$0 * 4]) }, Float(top[0]))
     }
 
     // Conservative (4x4 max) height in world coords.
     func height(x: Double, z: Double) -> Double? {
+        let b = buffers[active]
         let s = World.size >> World.cpuLevel
-        let cx = Int(floor((x - Double(origin.x)) / Double(1 << World.cpuLevel)))
-        let cz = Int(floor((z - Double(origin.y)) / Double(1 << World.cpuLevel)))
-        guard cx >= 0, cz >= 0, cx < s, cz < s, !cpuLevel2.isEmpty else { return nil }
-        return Double(cpuLevel2[cz * s + cx])
+        let cx = Int(floor((x - Double(b.origin.x)) / Double(1 << World.cpuLevel)))
+        let cz = Int(floor((z - Double(b.origin.y)) / Double(1 << World.cpuLevel)))
+        guard cx >= 0, cz >= 0, cx < s, cz < s, !b.cpuHeights.isEmpty else { return nil }
+        return Double(b.cpuHeights[cz * s + cx])
     }
 }
 
@@ -138,12 +205,15 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var simTime: Double = 0
     private var lastFrame: CFTimeInterval?
     private var frameIndex: Float = 0
+    private var gpuTimes: [Double] = []
+    private var sceneSize = (width: 0, height: 0)
+    static let logTiming = ProcessInfo.processInfo.environment["VR_TIMING"] != nil
     private var exposure: Double = 1.5
     var renderScale: Double
 
     // Cover drifts between clear and broken skies over tens of minutes.
     var cloudCover: Double {
-        0.42 + 0.14 * sin(simTime * 0.0021 + 1.0) + 0.08 * sin(simTime * 0.0057 + 4.0)
+        0.52 + 0.12 * sin(simTime * 0.0021 + 1.0) + 0.06 * sin(simTime * 0.0057 + 4.0)
     }
 
     init?(device: MTLDevice, outputFormat: MTLPixelFormat, seed: UInt32, screenIndex: Int, battery: Bool) {
@@ -171,7 +241,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         renderScale = battery ? 0.4 : 0.6
         super.init()
         camera.heightAt = { [unowned world] x, z in world.height(x: x, z: z) }
-        world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z), queue: queue)
+        world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
         camera.placeAtStart()
     }
 
@@ -199,14 +269,15 @@ final class Renderer: NSObject, MTKViewDelegate {
         var remaining = dt * timeScale
         while remaining > 0 {
             let step = min(remaining, 1.0 / 30.0)
+            camera.sun = clock.sunDirection
             camera.step(dt: step)
             clock.advance(step)
-            world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z), queue: queue)
+            world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
             remaining -= step
         }
         simTime += dt * timeScale
         let e = clock.sunDirection.y
-        let target = e > 0 ? 0.8 + 0.5 * max(0, 0.25 - e) * 4 : 1.3 + min(1.0, -e * 5) * 0.8
+        let target = e > 0 ? 0.62 + 1.4 * max(0, 0.3 - e) / 0.3 : (e > -0.1 ? 2.02 + 0.4 * (-e / 0.1) : 2.2 + 0.2 * max(0, 0.3 + e) / 0.2)
         exposure += (target - exposure) * min(1, dt * timeScale * 0.2)
     }
 
@@ -236,6 +307,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             sceneTex = device.makeTexture(descriptor: td)
         }
         guard let sceneTex else { return }
+        sceneSize = (w, h)
         var f = makeFrame(size: CGSize(width: w, height: h))
         frameIndex += 1
 
@@ -276,6 +348,18 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         guard let drawable = view.currentDrawable, let cb = queue.makeCommandBuffer() else { return }
         encode(into: cb, output: drawable.texture, outputSize: view.drawableSize)
+        if Renderer.logTiming {
+            cb.addCompletedHandler { [weak self] cb in
+                guard let self else { return }
+                self.gpuTimes.append((cb.gpuEndTime - cb.gpuStartTime) * 1000)
+                if self.gpuTimes.count >= 120 {
+                    let sorted = self.gpuTimes.sorted()
+                    print(String(format: "gpu ms: median %.2f  p95 %.2f  (%dx%d scene)", sorted[60], sorted[113],
+                                 self.sceneSize.width, self.sceneSize.height))
+                    self.gpuTimes.removeAll()
+                }
+            }
+        }
         cb.present(drawable)
         cb.commit()
     }
@@ -291,6 +375,7 @@ enum Snapshot {
             return
         }
         r.debugMode = settings.debugMode
+        r.world.synchronous = true
         let w = Int(settings.screenshotSize.width), h = Int(settings.screenshotSize.height)
         r.renderScale = settings.renderScale ?? r.renderScale
         let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: w, height: h, mipmapped: false)

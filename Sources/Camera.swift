@@ -12,7 +12,7 @@ final class FlightCamera {
     private var climbRate: Double = 0
     private var time: Double = 0
     private(set) var surveyAmount: Double = 0
-    let speed: Double = 7
+    var sun = SIMD3<Double>(0, 1, 0)
 
     // Height lookup in world coords; returns nil outside the loaded map.
     var heightAt: (Double, Double) -> Double? = { _, _ in nil }
@@ -21,6 +21,8 @@ final class FlightCamera {
         let s = Double(seed % 100_000)
         position = SIMD3(s * 7.31, 70, s * 3.17)
         yaw = s.truncatingRemainder(dividingBy: 6.283)
+        // Decorrelates the wander/pitch cycles across seeds and displays.
+        time = Double(seed % 997) * 37.0
     }
 
     var forward: SIMD3<Double> {
@@ -69,14 +71,26 @@ final class FlightCamera {
             let l = a + left * dist * 0.35, r = a - left * dist * 0.35
             steer += weight * (h(r.x, r.y) - h(l.x, l.y))
         }
-        let targetRate = max(-0.09, min(0.09, steer * 0.004 + wander(time, 1) * 0.035))
+        // A slow mode: mostly follow valleys, but about a third of the time run ridges or cut across.
+        let mode = wander(time + 2000, 0.35)
+        let m01 = min(max((mode + 0.2) / 0.6, 0), 1)
+        let steerSign = m01 * m01 * (3 - 2 * m01) * 2 - 1
+        // At golden hour drift gently toward the sun, so its disc and water glitter come into frame.
+        var steerSun = 0.0
+        if sun.y > -0.05 && sun.y < 0.3 {
+            let sunYaw = atan2(sun.x, sun.z)
+            steerSun = sin(sunYaw - yaw) * 0.02 * min(max(1 - abs(sun.y - 0.1) / 0.2, 0), 1)
+        }
+        let targetRate = max(-0.09, min(0.09, steer * 0.004 * steerSign + wander(time, 1) * 0.035 + steerSun))
         // Critically damped spring on yaw rate: turns take tens of seconds.
         let k = 0.25
         yawAccel += (k * k * (targetRate - yawRate) - 2 * k * yawAccel) * dt
         yawRate += yawAccel * dt
         yaw += yawRate * dt
 
-        let v = speed * (1 - 0.3 * max(0, 1 - (position.y - h(position.x, position.z)) / 20))
+        // Constant angular ground flow: faster when high, slower when skimming.
+        let agl = position.y - h(position.x, position.z)
+        let v = min(11, max(4, 2.5 + agl * 0.12))
         position.x += sin(yaw) * v * dt
         position.z += cos(yaw) * v * dt
 
@@ -85,7 +99,7 @@ final class FlightCamera {
         for dist in [20.0, 45.0, 75.0, 110.0] {
             ahead = max(ahead, footprintMax(position.x + fwdFlat.x * dist, position.z + fwdFlat.y * dist, radius: 8) - dist * 0.12)
         }
-        let clearance = 20 + 16 * (wander(time + 500, 0.7) + 0.6) + 30 * surveyAmount
+        let clearance = 20 + 16 * (wander(time + 500, 0.7) + 0.6) + 15 * surveyAmount + 40 * max(0, min(1, -mode / 0.6))
         let target = max(ahead, 19.85) + clearance
         let kc = 0.35
         climbRate += (kc * kc * (target - position.y) - 2 * kc * climbRate) * dt
@@ -95,9 +109,9 @@ final class FlightCamera {
 
         // Survey/vista cycle: the horizon sweeps the whole frame every few minutes so no region of the
         // screen stays sky (or land) for long. Smoothstep dwells at each extreme.
-        let cyc = 0.5 + 0.5 * sin(time * 2 * .pi / 230 + 0.6 * sin(time * 0.0047))
-        let s = cyc * cyc * (3 - 2 * cyc)
-        let targetPitch = 0.05 - 0.62 * s + 0.04 * wander(time + 900, 1.3) + max(-0.05, min(0.08, climbRate * 0.03))
+        let s = 0.5 + 0.5 * sin(time * 2 * .pi / 230 + 0.6 * sin(time * 0.0047))
+        let nightTilt = sun.y < -0.2 ? -0.08 : 0
+        let targetPitch = -0.08 - 0.40 * s + nightTilt + 0.03 * wander(time + 900, 1.3) + max(-0.04, min(0.06, climbRate * 0.03))
         surveyAmount = s
         pitch += (targetPitch - pitch) * min(1, dt * 0.25)
         let targetRoll = max(-0.07, min(0.07, -yawRate * 0.8))
