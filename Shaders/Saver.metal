@@ -1629,11 +1629,10 @@ fragment float4 postFragment(VOut in [[stage_in]], texture2d<float> scene [[text
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     // Golden hour sits lower on the curve, below the shoulder where ACES bleaches warm skies to cream.
     float sunUp = smoothstep(-0.04, 0.04, f.sunDir.y);
-    // Retro pixels: ~864 cells across the screen, each cell one flat colour ordered-dithered below.
-    float outW = 1.0 / max(abs(dfdx(in.uv.x)), 1e-6);
-    float cell = max(1.0, round(outW / 864.0));
-    float2 cellId = floor(in.pos.xy / cell);
-    float2 uv = (cellId + 0.5) * cell * float2(abs(dfdx(in.uv.x)), abs(dfdy(in.uv.y)));
+    // Retro pixels: the history is the cell grid; each output pixel takes its cell's flat colour.
+    float2 grid = float2(scene.get_width(), scene.get_height());
+    float2 cellId = min(floor(in.uv * grid), grid - 1.0);
+    float2 uv = (cellId + 0.5) / grid;
     float3 x = scene.sample(s, uv).rgb * f.misc.x * mix(1.0, 0.75, goldAmount(f.sunDir.y) * sunUp);
     float3 c = acesFit(x);
     // Noon light is the flattest; restore a little chroma the tonemap shoulder takes away.

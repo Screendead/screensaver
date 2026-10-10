@@ -234,6 +234,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var cloudCenter: SIMD2<Double>?
     static let cloudTexels = 2048, cloudTexel = 4.0
     private var history: [MTLTexture] = []
+    static let ditherCells = 864.0
     private var historyIndex = 0
     private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
     let world: World
@@ -290,7 +291,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         // instead start at different places in the same world.
         camera = FlightCamera(seed: seed &+ UInt32(screenIndex) &* 7919)
         self.battery = battery
-        renderScale = battery ? 0.35 : 0.5
+        renderScale = battery ? 0.7 : 1.0
         super.init()
         camera.heightAt = { [unowned world] x, z in world.height(x: x, z: z) }
         world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
@@ -318,7 +319,7 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     func setBattery(_ b: Bool, view: MTKView) {
         battery = b
-        renderScale = b ? 0.35 : 0.5
+        renderScale = b ? 0.7 : 1.0
         view.preferredFramesPerSecond = b ? 30 : 60
     }
 
@@ -374,8 +375,11 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
 
     func encode(into cb: MTLCommandBuffer, output: MTLTexture, outputSize: CGSize) {
-        let w = max(16, Int(outputSize.width * renderScale)), h = max(16, Int(outputSize.height * renderScale))
-        let ow = Int(outputSize.width), oh = Int(outputSize.height)
+        // The retro dither shows one flat colour per cell, so the temporal history only needs the cell grid,
+        // and the scene renders at (a fraction of) it.
+        let cell = max(1.0, (outputSize.width / Renderer.ditherCells).rounded())
+        let ow = max(16, Int((outputSize.width / cell).rounded())), oh = max(16, Int((outputSize.height / cell).rounded()))
+        let w = max(16, Int(Double(ow) * renderScale)), h = max(16, Int(Double(oh) * renderScale))
         if sceneTex?.width != w || sceneTex?.height != h || history.first?.width != ow || history.first?.height != oh {
             let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: w, height: h, mipmapped: false)
             td.usage = [.renderTarget, .shaderRead]
