@@ -575,20 +575,67 @@ struct Surface {
     float H;
     int mat;        // 0 terrain, 1 leaf, 2 wood
     float canopy;   // ambient left under a canopy overhead
+    float2 slope;   // heightfield gradient of fine relief on top faces
+    float riser;    // drop below this face, for side faces
 };
 
-// Two low-chroma tones per rock family, ramped smoothly by voxel row so strata read as gentle folds.
-static inline float3 strataTone(float y, float2 w, uint seed, float desertAmt) {
-    float k = 0.5 + 0.5 * sin(y * 0.38 + 2.2 * perlin2(w * 0.01, seed + 22u) + 1.3 * perlin2(w * 0.003, seed + 23u));
+// Sedimentary bedding by world height: broad formations, beds of uneven tone and fine laminae. Beds dip gently
+// with a slow horizontal warp, so a layer runs continuously across neighbouring columns and around canyon walls.
+// Bed edges widen and fine terms fade with the pixel footprint fp (voxels per pixel).
+static inline float3 strataTone(float y, float2 w, uint seed, float desertAmt, float fp) {
+    float yd = y + 1.2 * perlin2(w / 140.0, seed + 24u) + 0.3 * perlin2(w / 30.0, seed + 25u);
+    float k = 0.5 + 0.5 * sin(yd * 0.38 + 2.2 * perlin2(w * 0.01, seed + 22u) + 1.3 * perlin2(w * 0.003, seed + 23u));
     k = smoothstep(0.25, 0.75, k);
     float3 grey = mix(float3(0.22, 0.23, 0.25), float3(0.35, 0.34, 0.33), k);
     float3 sand = mix(float3(0.56, 0.36, 0.24), float3(0.70, 0.52, 0.37), k);
-    return mix(grey, sand, desertAmt);
+    float3 base = mix(grey, sand, desertAmt);
+
+    float yb = yd / 2.4;
+    float bi = floor(yb), bf = yb - bi;
+    float e = clamp(fp * 0.8, 0.04, 0.45);
+    uint sb = seed + 26u;
+    float t0 = hashf(hash2i(int2(int(bi), 0), sb)), t1 = hashf(hash2i(int2(int(bi) + 1, 0), sb));
+    float bed = mix(t0, t1, smoothstep(1.0 - e, 1.0, bf)) - 0.5;
+    float bedFade = 1.0 - smoothstep(0.6, 1.8, fp);
+    float lam = sin(yd * 21.0 + 3.0 * perlin2(w / 11.0, seed + 27u)) * (1.0 - smoothstep(0.015, 0.05, fp));
+    float parting = (1.0 - smoothstep(0.0, 0.03, min(bf, 1.0 - bf))) * (1.0 - smoothstep(0.02, 0.06, fp));
+    // Desert beds swing between rust and pale cream; grey rock between warm umber and cool slate.
+    float3 lo = mix(float3(1.04, 0.99, 0.94), float3(1.04, 0.88, 0.70), desertAmt);
+    float3 hi = mix(float3(0.95, 0.98, 1.04), float3(1.10, 1.07, 1.00), desertAmt);
+    float3 tint = mix(lo, hi, saturate(0.5 + bed * 1.8));
+    float lum = 1.0 + bedFade * 0.22 * bed + 0.05 * lam - 0.10 * parting;
+    return base * mix(float3(1.0), tint, bedFade) * lum;
 }
 
-static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 uv, float fp, int2 mapOrigin, uint seed) {
+// Wind ripples on sand. Crests are level sets of a Perlin-warped wind field, so they bend and pinch across a dune,
+// and creep slowly downwind. Returns (albedo offset, slope along the wind) with amplitude already applied.
+static inline float3 sandRipples(int2 v, float2 uv, float2 w, float fp, float time, uint seed) {
+    const float2 wind = float2(0.6, 0.8);
+    const float lambda = 0.8;
+    // Integer part of the phase in exact arithmetic: float world coords lose the ripple far from the origin.
+    int ip = (3 * v.x + 4 * v.y) % 20;
+    float2 q = w + uv;
+    float ipm = float(ip + (ip < 0 ? 20 : 0));
+    float psi = dot(uv, wind) + 7.0 * perlin2(q / 26.0, seed + 60u) + 1.6 * perlin2(q / 7.0, seed + 61u);
+    float phase = ipm / (5.0 * lambda) + psi / lambda - time * 0.02;
+    // Low dune swells, five ripples apart, carry the pattern into the middle distance.
+    float swell = sin((ipm / 20.0 + psi / 4.0 - time * 0.004) * 6.2831853) * (1.0 - smoothstep(0.4, 1.4, fp));
+    float x = phase * 6.2831853;
+    // Long gentle stoss, short steep lee.
+    float r = sin(x) + 0.35 * sin(2.0 * x - 0.9);
+    float dr = (cos(x) + 0.7 * cos(2.0 * x - 0.9)) * 6.2831853 / lambda;
+    float calm = smoothstep(-0.35, 0.35, perlin2(q / 48.0, seed + 62u));
+    float amp = mix(0.25, 1.0, calm) * (1.0 - smoothstep(0.08, 0.24, fp));
+    // Streaks drawn out along the wind give broad plains a calm grain at any distance.
+    float along = dot(q, wind), across = dot(q, float2(-wind.y, wind.x));
+    float streak = perlin2(float2(along / 70.0, across / 7.0), seed + 63u) * (1.0 - smoothstep(0.5, 2.0, fp));
+    return float3(0.045 * amp * r + 0.035 * swell + 0.05 * streak, 0.018 * amp * dr * wind);
+}
+
+static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 uv, float fp, float fpA, int2 mapOrigin, uint seed, float time) {
     Surface s;
     s.glint = 0;
+    s.slope = 0;
     s.lipDir = float2(float(n.x), float(n.z));
     s.mat = 0;
     float4 col4 = hm.read(uint2(clamp(v.xz, int2(0), int2(size - 1))), 0);
@@ -602,6 +649,11 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
     s.nh = float4(hx0, hx1, hz0, hz1);
     float slope = max(max(H - hx0, H - hx1), max(H - hz0, H - hz1));
     float2 w = float2(v.xz + mapOrigin);
+    // Continuous world position on the face, so tonal detail flows across block edges.
+    float2 wq = w + (n.y != 0 ? uv : n.x != 0 ? float2(n.x > 0 ? 1.0 : 0.0, uv.x) : float2(uv.x, n.z > 0 ? 1.0 : 0.0));
+    float wy = n.y != 0 ? float(v.y + max(n.y, 0)) : float(v.y) + uv.y;
+    float nb = n.x < 0 ? hx0 : n.x > 0 ? hx1 : n.z < 0 ? hz0 : hz1;
+    s.riser = n.y == 0 ? H - nb : 0.0;
     Climate c = climate(w, seed);
     float desert = desertAmount(c);
     float cold = smoothstep(0.42, 0.18, c.temp);
@@ -609,13 +661,16 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
     bool underGap = !tree && col.z > col.y && float(v.y) < col.z;
 
     float snowline = mix(160.0, 92.0, cold) + 5.0 * perlin2(w / 160.0, seed + 21u);
-    float3 stone = strataTone(float(v.y), w, seed, desert);
+    float3 stone = strataTone(wy, wq, seed, desert, fpA);
 
     float3 grassWet = float3(0.12, 0.20, 0.13), grassDry = float3(0.40, 0.34, 0.16), grassCold = float3(0.20, 0.23, 0.17);
     float3 grass = mix(mix(grassDry, grassWet, smoothstep(0.3, 0.7, c.moist)), grassCold, cold);
     float3 sand = float3(0.47, 0.41, 0.29);
     float3 desertTop = float3(0.54, 0.34, 0.19);
-    float3 tread = mix(grass, desertTop, desert) * (0.95 + 0.1 * perlin2(w / 40.0, seed + 30u));
+    float3 tread = mix(grass, desertTop, desert) * (0.95 + 0.1 * perlin2(wq / 40.0, seed + 30u));
+    // Broad, soft mottling: a little warmer and drier in one drift, cooler and lusher in the next.
+    float mott = perlin2(wq / 13.0, seed + 31u) * (1.0 - smoothstep(0.6, 2.0, fpA));
+    tread *= 1.0 + mott * float3(0.05, 0.035, -0.01);
     // Gentle hypsometric tint, like a printed topo map: sage valleys, paler ochre-grey uplands.
     float alt = saturate((H - SEA) / 110.0);
     tread *= mix(float3(0.93, 1.03, 0.90), float3(1.10, 1.04, 0.98), alt);
@@ -630,12 +685,19 @@ static Surface surfaceAt(texture2d<float> hm, int size, int3 v, int3 n, float2 u
     if (beach) tread = sand;
     s.tread = tread;
     bool snowy = float(int(H)) > snowline;
+    if (snowy) s.riser = 0.0;
 
     if (n.y > 0 && !underGap) {
         if (float(v.y + 1) > snowline) s.albedo = float3(0.63, 0.66, 0.71);
         else if (beach) s.albedo = sand;
         else if (drops >= 2) s.albedo = stone;
         else s.albedo = tread;
+        float sandy = float(v.y + 1) > snowline || (drops >= 2 && !beach) ? 0.0 : beach ? 1.0 : smoothstep(0.35, 0.7, desert);
+        if (sandy > 0.0) {
+            float3 rp = sandRipples(v.xz + mapOrigin, uv, w, fpA, time, seed) * sandy;
+            s.albedo *= 1.0 + rp.x;
+            s.slope = rp.yz;
+        }
         // Step-lip glint along edges that drop away, at least a pixel wide at any distance.
         float edge = 9.0;
         if (hx0 < H && uv.x < edge) { edge = uv.x; s.lipDir = float2(-1, 0); }
@@ -758,14 +820,18 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, bool shadows
     float3 n = float3(h.normal);
     float2 uv = faceUV(p, h.normal);
     float fp = h.t * x.pixelAngle; // voxels per pixel
-    Surface s = surfaceAt(x.hm, x.size, h.voxel, h.normal, uv, fp, x.origin, x.seed);
+    // Footprint stretched across a grazing face, for detail that must fade before it aliases along the view.
+    float fpA = fp / max(abs(dot(n, d)), 0.15);
+    Surface s = surfaceAt(x.hm, x.size, h.voxel, h.normal, uv, fp, fpA, x.origin, x.seed, x.time);
     // Prefilter: from ~1/10 voxel per pixel, blend toward the smooth heightfield normal, relax AO and
     // shadows, and give risers their tread colour, so distant stairs read as contour bands, not moire.
     float wf = smoothstep(0.025, 0.20, fp);
     float3 nS = normalize(float3(s.nh.x - s.nh.y, 2.0, s.nh.z - s.nh.w));
-    float3 nl = normalize(mix(n, nS, wf));
+    float3 nl = normalize(mix(normalize(n - float3(s.slope.x, 0.0, s.slope.y)), nS, wf));
     float ao = mix(cornerAO(x.hm, x.size, h.voxel, h.normal, uv), 0.85, wf) * s.canopy;
-    float3 alb = h.normal.y == 0 ? mix(s.albedo, s.tread, wf) : s.albedo;
+    // Cliffs several pixels tall keep their strata; only sub-pixel stairs take the tread colour.
+    float keep = smoothstep(6.0, 14.0, s.riser / fp) * smoothstep(3.0, 5.0, s.riser);
+    float3 alb = h.normal.y == 0 ? mix(s.albedo, s.tread, wf * (1.0 - keep)) : s.albedo;
     // Moonlight drains colour.
     alb = mix(alb, float3(dot(alb, float3(0.3, 0.59, 0.11))), 0.4 * x.L.night);
     // Canopies would otherwise drop to cut-out silhouettes under the moon.
