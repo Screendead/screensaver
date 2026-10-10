@@ -641,7 +641,7 @@ static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t) 
     float3 ep = o + d * t;
     float edgeDist = min(min(ep.x, float(x.size) - ep.x), min(ep.z, float(x.size) - ep.z));
     // Clear air under a high sun; haze belongs to the low light.
-    float clear = mix(1.0, 0.55, smoothstep(0.3, 0.6, x.L.sun.y));
+    float clear = mix(1.0, 0.3, smoothstep(0.3, 0.6, x.L.sun.y));
     return exp(-((heightTerm + b * t + c2 * t * t + mist) * clear + 5.0 * smoothstep(110.0, 10.0, edgeDist)));
 }
 
