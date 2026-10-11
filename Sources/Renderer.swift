@@ -175,7 +175,8 @@ final class World {
             let gd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Uint, width: World.size, height: World.size, mipmapped: false)
             gd.usage = [.shaderRead, .shaderWrite]
             gd.storageMode = .private
-            let bd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Float, width: World.size, height: World.size, mipmapped: true)
+            // From the column mips' level 1 up: mip m here is their level m + 1.
+            let bd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Float, width: World.size / 2, height: World.size / 2, mipmapped: true)
             bd.usage = [.shaderRead, .shaderWrite, .pixelFormatView]
             bd.storageMode = .private
             guard let bt = device.makeTexture(descriptor: bd),
@@ -428,12 +429,12 @@ final class World {
                 enc.setTexture(buf.levels[0], index: 0)
                 enc.setTexture(buf.gx, index: 1)
                 enc.setTexture(buf.bandViews[0], index: 2)
-                enc.dispatchThreads(MTLSize(width: World.size, height: World.size, depth: 1), threadsPerThreadgroup: tg)
+                enc.dispatchThreads(MTLSize(width: World.size / 2, height: World.size / 2, depth: 1), threadsPerThreadgroup: tg)
                 enc.setComputePipelineState(bandReducePipeline)
                 for l in 1..<buf.bandViews.count {
                     enc.setTexture(buf.bandViews[l - 1], index: 0)
                     enc.setTexture(buf.bandViews[l], index: 1)
-                    let s = max(1, World.size >> l)
+                    let s = max(1, World.size >> (l + 1))
                     enc.dispatchThreads(MTLSize(width: s, height: s, depth: 1), threadsPerThreadgroup: MTLSize(width: min(16, s), height: min(16, s), depth: 1))
                 }
                 enc.setComputePipelineState(reducePipeline)
@@ -446,7 +447,7 @@ final class World {
                 enc.setComputePipelineState(bandFlagPipeline)
                 for l in 1..<buf.levels.count {
                     enc.setTexture(buf.levels[l], index: 0)
-                    enc.setTexture(buf.bandViews[l], index: 1)
+                    enc.setTexture(buf.bandViews[l - 1], index: 1)
                     let s = max(1, World.size >> l)
                     enc.dispatchThreads(MTLSize(width: s, height: s, depth: 1), threadsPerThreadgroup: MTLSize(width: min(16, s), height: min(16, s), depth: 1))
                 }
@@ -584,7 +585,10 @@ final class Clipmap {
     let climate: MTLTexture  // rgba16Float array at half resolution
     // Must match GAP_LEVELS in Shaders/Saver.metal: levels 1...gapLevels carry one gap per column.
     static let gapLevels = 4
-    let gaps: MTLTexture     // rg16Float array, one slice per level up to gapLevels: the column's gap (lo, hi)
+    // Must match GAP2_LEVELS: levels 1...gap2Levels also carry a second gap (giants' crowns).
+    static let gap2Levels = 2
+    let gaps: MTLTexture     // rgba16Float array, levels 1...gap2Levels: the column's gap (lo, hi) and a second below it
+    let gaps2: MTLTexture    // rg16Float array, the levels after them up to gapLevels: the column's gap
     private let gapViews: [MTLTexture]
     private let heightViews: [[MTLTexture]]
     private let coverViews: [MTLTexture]
@@ -614,7 +618,8 @@ final class Clipmap {
             return device.makeTexture(descriptor: d)
         }
         guard let h = array(.r16Float, Clipmap.size, mips: true), let v = array(.rg8Unorm, Clipmap.size, mips: false),
-              let g = array(.rgba16Float, Clipmap.size, mips: false, slices: Clipmap.gapLevels),
+              let g = array(.rgba16Float, Clipmap.size, mips: false, slices: Clipmap.gap2Levels),
+              let g2 = array(.rg16Float, Clipmap.size, mips: false, slices: Clipmap.gapLevels - Clipmap.gap2Levels),
               let c = array(.rgba16Float, Clipmap.size / 2, mips: false),
               let gen = pipeline("generateCoarse"), let red = pipeline("reduceMaxRegion"), let par = pipeline("reduceMaxParent") else { return nil }
         func slice(_ t: MTLTexture, _ k: Int, _ m: Int) -> MTLTexture? {
@@ -634,10 +639,11 @@ final class Clipmap {
         }
         var gv: [MTLTexture] = []
         for k in 0..<Clipmap.gapLevels {
-            guard let t = slice(g, k, 0) else { return nil }
+            guard let t = k < Clipmap.gap2Levels ? slice(g, k, 0) : slice(g2, k - Clipmap.gap2Levels, 0) else { return nil }
             gv.append(t)
         }
         gaps = g
+        gaps2 = g2
         gapViews = gv
         height = h
         cover = v
@@ -1188,6 +1194,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setTexture(world.maxTex, index: 2)
             enc.setTexture(world.gapTex, index: 3)
             enc.setTexture(clipmap.gaps, index: 4)
+            enc.setTexture(clipmap.gaps2, index: 5)
             enc.setBuffer(world.giantBuffer, offset: 0, index: 2)
             // HORIZON_SEGS (16) threads per bin, one threadgroup each.
             enc.dispatchThreads(MTLSize(width: 16, height: 1024, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 1, depth: 1))
@@ -1230,6 +1237,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentTexture(world.maxTex, index: 12)
             enc.setFragmentTexture(world.gapTex, index: 13)
             enc.setFragmentTexture(clipmap.gaps, index: 14)
+            enc.setFragmentTexture(clipmap.gaps2, index: 17)
             enc.setFragmentTexture(world.bandTex, index: 15)
             enc.setFragmentTexture(provTex, index: 16)
             enc.setFragmentBuffer(lampPos, offset: 0, index: 2)

@@ -1450,24 +1450,33 @@ kernel void copyTop(texture2d<float, access::read> src [[texture(0)]],
 
 // Band mips: per cell the height band [x, y) every column in it leaves open, so a ray under a giant's crown
 // skips cells as one over the tops does. A giant column offers its tallest gap, any other column the air above it.
+// The open band of one column: a canopy column's tallest gap (at least 4 tall), any other column the air above it.
+static inline float2 columnBand(texture2d<float, access::read> src, texture2d<uint, access::read> gx, uint2 c) {
+    float4 col = src.read(c);
+    float2 b = float2(col.r, 4096.0);
+    if (col.a == GIANT_A) {
+        float4 e = extraGaps(gx.read(c));
+        float2 g = col.b > col.g ? float2(col.g, col.b) : float2(0);
+        if (e.y - e.x > g.y - g.x) g = e.xy;
+        if (e.w - e.z > g.y - g.x) g = e.zw;
+        if (g.y - g.x >= 4.0) b = g;
+    } else if (col.a > 0.0 && col.b - col.g >= 4.0) {
+        // Under a floating canopy (the jungle's roof).
+        b = col.gb;
+    }
+    return b;
+}
+
+// Band mips from mip 1 (the trace never reads mip 0): per 2x2 columns the band [x, y) all of them leave open.
 kernel void bandTop(texture2d<float, access::read> src [[texture(0)]],
                     texture2d<uint, access::read> gx [[texture(1)]],
                     texture2d<float, access::write> dst [[texture(2)]],
                     uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
-    float4 c = src.read(gid);
-    float2 b = float2(c.r, 4096.0);
-    if (c.a == GIANT_A) {
-        float4 e = extraGaps(gx.read(gid));
-        float2 g = c.b > c.g ? float2(c.g, c.b) : float2(0);
-        if (e.y - e.x > g.y - g.x) g = e.xy;
-        if (e.w - e.z > g.y - g.x) g = e.zw;
-        if (g.y - g.x >= 4.0) b = g;
-    } else if (c.a > 0.0 && c.b - c.g >= 4.0) {
-        // Under a floating canopy (the jungle's roof).
-        b = c.gb;
-    }
-    dst.write(float4(b, 0, 0), gid);
+    uint2 s = gid * 2;
+    float2 a = columnBand(src, gx, s), b = columnBand(src, gx, s + uint2(1, 0));
+    float2 c = columnBand(src, gx, s + uint2(0, 1)), d = columnBand(src, gx, s + uint2(1, 1));
+    dst.write(float4(max(max(a.x, b.x), max(c.x, d.x)), min(min(a.y, b.y), min(c.y, d.y)), 0, 0), gid);
 }
 
 kernel void bandReduce(texture2d<float, access::read> src [[texture(0)]],
@@ -2465,6 +2474,10 @@ constant float COVER_GAIN = 2.5;
 // those there are, where they overlap, under at least two voxels of roof (a coarse column hollow wherever any sample is,
 // or a recess's ragged back wall stands in it as a row of pillars). Their outline (H) ignores gaps.
 constant int GAP_LEVELS = 4;
+// Of those, levels 1...GAP2_LEVELS also carry a second gap below it (a giant's crown: the air under it, with the gap
+// between its tiers as the principal one); further out a giant keeps only the air under its crown. Must match
+// Clipmap.gap2Levels in Sources/Renderer.swift.
+constant int GAP2_LEVELS = 2;
 
 static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantRec* giants, thread float2& g2, thread float& depth) {
     g2 = 0.0;
@@ -2509,7 +2522,7 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
             lowG.x = max(lowG.x, H);
             if (lowG.y - lowG.x < 2.0 || top - lowG.y < 1.0) return float3(max(top, H), 0, 0);
             float2 upG = sUp.z >= max(1.0, 0.5 * sLow.z) ? floor(sUp.xy / sUp.z + 0.5) : float2(0);
-            if (upG.y - upG.x >= 2.0 && upG.x >= lowG.y + 2.0 && top - upG.y >= 1.0) { g2 = lowG; return float3(top, upG); }
+            if (k <= GAP2_LEVELS && upG.y - upG.x >= 2.0 && upG.x >= lowG.y + 2.0 && top - upG.y >= 1.0) { g2 = lowG; return float3(top, upG); }
             return float3(top, lowG);
         }
     }
@@ -2648,7 +2661,8 @@ struct Terrain {
     float globalMax;
     texture2d<float> hx;         // r16Float: mip 0 the column tops, mips from 1 their maxima (the DDA's skips)
     texture2d<uint> gx;          // the 1-voxel map's extra gaps (packGaps)
-    texture2d_array<float> cg;   // levels 1...GAP_LEVELS: each column's gap (lo, hi)
+    texture2d_array<float> cg;   // levels 1...GAP2_LEVELS: each column's gap (lo, hi) and second gap below it
+    texture2d_array<float> cg2;  // levels GAP2_LEVELS + 1...GAP_LEVELS: each column's gap
     texture2d<float> hb;         // band mips (bandTop): the air a cell leaves open under canopies
     uint seed;
     device const GiantRec* giants; // the giant table (placeGiants)
@@ -2671,7 +2685,8 @@ static inline float4 columnLE(thread const Terrain& tr, int k, int2 c, thread fl
     uint2 t = uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1));
     float H = tr.ch.read(t, uint(k - 1), 0).r;
     if (k > GAP_LEVELS) return float4(H, 0, 0, 0);
-    float4 g = tr.cg.read(t, uint(k - 1));
+    // Levels 1 and 2 carry a second gap (rgba); 3 and 4 one (cg2).
+    float4 g = k <= GAP2_LEVELS ? tr.cg.read(t, uint(k - 1)) : float4(tr.cg2.read(t, uint(k - 1 - GAP2_LEVELS)).rg, 0, 0);
     e2 = g.ba;
     return float4(H, g.rg, 0);
 }
@@ -2713,7 +2728,8 @@ static inline float parentH(thread const Terrain& tr, int k, int2 c) {
 static inline float2 parentGap(thread const Terrain& tr, int k, int2 c) {
     if (k + 1 > GAP_LEVELS) return float2(0);
     int2 w = c + (k == 0 ? tr.origin : tr.origin >> k);
-    return tr.cg.read(uint2((w >> 1) & (COARSE_N - 1)), uint(k)).rg;
+    uint2 t = uint2((w >> 1) & (COARSE_N - 1));
+    return k + 1 <= GAP2_LEVELS ? tr.cg.read(t, uint(k)).rg : tr.cg2.read(t, uint(k - GAP2_LEVELS)).rg;
 }
 
 // Morph weight toward the next level at frame-local xz p: 0 inside the band, 1 from 1.5 parent columns before the
@@ -2842,7 +2858,7 @@ static Hit trace(thread const Terrain& tr, float3 o, float3 d, float tMax, int m
             float mx = k == 0 ? tr.hx.read(uint2(clamp(mc, int2(0), int2((tr.size >> level) - 1))), level).r : maxAt(tr, k, mc, level);
             bool clear = min(yA, yB) >= abs(mx);
             if (!clear && mx < 0.0 && BAND_SKIP) {
-                float2 bd = tr.hb.read(uint2(clamp(mc, int2(0), int2((tr.size >> level) - 1))), level).rg;
+                float2 bd = tr.hb.read(uint2(clamp(mc, int2(0), int2((tr.size >> level) - 1))), level - 1).rg;
                 clear = min(yA, yB) >= bd.x && max(yA, yB) < bd.y;
             }
             if (clear) {
@@ -2921,7 +2937,7 @@ kernel void bakeHorizon(device float* out [[buffer(0)]],
                         texture2d_array<float> coarse [[texture(1)]],
                         texture2d<float> hx [[texture(2)]],
                         texture2d<uint> gx [[texture(3)]],
-                        texture2d_array<float> cg [[texture(4)]],
+                        texture2d_array<float> cg [[texture(4)]], texture2d_array<float> cg2 [[texture(5)]],
                         device const GiantRec* giants [[buffer(2)]],
                         uint2 tid [[thread_position_in_grid]], uint lane [[thread_index_in_threadgroup]]) {
     // HORIZON_SEGS threads per bin walk geometric slices of the distance and reduce, so the bake is not one long chain.
@@ -2929,7 +2945,7 @@ kernel void bakeHorizon(device float* out [[buffer(0)]],
     uint gid = tid.y;
     int levels = int(f.fade.z);
     Terrain tr { hm, coarse, coarse, coarse, hm, f.lod, f.mapInfo.xy, f.mapInfo.z, levels,
-                 f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, 0.0, hx, gx, cg, hx, uint(f.mapInfo.w), giants, hx };
+                 f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, 0.0, hx, gx, cg, cg2, hx, uint(f.mapInfo.w), giants, hx };
     float a = (float(gid) + 0.5) * 6.2831853 / float(HORIZON_BINS);
     float2 dir = float2(sin(a), cos(a));
     float3 o = f.camPos.xyz;
@@ -4753,6 +4769,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
                               texture2d<float> shadowNear [[texture(9)]], texture2d<float> shadowFar [[texture(10)]],
                               texture2d<float> slowTex [[texture(11)]], texture2d<float> hx [[texture(12)]],
                               texture2d<uint> gx [[texture(13)]], texture2d_array<float> cg [[texture(14)]],
+                              texture2d_array<float> cg2 [[texture(17)]],
                               texture2d<float> hb [[texture(15)]], texture2d<float> pvTex [[texture(16)]],
                               device const Site* sites [[buffer(1)]], device const float4* lampPos [[buffer(2)]],
                               device const float4* lampState [[buffer(3)]], constant int4* refs [[buffer(4)]],
@@ -4769,7 +4786,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     float gmax = f.misc.y;
     for (int k = 1; k < levels; k++) gmax = max(gmax, coarse.read(uint2(0), uint(k - 1), coarse.get_num_mip_levels() - 1).r + 1.0);
     if (int(f.shadow.y) & 2) gmax = min(gmax, 260.0);
-    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, hb, uint(f.mapInfo.w), giants, pvTex };
+    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, cg2, hb, uint(f.mapInfo.w), giants, pvTex };
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
             2.0 * tanH * f.resolution.w, f.misc.w, makeLight(f.sunDir.xyz),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
@@ -4802,7 +4819,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         c *= 0.35 + 0.9 * lit;
         if (floor(h0 / 100.0) != floor(hx / 100.0) || floor(h0 / 100.0) != floor(hz / 100.0)) c *= 0.6;
         // Gaps (overhangs, caves, bridges) in magenta.
-        if (k <= GAP_LEVELS) { float2 gp = cg.read(uint2(ci & (COARSE_N - 1)), uint(k - 1)).rg; if (gp.y > gp.x) c = float3(1, 0, 1); }
+        if (k <= GAP_LEVELS) { float2 gp = k <= GAP2_LEVELS ? cg.read(uint2(ci & (COARSE_N - 1)), uint(k - 1)).rg : cg2.read(uint2(ci & (COARSE_N - 1)), uint(k - 1 - GAP2_LEVELS)).rg; if (gp.y > gp.x) c = float3(1, 0, 1); }
         float2 wc = cell * cs;
         // Forest provinces: jungle warm, old growth cool; giants white.
         float2 pv = provincesBaked(pvTex, wc);
