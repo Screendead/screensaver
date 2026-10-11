@@ -2215,6 +2215,11 @@ static inline float3 autumnLeaf(float2 w, float birch, uint seed) {
 // Sedimentary bedding by world height: broad formations, beds of uneven tone and fine laminae. Beds dip gently
 // with a slow horizontal warp, so a layer runs continuously across neighbouring columns and around canyon walls.
 // Bed edges widen and fine terms fade with the pixel footprint fp (voxels per pixel).
+// The bands' phase also wanders over ~55 voxels (tilting beds ~10 degrees typically, ~14 at the 90th percentile), so
+// rock bodies more than ~55 voxels apart carry different bands: with one phase for all, the bands on a near tower meet
+// those on the rock behind at the same screen rows near eye level and it reads as see-through. Bodies closer than that
+// still share bands; parting them needs a steeper tilt. Pure world space: a phase that moved with fp would slide the
+// bands as the camera approaches.
 // `wall` (0..1) marks the great walls of mega relief, whose rock reads as formations from foot to rim.
 // Formation tones (cap rock, wall rock, shale, buff) by index. Selects, not a local array: indexing one per pixel puts
 // it in scratch memory, which costs more than all the noise around it.
@@ -2231,7 +2236,8 @@ static inline float3 strataTone(float y, float2 w, uint seed, float desertAmt, f
     // Beds of uneven thickness (the phase runs faster and slower up the face) with soft contacts: an even, hard-edged
     // 16-voxel zebra reads as posterised banding on a tall face.
     float k = 0.5 + 0.5 * sin(yd * 0.38 + 5.0 * perlin2(float2(yd / 41.0, 0.27), seed + 39u)
-                             + 2.2 * perlin2(w * 0.01, seed + 22u) + 1.3 * perlin2(w * 0.003, seed + 23u));
+                             + 2.2 * perlin2(w * 0.01, seed + 22u) + 1.3 * perlin2(w * 0.003, seed + 23u)
+                             + 3.0 * perlin2(w / 55.0, seed + 45u));
     k = smoothstep(0.1, 0.9, k);
     // On the great walls the regular 16-voxel bands would read as a zebra stripe; the formations carry the tone there.
     float fz = max(smoothstep(120.0, 300.0, y), wall);
