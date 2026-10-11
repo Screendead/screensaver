@@ -108,9 +108,13 @@ final class World {
     // Background regeneration runs a band of rows of one pass per frame, so no frame carries a whole map's work.
     static let bandRows = 256
 
-    // One generated map: the column texture with its max-mip chain, and the CPU copy the camera steers by.
+    // One generated map: the column texture, the max-mip chain of its tops (r16Float: the DDA's skips fetch 2 bytes,
+    // not the column's 8), and the CPU copy the camera steers by.
     private final class Buffer {
         let tex: MTLTexture
+        let hmax: MTLTexture
+        let hmax0: MTLTexture
+        // levels[0] is the column texture, levels[m] for m >= 1 the max mips.
         let levels: [MTLTexture]
         let climate: MTLTexture
         let structTex: MTLTexture
@@ -122,23 +126,28 @@ final class World {
         var siteList: [SiteInfo] = []
 
         init?(device: MTLDevice) {
-            let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: World.size, height: World.size, mipmapped: true)
-            td.usage = [.shaderRead, .shaderWrite, .pixelFormatView]
-            td.storageMode = .shared
+            let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: World.size, height: World.size, mipmapped: false)
+            td.usage = [.shaderRead, .shaderWrite]
+            td.storageMode = .private
+            let xd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Float, width: World.size, height: World.size, mipmapped: true)
+            xd.usage = [.shaderRead, .shaderWrite, .pixelFormatView]
+            xd.storageMode = .private
             let cd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: World.size, height: World.size, mipmapped: false)
             cd.usage = [.shaderRead, .shaderWrite]
             cd.storageMode = .private
             let sd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Uint, width: World.size, height: World.size, mipmapped: false)
             sd.usage = [.shaderRead, .shaderWrite]
             sd.storageMode = .private
-            guard let t = device.makeTexture(descriptor: td), let c = device.makeTexture(descriptor: cd), let st = device.makeTexture(descriptor: sd),
+            guard let t = device.makeTexture(descriptor: td), let x = device.makeTexture(descriptor: xd), let c = device.makeTexture(descriptor: cd), let st = device.makeTexture(descriptor: sd),
                   let sb = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.siteStride, options: .storageModeShared) else { return nil }
             tex = t
             climate = c
             structTex = st
             sites = sb
-            levels = (0..<t.mipmapLevelCount).map {
-                t.makeTextureView(pixelFormat: .rgba16Float, textureType: .type2D, levels: $0..<($0 + 1), slices: 0..<1)!
+            hmax = x
+            hmax0 = x.makeTextureView(pixelFormat: .r16Float, textureType: .type2D, levels: 0..<1, slices: 0..<1)!
+            levels = [t] + (1..<x.mipmapLevelCount).map {
+                x.makeTextureView(pixelFormat: .r16Float, textureType: .type2D, levels: $0..<($0 + 1), slices: 0..<1)!
             }
         }
     }
@@ -152,6 +161,7 @@ final class World {
     private let reduceBasePipeline: MTLComputePipelineState
     private let cpuReducePipeline: MTLComputePipelineState
     private let cleanupPipeline: MTLComputePipelineState
+    private let copyTopPipeline: MTLComputePipelineState
     private let plantPipeline: MTLComputePipelineState
     private let climatePipeline: MTLComputePipelineState
     private let sitePipeline: MTLComputePipelineState
@@ -167,6 +177,7 @@ final class World {
     var synchronous = false
 
     var heightTex: MTLTexture { buffers[active].tex }
+    var maxTex: MTLTexture { buffers[active].hmax }
     var climateTex: MTLTexture { buffers[active].climate }
     var origin: SIMD2<Int32> { buffers[active].origin }
     var globalMax: Float { buffers[active].globalMax }
@@ -181,7 +192,7 @@ final class World {
         let sd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: World.size, height: World.size, mipmapped: false)
         sd.usage = [.shaderRead, .shaderWrite]
         sd.storageMode = .private
-        guard let gen = pipeline("generateHeight"), let red = pipeline("reduceMax"), let redBase = pipeline("reduceMaxBase"), let redCpu = pipeline("reduceCpu"),
+        guard let gen = pipeline("generateHeight"), let red = pipeline("reduceMax"), let redBase = pipeline("reduceMaxBase"), let redCpu = pipeline("reduceCpu"), let cpt = pipeline("copyTop"),
               let clean = pipeline("cleanupColumns"),
               let plant = pipeline("plantTrees"), let clim = pipeline("bakeClimate"), let place = pipeline("placeSites"), let stamp = pipeline("stampStructures"),
               let s0 = device.makeTexture(descriptor: sd), let s1 = device.makeTexture(descriptor: sd), let q = device.makeCommandQueue(),
@@ -203,6 +214,7 @@ final class World {
         reduceBasePipeline = redBase
         cpuReducePipeline = redCpu
         cleanupPipeline = clean
+        copyTopPipeline = cpt
         plantPipeline = plant
         climatePipeline = clim
         sitePipeline = place
@@ -300,6 +312,10 @@ final class World {
                     enc.setTexture(t, index: 1)
                     enc.dispatchThreads(MTLSize(width: t.width, height: t.height, depth: 1), threadsPerThreadgroup: tg)
                 }
+                enc.setComputePipelineState(copyTopPipeline)
+                enc.setTexture(buf.levels[0], index: 0)
+                enc.setTexture(buf.hmax0, index: 1)
+                enc.dispatchThreads(MTLSize(width: World.size, height: World.size, depth: 1), threadsPerThreadgroup: tg)
                 // Scratch 0 still holds the raw columns that level 1 averages.
                 enc.setComputePipelineState(reduceBasePipeline)
                 enc.setTexture(buf.levels[0], index: 0)
@@ -346,13 +362,13 @@ final class World {
         if wait {
             cb.commit()
             cb.waitUntilCompleted()
-            let r = World.readBack(buf.tex, cpuMips.last!)
+            let r = World.readBack(cpuMips.last!)
             finish(r.0, r.1, r.2)
         } else {
             cb.addCompletedHandler { [weak self] cb in
                 guard cb.status == .completed else { DispatchQueue.main.async { self?.pending = false }; return }
                 guard let self else { return }
-                let r = World.readBack(buf.tex, self.cpuMips.last!)
+                let r = World.readBack(self.cpuMips.last!)
                 DispatchQueue.main.async { finish(r.0, r.1, r.2) }
             }
             cb.commit()
@@ -381,13 +397,13 @@ final class World {
         return list
     }
 
-    private static func readBack(_ tex: MTLTexture, _ cpu: MTLTexture) -> ([Float], [Float], Float) {
+    // The CPU copy's heights are 4x4 maxima of the column tops, so their maximum is the map's.
+    private static func readBack(_ cpu: MTLTexture) -> ([Float], [Float], Float) {
         let s = World.size >> World.cpuLevel
         var raw = [Float16](repeating: 0, count: s * s * 2)
         cpu.getBytes(&raw, bytesPerRow: s * 4, from: MTLRegionMake2D(0, 0, s, s), mipmapLevel: 0)
-        var top = [Float16](repeating: 0, count: 4)
-        tex.getBytes(&top, bytesPerRow: 8, from: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: tex.mipmapLevelCount - 1)
-        return ((0..<(s * s)).map { Float(raw[$0 * 2]) }, (0..<(s * s)).map { Float(raw[$0 * 2 + 1]) }, Float(top[0]))
+        let heights = (0..<(s * s)).map { Float(raw[$0 * 2]) }
+        return (heights, (0..<(s * s)).map { Float(raw[$0 * 2 + 1]) }, heights.max() ?? 0)
     }
 
     // Conservative (4x4 max) height in world coords.
@@ -966,6 +982,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setBytes(&f, length: MemoryLayout<Frame>.stride, index: 1)
             enc.setTexture(world.heightTex, index: 0)
             enc.setTexture(clipmap.height, index: 1)
+            enc.setTexture(world.maxTex, index: 2)
             // HORIZON_SEGS (16) threads per bin, one threadgroup each.
             enc.dispatchThreads(MTLSize(width: 16, height: 1024, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 1, depth: 1))
         }
@@ -1004,6 +1021,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentTexture(shadowMaps[0], index: 9)
             enc.setFragmentTexture(shadowMaps[1], index: 10)
             enc.setFragmentTexture(slowTex, index: 11)
+            enc.setFragmentTexture(world.maxTex, index: 12)
             enc.setFragmentBuffer(lampPos, offset: 0, index: 2)
             enc.setFragmentBuffer(lampState, offset: 0, index: 3)
             enc.setFragmentBytes(&hazeRefs, length: 128, index: 4)

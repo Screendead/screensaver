@@ -583,6 +583,14 @@ static inline float solidFloor(float4 c) {
     return c.b > c.g ? c.g : c.r;
 }
 
+// Mip 0 of the max-mip texture: the column tops alone, 2 bytes a column for the DDA and sky visibility.
+kernel void copyTop(texture2d<float, access::read> src [[texture(0)]],
+                    texture2d<float, access::write> dst [[texture(1)]],
+                    uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
+    dst.write(float4(src.read(gid).r, 0, 0, 0), gid);
+}
+
 kernel void reduceMax(texture2d<float, access::read> src [[texture(0)]],
                       texture2d<float, access::write> dst [[texture(1)]],
                       uint2 gid [[thread_position_in_grid]]) {
@@ -1522,13 +1530,14 @@ struct Terrain {
     float rmax;                  // the world's edge: a circle around the camera
     float fadeStart;             // where the haze starts closing in on that edge
     float globalMax;
+    texture2d<float> hx;         // r16Float: mip 0 the column tops, mips from 1 their maxima (the DDA's skips)
 };
 
 static inline int2 levelOrigin(thread const Terrain& tr, int k) { return k == 0 ? int2(0) : tr.origin >> k; }
 
 // Max height of mip-m cell mc (in the level's own aligned cell index).
 static inline float maxAt(thread const Terrain& tr, int k, int2 mc, int m) {
-    if (k == 0) return tr.hm.read(uint2(clamp(mc, int2(0), int2((tr.size >> m) - 1))), m).r;
+    if (k == 0) return tr.hx.read(uint2(clamp(mc, int2(0), int2((tr.size >> m) - 1))), m).r;
     return tr.ch.read(uint2(mc & ((COARSE_N >> m) - 1)), uint(k - 1), uint(m)).r;
 }
 
@@ -1719,13 +1728,14 @@ kernel void bakeHorizon(device float* out [[buffer(0)]],
                         constant Frame& f [[buffer(1)]],
                         texture2d<float> hm [[texture(0)]],
                         texture2d_array<float> coarse [[texture(1)]],
+                        texture2d<float> hx [[texture(2)]],
                         uint2 tid [[thread_position_in_grid]], uint lane [[thread_index_in_threadgroup]]) {
     // HORIZON_SEGS threads per bin walk geometric slices of the distance and reduce, so the bake is not one long chain.
     threadgroup float part[HORIZON_SEGS];
     uint gid = tid.y;
     int levels = int(f.fade.z);
     Terrain tr { hm, coarse, coarse, coarse, hm, f.lod, f.mapInfo.xy, f.mapInfo.z, levels,
-                 f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, 0.0 };
+                 f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, 0.0, hx };
     float a = (float(gid) + 0.5) * 6.2831853 / float(HORIZON_BINS);
     float2 dir = float2(sin(a), cos(a));
     float3 o = f.camPos.xyz;
@@ -2431,7 +2441,7 @@ static float skyVisibility(thread const Terrain& tr, int k, float2 c, float y, i
         for (int r = mode > 0 ? 2 : 1; r <= (mode > 0 ? 2 : 3); r++) {
             float dist = float(r * 2) * (i < 4 ? 1.0 : 1.414);
             float2 q = c + float2(dirs[i] * (r * 2));
-            float rise = (k == 0 ? tr.hm.sample(bl, q * inv, level(0)).r
+            float rise = (k == 0 ? tr.hx.sample(bl, q * inv, level(0)).r
                                  : tr.ch.sample(blr, (q / cs + fo) / float(COARSE_N), uint(k - 1), level(0)).r) - y;
             m = max(m, rise / sqrt(rise * rise + dist * dist));
         }
@@ -3301,7 +3311,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
                               texture2d_array<float> coarse [[texture(6)]], texture2d_array<float> coarseClim [[texture(7)]],
                               texture2d_array<float> coarseCover [[texture(8)]],
                               texture2d<float> shadowNear [[texture(9)]], texture2d<float> shadowFar [[texture(10)]],
-                              texture2d<float> slowTex [[texture(11)]],
+                              texture2d<float> slowTex [[texture(11)]], texture2d<float> hx [[texture(12)]],
                               device const Site* sites [[buffer(1)]], device const float4* lampPos [[buffer(2)]],
                               device const float4* lampState [[buffer(3)]], constant int4* refs [[buffer(4)]],
                               device const float4* birds [[buffer(5)]], device const float* horizon [[buffer(6)]]) {
@@ -3316,7 +3326,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     float gmax = f.misc.y;
     for (int k = 1; k < levels; k++) gmax = max(gmax, coarse.read(uint2(0), uint(k - 1), coarse.get_num_mip_levels() - 1).r + 1.0);
     if (int(f.shadow.y) & 2) gmax = min(gmax, 260.0);
-    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax };
+    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx };
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
             2.0 * tanH * f.resolution.w, f.misc.w, makeLight(f.sunDir.xyz),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
