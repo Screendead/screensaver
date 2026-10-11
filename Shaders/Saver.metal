@@ -706,7 +706,9 @@ static inline bool giantAt(device const GiantRec* T, float2 w, float pad, thread
 // hang in the air) with no water within 100.
 kernel void placeGiants(device GiantRec* out [[buffer(0)]],
                         constant int4& info [[buffer(1)]],
-                        uint2 gid [[thread_position_in_grid]]) {
+                        uint2 g [[thread_position_in_grid]]) {
+    // info.z: the first row of this dispatch.
+    uint2 gid = g + uint2(0, uint(info.z));
     if (gid.x >= uint(GIANT_WIN) || gid.y >= uint(GIANT_WIN)) return;
     uint seed = uint(info.w);
     int2 cell = info.xy + int2(gid);
@@ -2448,7 +2450,9 @@ kernel void reduceMaxBase(texture2d<float, access::read> src [[texture(0)]],
                           texture2d<float, access::write> dst [[texture(2)]],
                           constant int4& info [[buffer(0)]],
                           device const GiantRec* giants [[buffer(1)]],
-                          uint2 gid [[thread_position_in_grid]]) {
+                          constant uint& row0 [[buffer(2)]],
+                          uint2 g [[thread_position_in_grid]]) {
+    uint2 gid = g + uint2(0, row0);
     if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
     uint2 s = gid * 2;
     float m = max(max(src.read(s).r, src.read(s + uint2(1, 0)).r), max(src.read(s + uint2(0, 1)).r, src.read(s + uint2(1, 1)).r));

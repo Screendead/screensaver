@@ -347,16 +347,17 @@ final class World {
                     enc.setTexture(scratch[0], index: 0)
                     enc.setTexture(buf.rawGaps, index: 1)
                 case 1:
-                    if band == 0 {
-                        // The giant table, with the cheap cleanup pass: sites and trees read it. Centred on the map's middle cell.
+                    if band < 2 {
+                        // The giant table, with the cheap cleanup pass (half in each of its first two pieces): sites and
+                        // trees read it. Centred on the map's middle cell.
                         let mid = SIMD2<Double>(Double(j.origin.x), Double(j.origin.y)) + Double(World.size / 2)
                         var gi = SIMD4<Int32>(Int32(floor(mid.x / World.giantCell)) - Int32(World.giantWin / 2),
-                                              Int32(floor(mid.y / World.giantCell)) - Int32(World.giantWin / 2), 0, Int32(bitPattern: seed))
+                                              Int32(floor(mid.y / World.giantCell)) - Int32(World.giantWin / 2), Int32(band * World.giantWin / 2), Int32(bitPattern: seed))
                         enc.setComputePipelineState(giantPipeline)
                         enc.setBuffer(buf.giants, offset: 0, index: 0)
                         enc.setBytes(&gi, length: MemoryLayout<SIMD4<Int32>>.stride, index: 1)
-                        enc.dispatchThreads(MTLSize(width: World.giantWin, height: World.giantWin, depth: 1),
-                                            threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+                        enc.dispatchThreads(MTLSize(width: World.giantWin, height: World.giantWin / 2, depth: 1),
+                                            threadsPerThreadgroup: MTLSize(width: 8, height: 4, depth: 1))
                     }
                     enc.setComputePipelineState(cleanupPipeline)
                     enc.setTexture(scratch[0], index: 0)
@@ -396,6 +397,17 @@ final class World {
                     enc.setTexture(buf.structTex, index: 3)
                     enc.setBuffer(buf.giants, offset: 0, index: 2)
                 default:
+                    // Mip 1 of the finished columns, a band of its rows per climate piece (it builds the level-1 forest
+                    // it bounds, too costly for one piece). Scratch 0 still holds the raw columns that level 1 averages.
+                    var rows1 = UInt32(band * World.bandRows / 2)
+                    enc.setComputePipelineState(reduceBasePipeline)
+                    enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
+                    enc.setBuffer(buf.giants, offset: 0, index: 1)
+                    enc.setBytes(&rows1, length: MemoryLayout<UInt32>.stride, index: 2)
+                    enc.setTexture(buf.levels[0], index: 0)
+                    enc.setTexture(scratch[0], index: 1)
+                    enc.setTexture(buf.levels[1], index: 2)
+                    enc.dispatchThreads(MTLSize(width: World.size >> 1, height: World.bandRows / 2, depth: 1), threadsPerThreadgroup: tg)
                     enc.setComputePipelineState(climatePipeline)
                     enc.setTexture(buf.climate, index: 0)
                 }
@@ -416,16 +428,7 @@ final class World {
                 enc.setTexture(buf.levels[0], index: 0)
                 enc.setTexture(buf.hmax0, index: 1)
                 enc.dispatchThreads(MTLSize(width: World.size, height: World.size, depth: 1), threadsPerThreadgroup: tg)
-                // Scratch 0 still holds the raw columns that level 1 averages.
-                enc.setComputePipelineState(reduceBasePipeline)
-                enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
-                enc.setBuffer(buf.giants, offset: 0, index: 1)
-                enc.setTexture(buf.levels[0], index: 0)
-                enc.setTexture(scratch[0], index: 1)
-                enc.setTexture(buf.levels[1], index: 2)
-                let s1 = World.size >> 1
-                enc.dispatchThreads(MTLSize(width: s1, height: s1, depth: 1), threadsPerThreadgroup: tg)
-                enc.setComputePipelineState(bandTopPipeline)
+                                enc.setComputePipelineState(bandTopPipeline)
                 enc.setTexture(buf.levels[0], index: 0)
                 enc.setTexture(buf.gx, index: 1)
                 enc.setTexture(buf.bandViews[0], index: 2)
