@@ -675,6 +675,10 @@ final class Wildlife {
         for d in [20.0, 45.0, 80.0] {
             gAhead = max(gAhead, ground(f.anchor.x + vA.x / max(f.speed, 0.1) * d, f.anchor.z + vA.z / max(f.speed, 0.1) * d) - d * 0.15)
         }
+        // Birds spread to either side of the anchor (raptors circle ~35 out): a tall crown beside its track lifts the
+        // flock too, so its birds pass over the canopy rather than climbing out of it one by one.
+        let sideV = simd_normalize(SIMD2(-vA.z, vA.x) + 1e-9) * 35
+        gAhead = max(gAhead, ground(f.anchor.x + sideV.x, f.anchor.z + sideV.y), ground(f.anchor.x - sideV.x, f.anchor.z - sideV.y))
         // Ground-relative: flocks rise with the land (over a wall, before it) and otherwise keep under the clouds.
         let lift = gAhead + fl.clearance * (f.kind == .raptor ? 2 : 1.5)
         let yT = max(min(f.altitude, FlightCamera.ceiling - 20), lift)

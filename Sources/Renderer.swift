@@ -179,6 +179,10 @@ final class World {
             bd.storageMode = .private
             guard let bt = device.makeTexture(descriptor: bd),
                   let gb = device.makeBuffer(length: World.giantWin * World.giantWin * MemoryLayout<GiantRec>.stride, options: .storageModeShared) else { return nil }
+            // No slot holds a cell yet (placeGiants fills a slot only when its cell changes).
+            let none = GiantRec(cell: SIMD2(Int32.min, Int32.min))
+            let slots = gb.contents().bindMemory(to: GiantRec.self, capacity: World.giantWin * World.giantWin)
+            for i in 0..<(World.giantWin * World.giantWin) { slots[i] = none }
             giants = gb
             band = bt
             bandViews = (0..<bt.mipmapLevelCount).map { bt.makeTextureView(pixelFormat: .rg16Float, textureType: .type2D, levels: $0..<($0 + 1), slices: 0..<1)! }
@@ -827,11 +831,12 @@ final class Renderer: NSObject, MTKViewDelegate {
     private let horizonPipeline: MTLComputePipelineState
     private let horizonBuf: MTLBuffer
     // The forest-province fields around the camera (bakeProvinces in Shaders/Saver.metal), which shading samples rather
-    // than evaluating per pixel; rebaked whole once the camera has moved a quarter of the window.
+    // than evaluating per pixel; rebaked whole once the camera has moved an eighth of the window (+-24.6k), so the
+    // coarsest ring (13.8k) never reads past it.
     private let provPipeline: MTLComputePipelineState
     private let provTex: MTLTexture
     private var provCentre: SIMD2<Double>?
-    static let provN = 512, provCell = 64.0
+    static let provN = 512, provCell = 96.0
     let far = FarHeights()
     private var farAge = 0
     // Level 3's generation last read back, and the one far.heights holds.
@@ -1200,7 +1205,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         bakeLamps(into: cb, frame: &f)
         fillLampTiles(frame: f, width: w, height: h)
         let cam2 = SIMD2(camera.position.x, camera.position.z)
-        if provCentre.map({ simd_length($0 - cam2) > Double(Renderer.provN) * Renderer.provCell / 4 }) ?? true,
+        if provCentre.map({ simd_length($0 - cam2) > Double(Renderer.provN) * Renderer.provCell / 8 }) ?? true,
            let enc = cb.makeComputeCommandEncoder() {
             provCentre = cam2
             var info = SIMD4<Int32>(Int32(floor(cam2.x / Renderer.provCell)) - Int32(Renderer.provN / 2),

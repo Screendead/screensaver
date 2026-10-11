@@ -162,7 +162,7 @@ kernel void bakeClimate(texture2d<float, access::write> out [[texture(0)]],
 // The province fields baked around the camera (bakeProvinces): PROV_N texels a side, PROV_CELL voxels each, held
 // toroidally by world texel. Must match Renderer.provN and provCell in Sources/Renderer.swift.
 constant int PROV_N = 512;
-constant float PROV_CELL = 64.0;
+constant float PROV_CELL = 96.0;
 
 static inline float2 provincesBaked(texture2d<float> pv, float2 w) {
     constexpr sampler br(filter::linear, address::repeat);
@@ -649,7 +649,7 @@ static inline float birchAmount(float2 w, uint seed) {
 // MARK: - Giant trees
 
 // Hometree-scale giants rising out of the jungle: at most one per GIANT_CELL world cell, at a hashed point in the
-// cell's middle 0.4 (so two stand at least 0.6 of a cell apart), only on flat, dry lowland deep in a jungle province
+// cell's middle 0.6 (so two stand at least 0.4 of a cell apart), only on flat, dry lowland deep in a jungle province
 // (placeGiants). Nothing of a giant lies further than GIANT_REACH from its axis.
 constant float GIANT_CELL = 1536.0;
 constant float GIANT_REACH = 210.0;
@@ -701,7 +701,7 @@ static inline bool giantAt(device const GiantRec* T, float2 w, float pad, thread
     return false;
 }
 
-// Fills the table's cells info.xy + gid. A cell may hold a giant in three of five, tried at up to six points, each
+// Fills the table's cells info.xy + gid. A cell may hold a giant in three of four, tried at up to eight points, each
 // deep in jungle, outside the mega relief, dry and flat for 70 round (a slope or a wall there would have its buttresses
 // hang in the air) with no water within 100.
 kernel void placeGiants(device GiantRec* out [[buffer(0)]],
@@ -712,15 +712,18 @@ kernel void placeGiants(device GiantRec* out [[buffer(0)]],
     if (gid.x >= uint(GIANT_WIN) || gid.y >= uint(GIANT_WIN)) return;
     uint seed = uint(info.w);
     int2 cell = info.xy + int2(gid);
+    // A slot already holding this cell (the table moves a cell at a time) keeps it: placing costs a few hundred terrain
+    // columns per cell. Slots start out holding no cell (World.MapBuffer).
+    if (all(out[giantSlot(cell)].cell == cell)) return;
     GiantRec r;
     r.cell = cell; r.c = 0; r.G = -1.0; r.yT = 0; r.h = 0; r.kind = 0;
     uint hc = hash2i(cell, seed + 700u);
-    if (hashf(hc) < 0.6) {
-        for (int a = 0; a < 6; a++) {
+    if (hashf(hc) < 0.75) {
+        for (int a = 0; a < 8; a++) {
             uint h = pcg(hc + uint(a) * 977u);
-            float2 P = floor((float2(cell) + 0.3 + 0.4 * float2(hashf(pcg(h + 1u)), hashf(pcg(h + 2u)))) * GIANT_CELL) + 0.5;
+            float2 P = floor((float2(cell) + 0.2 + 0.6 * float2(hashf(pcg(h + 1u)), hashf(pcg(h + 2u)))) * GIANT_CELL) + 0.5;
             Climate c = climate(P, seed);
-            if (c.jungle < 0.7) continue;
+            if (c.jungle < 0.6) continue;
             Col col = terrainColumn(int2(floor(P)), seed);
             float G = col.h;
             if (G < SEA + 3.0 || G > 600.0 || col.gh > col.gl) continue;
@@ -735,12 +738,12 @@ kernel void placeGiants(device GiantRec* out [[buffer(0)]],
             }
             if (!ok) continue;
             r.c = P; r.G = G; r.h = h;
-            r.yT = mix(205.0, 250.0, hashf(pcg(h + 3u)));
+            r.yT = mix(165.0, 255.0, hashf(pcg(h + 3u)));
             // Banyan, kapok or weeping, two in five, two in five, one in five.
             float kh = hashf(pcg(h + 4u));
             r.kind = kh < 0.4 ? 0u : kh < 0.8 ? 1u : 2u;
             // A kapok stands taller.
-            if (r.kind == 1u) r.yT = mix(235.0, 265.0, hashf(pcg(h + 3u)));
+            if (r.kind == 1u) r.yT = mix(210.0, 265.0, hashf(pcg(h + 3u)));
             break;
         }
     }
@@ -754,7 +757,7 @@ static inline GLimb giantLimb(thread const Giant& g, int i) {
     float f = (float(i) + 0.5) / float(GIANT_LIMBS);
     // Kapok (kind 1): limbs only near the top, long and level, a flat crown on a clear column.
     bool kapok = g.kind == 1;
-    float y0 = g.yT * mix(kapok ? 0.70 : 0.42, 0.98, f) + 12.0 * (hashf(hi) - 0.5);
+    float y0 = g.yT * mix(kapok ? 0.58 : 0.42, 0.98, f) + 12.0 * (hashf(hi) - 0.5);
     float az = float(i) * 2.39996 + 0.5 * hashf(pcg(hi));
     float L = mix(kapok ? 112.0 : 125.0, kapok ? 80.0 : 62.0, f) * (0.85 + 0.3 * hashf(pcg(hi + 1u)));
     float2 dir = float2(cos(az), sin(az)), perp = float2(-dir.y, dir.x);
@@ -783,15 +786,15 @@ static inline float4 giantPad(thread const Giant& g, int j, thread float& thick)
         uint hd = pcg(g.h + 900u + uint(d));
         float a = float(d) * 2.1 + hashf(hd);
         float2 o = d == 0 ? float2(0) : float2(cos(a), sin(a)) * (26.0 + 14.0 * hashf(pcg(hd)));
-        thick = (d == 0 ? 50.0 : 30.0) * (g.kind == 1 ? 0.6 : 1.0);
-        return float4(o.x, g.G + g.yT + (d == 0 ? (g.kind == 1 ? 18.0 : 36.0) : 14.0 + 10.0 * hashf(pcg(hd + 1u))), o.y, d == 0 ? 50.0 : 34.0);
+        thick = (d == 0 ? 56.0 : 36.0) * (g.kind == 1 ? 0.75 : 1.0);
+        return float4(o.x, g.G + g.yT + (d == 0 ? (g.kind == 1 ? 18.0 : 36.0) : 14.0 + 10.0 * hashf(pcg(hd + 1u))), o.y, d == 0 ? 40.0 : 28.0);
     }
     GLimb l = giantLimb(g, j / 3);
     int kind = j % 3;
     uint hp = pcg(g.h + 1500u + uint(j) * 29u);
     float3 p = kind == 1 ? bez(l, 0.62) : l.p2;
-    float R = kind == 0 ? 0.36 * l.L + 12.0 : kind == 1 ? 0.28 * l.L + 6.0 : 0.26 * l.L + 8.0;
-    thick = (kind == 0 ? 22.0 + 0.12 * l.L : 16.0 + 0.08 * l.L) * (g.kind == 1 ? 0.7 : 1.0);
+    float R = kind == 0 ? 0.27 * l.L + 10.0 : kind == 1 ? 0.22 * l.L + 6.0 : 0.2 * l.L + 7.0;
+    thick = (kind == 0 ? 26.0 + 0.14 * l.L : 20.0 + 0.1 * l.L) * (g.kind == 1 ? 0.85 : 1.0);
     if (kind == 1 && l.L < 95.0) R = 0.0;
     if (kind == 2) {
         float2 dir = normalize(l.p2.xz - l.p0.xz);
@@ -899,15 +902,17 @@ static void giantIntervals(thread const Giant& g, float2 wq, float gl, int lod, 
             float3 top = bez(l, t);
             float2 out = normalize(top.xz + 1e-3) * (4.0 + 10.0 * hashf(pcg(hp + 2u)));
             float3 foot = float3(top.x + out.x, gl - G - 1.0, top.z + out.y);
-            float rad = 1.3 + 1.4 * hashf(pcg(hp + 1u));
+            float rad = 0.8 + 2.8 * pow(hashf(pcg(hp + 1u)), 2.0);
             float2 ab2 = foot.xz - top.xz;
             float tq = saturate(dot(q - top.xz, ab2) / max(dot(ab2, ab2), 1e-3));
-            if (length(q - (top.xz + ab2 * tq)) > rad + 2.0) continue;
+            if (length(q - (top.xz + ab2 * tq)) > rad + 6.0) continue;
             float lo2 = 1e9, hi2 = -1e9;
             for (int m = 0; m <= 24; m++) {
                 float u = float(m) / 24.0;
                 // Straight down at first, swinging out low: a hanging root that found the ground.
                 float3 pp = float3(mix(top.x, foot.x, u * u), mix(top.y, foot.y, u), mix(top.z, foot.z, u * u));
+                pp.xz += float2(perlin2(float2(u * 2.2, hashf(hp) * 40.0), g.h + 42u), perlin2(float2(u * 2.2 + 7.7, hashf(hp) * 40.0), g.h + 43u))
+                       * 4.0 * sin(u * 3.14159);
                 float rr = rad * (1.0 + 0.8 * smoothstep(0.75, 1.0, u));
                 float dh = length(q - pp.xz);
                 if (dh < rr) {
@@ -935,7 +940,7 @@ static void giantIntervals(thread const Giant& g, float2 wq, float gl, int lod, 
         if (dd >= edge) continue;
         float u = dd / edge;
         float top = P.y + T * 0.55 * sqrt(1.0 - u * u) + 7.0 * lump;
-        float bot = P.y - T * 0.40 * pow(1.0 - u * u, 0.5) + 3.0 * sag;
+        float bot = P.y - T * 0.45 * pow(1.0 - u * u, 0.6) + 3.0 * sag;
         if (top > bot + 1.0) { gAdd(r, floor(bot), floor(top) + 1.0, GM_LEAF); padBot = min(padBot, floor(bot)); }
     }
     if (padBot < 1e8 && lod == 0) {
@@ -1023,21 +1028,28 @@ static bool giantColumn(thread const Giant& g, float2 wq, float gl, thread GRuns
 // under it, so the coarse rings rebuild the same forest.
 constant float JUNGLE_CELL = 8.0;
 constant float EMERGENT_CELL = 26.0;
+// Ground range over a 10-voxel window (plantTrees' +-5) from which the roof steps down, and past which none stands.
+constant float JUNGLE_STEEP = 7.0, JUNGLE_CLIFF = 13.0;
 
 struct JCan { float lo, hi; bool trunk; };
 
 // The roof over world column centre w, on ground gs (smoothed over a few columns); empty (hi <= lo) where open. Crowns
-// are cauliflower domes; at a clearing's edge the crowns and the fill hang down to the ground in a wall of leaves, so the
-// roof never stands on bare poles where it can be seen from the side.
-static JCan jungleCanopy(float2 w, float gs, float J, uint seed) {
+// are cauliflower domes. Toward a clearing, the water or (keep < 1) steep ground the roof steps down through lower and
+// lower crowns to bushes standing on the ground: a margin, never a wall of leaves, and no roof on poles seen from the side.
+static JCan jungleCanopy(float2 w, float gs, float J, uint seed, float keep = 1.0) {
     JCan o;
     o.lo = 0.0; o.hi = 0.0; o.trunk = false;
     if (J < 0.15) return o;
     float2 so = seedOffset(seed), p = w + so;
-    float base = gs + 14.0 + 5.0 * perlin2(p / 110.0, seed + 321u);
+    float rise0 = 14.0 + 5.0 * perlin2(p / 110.0, seed + 321u);
     // Clearings: about one part in eight deep in the province, most of the land at its edge.
     float thr = mix(0.45, -0.38, smoothstep(0.15, 0.8, J));
     float lump = 1.2 * perlin2(p / 2.6, seed + 325u) + 1.0 * perlin2(p / 6.0, seed + 327u);
+    keep *= smoothstep(SEA + 2.0, SEA + 10.0, gs);
+    // e: how far in from the margin (over roughly a dozen voxels), here rather than at each crown's centre, so the roof
+    // and its crowns step down together as one slope of leaves.
+    float openW = perlin2(p / 52.0, seed + 323u) - thr;
+    float e = smoothstep(0.0, 0.3, openW) * keep;
     float hi = -1e9, lo = 1e9;
     int2 c0 = int2(floor(w / JUNGLE_CELL));
     for (int j = -1; j <= 1; j++)
@@ -1053,34 +1065,34 @@ static JCan jungleCanopy(float2 w, float gs, float J, uint seed) {
             if (open < 0.0) continue;
             float dome = sqrt(1.0 - d2 / (R * R));
             float lift = 5.0 * hashf(pcg(h + 2u)) - 1.0;
-            hi = max(hi, base + lift + 0.85 * R * dome + lump * dome);
-            lo = min(lo, open < 0.1 ? -1e9 : base + lift - 2.0 - 1.5 * dome);
-            if (d2 < 0.5 && hashf(pcg(h + 3u)) < 0.3) o.trunk = true;
+            float rise = mix(0.5, rise0 + lift, e * e);
+            float bot = rise - 2.0 - 1.5 * dome;
+            hi = max(hi, gs + rise + (mix(0.3, 0.85, e) * R + lump) * dome);
+            lo = min(lo, bot < 3.0 ? -1e9 : gs + bot);
+            if (bot >= 3.0 && d2 < 0.5 && hashf(pcg(h + 3u)) < 0.3) o.trunk = true;
         }
-    float open = perlin2(p / 52.0, seed + 323u) - thr - 0.08;
-    if (open >= 0.0) {
-        hi = max(hi, base - 0.5 + 1.5 * perlin2(p / 5.0, seed + 324u));
-        lo = min(lo, open < 0.06 ? -1e9 : base - 4.5);
+    if (openW >= 0.0) {
+        float rise = mix(0.0, rise0 - 0.5, e * e);
+        hi = max(hi, gs + rise + 1.5 * perlin2(p / 5.0, seed + 324u));
+        lo = min(lo, rise < 7.5 ? -1e9 : gs + rise - 4.0);
     }
     if (hi < max(lo, gs) + 1.0) return o;
-    // Along the water the roof comes down to it, mangrove-like: crowns standing on poles over the beach would be
-    // lollipops against the open water.
-    if (gs < SEA + 6.0) lo = -1e9;
     o.lo = max(floor(lo + 0.5), -1.0);
     o.hi = max(floor(hi + 0.5), o.lo + 1.0);
     return o;
 }
 
-// One emergent's crown pad j (of up to 3): centre (xz relative to the trunk, y above its ground) and radius in w,
-// thickness in T.
+// One emergent's crown clump j (of 3 to 5): centre (xz relative to the trunk, y above its ground) and radius in w,
+// thickness in T. The clumps sit round the top one at different heights, so the crown is a cluster of rounded heads
+// rather than one flat umbrella.
 static inline float4 emergentPad(uint h, int j, float R, float y0, thread float& T) {
-    T = 6.0 + 4.0 * hashf(pcg(h + 10u));
+    T = 8.0 + 4.0 * hashf(pcg(h + 10u));
     if (j == 0) return float4(0.0, y0, 0.0, R);
     uint hj = pcg(h + 20u + uint(j) * 7u);
-    float a = hashf(hj) * 6.2831853;
-    float2 o = float2(cos(a), sin(a)) * R * (0.45 + 0.25 * hashf(pcg(hj)));
-    T *= 0.8;
-    return float4(o.x, y0 - 3.0 - 5.0 * hashf(pcg(hj + 1u)), o.y, R * (0.5 + 0.2 * hashf(pcg(hj + 2u))));
+    float a = (float(j) + 0.6 * hashf(hj)) * 2.3999632 + hashf(h) * 6.2831853;
+    float2 o = float2(cos(a), sin(a)) * R * (0.55 + 0.3 * hashf(pcg(hj)));
+    T *= 0.85;
+    return float4(o.x, y0 - 5.0 + 7.0 * hashf(pcg(hj + 1u)), o.y, R * (0.55 + 0.25 * hashf(pcg(hj + 2u))));
 }
 
 // The emergent of cell cc, if it has one: trunk position (world), its crown's height above the ground, crown radius
@@ -1089,11 +1101,11 @@ static inline bool emergentIn(int2 cc, uint seed, float J, thread float2& ctr, t
     h = hash2i(cc, seed + 330u);
     if (hashf(h) > 0.13 * smoothstep(0.6, 0.85, J)) return false;
     ctr = floor((float2(cc) + 0.25 + 0.5 * float2(hashf(pcg(h + 1u)), hashf(pcg(h + 2u)))) * EMERGENT_CELL) + 0.5;
-    // Only out of a closed roof: alone in a clearing it would be a crown on a pole.
-    if (perlin2((ctr + seedOffset(seed)) / 52.0, seed + 323u) < mix(0.45, -0.38, smoothstep(0.15, 0.8, J)) + 0.25) return false;
-    y0 = 23.0 + 11.0 * hashf(pcg(h + 3u));
-    R = 8.0 + 6.0 * hashf(pcg(h + 4u));
-    pads = 1 + int(hashf(pcg(h + 5u)) * 2.99);
+    // Only out of the roof at its full height: alone in a clearing or over its margin it would be a crown on a pole.
+    if (perlin2((ctr + seedOffset(seed)) / 52.0, seed + 323u) < mix(0.45, -0.38, smoothstep(0.15, 0.8, J)) + 0.4) return false;
+    y0 = 24.0 + 9.0 * hashf(pcg(h + 3u));
+    R = 6.5 + 4.5 * hashf(pcg(h + 4u));
+    pads = 3 + int(hashf(pcg(h + 5u)) * 2.99);
     return true;
 }
 
@@ -1102,7 +1114,7 @@ static inline bool emergentIn(int2 cc, uint seed, float J, thread float2& ctr, t
 static void emergentIntervals(float2 w, float2 ctr, float gt, float y0, float R, int pads, uint h, uint seed, int lod, thread GRuns& r) {
     float2 q = w - ctr;
     float d = length(q);
-    float tr = R > 9.5 ? 1.2 : 0.75;
+    float tr = R > 9.0 ? 1.2 : 0.75;
     if (d < tr + (lod > 0 ? 0.0 : 0.0)) gAdd(r, gt, gt + y0, GM_WOOD);
     float2 p = w + seedOffset(seed);
     for (int j = 0; j < pads; j++) {
@@ -1118,7 +1130,7 @@ static void emergentIntervals(float2 w, float2 ctr, float gt, float y0, float R,
         // Domed and lumpy on top, a sagging, ragged underside: a cloud of leaves, not a plate.
         float lumps = 1.6 * perlin2(p / 3.2, seed + 332u) + 1.2 * perlin2(p / 7.0, seed + 333u);
         float top = gt + P.y + T * 0.6 * sqrt(1.0 - u * u) + lumps * sqrt(1.0 - u * u);
-        float bot = gt + P.y - T * 0.35 * sqrt(1.0 - u * u) + 1.2 * perlin2(p / 4.5, seed + 334u);
+        float bot = gt + P.y - T * 0.55 * pow(1.0 - u * u, 0.7) + 1.2 * perlin2(p / 4.5, seed + 334u);
         if (top > bot + 1.0) gAdd(r, floor(bot), floor(top) + 1.0, GM_LEAF);
         // A limb out to each side pad.
         if (j > 0 && lod == 0) {
@@ -1355,19 +1367,22 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
                 if (!emergentIn(e0 + int2(i, j), seed, J, ec, y0, R, pads, eh)) continue;
                 if (length_squared(w - ec) > (1.35 * R + 0.75 * R) * (1.35 * R + 0.75 * R)) continue;
                 int2 tq = int2(floor(ec)) - info.xy;
-                if (any(tq < 0) || any(tq >= int(n))) continue;
+                if (any(tq < 5) || any(tq >= int(n) - 5)) continue;
                 float4 tc = src.read(uint2(tq));
                 // On level ground only: not on a ledge, in water, or among buildings.
-                if (tc.r < SEA + 2.0 || tc.b > tc.g || tc.a < 0.0 || abs(tc.r - gs) > 6.0) continue;
-                eTrunk = eTrunk || length(w - ec) < (R > 9.5 ? 1.2 : 0.75);
+                float t0 = src.read(uint2(tq + int2(5, 0))).r, t1 = src.read(uint2(tq - int2(5, 0))).r;
+                float t2 = src.read(uint2(tq + int2(0, 5))).r, t3 = src.read(uint2(tq - int2(0, 5))).r;
+                float tr = max(max(max(t0, t1), max(t2, t3)), tc.r) - min(min(min(t0, t1), min(t2, t3)), tc.r);
+                if (tc.r < SEA + 10.0 || tc.b > tc.g || tc.a < 0.0 || abs(tc.r - gs) > 6.0 || tr >= JUNGLE_STEEP) continue;
+                eTrunk = eTrunk || length(w - ec) < (R > 9.0 ? 1.2 : 0.75);
                 emergentIntervals(w, ec, tc.r, y0, R, pads, eh, seed, 0, rr);
             }
         // A trunk column is bark through the roof (merged with it, its leaves would start at the roof's underside).
-        if (!cleared && !eTrunk) {
-            JCan cn = jungleCanopy(w, gs, J, seed);
-            // On steep ground the roof is a hanging wall of leaves to the ground: a floating roof there would show its
-            // dark underside from the slope below, and stand on stilts.
-            if (gmax - gmin >= 6.0) cn.lo = -1.0;
+        // Steep ground steps the roof down to bushes on each column's own ground; a cliff carries none.
+        float steep = gmax - gmin;
+        if (!cleared && !eTrunk && steep < JUNGLE_CLIFF) {
+            float keep = 1.0 - smoothstep(JUNGLE_STEEP, JUNGLE_CLIFF, steep);
+            JCan cn = jungleCanopy(w, mix(G, gs, keep), J, seed, keep);
             if (cn.hi > max(cn.lo, G)) {
                 gAdd(rr, cn.lo, cn.hi, GM_LEAF);
                 // Its crowns stand on poles; lianas hang from it.
@@ -2362,14 +2377,17 @@ static float2 coarseVeg(int2 cw, int k, float4 hs4, float H, uint seed) {
     float J = provinces(centre + so, seed).x;
     float sum = 0.0, leaves = 0.0;
     int2 o4[4] = { int2(0), int2(hs, 0), int2(0, hs), int2(hs, hs) };
-    // No roof on a cliff (plantTrees keeps it to ground level within 10 over +-5 voxels).
+    // The roof steps down on steep ground and stands on no cliff, as plantTrees grows it.
     float spread = max(max(hs4.x, hs4.y), max(hs4.z, hs4.w)) - min(min(hs4.x, hs4.y), min(hs4.z, hs4.w));
+    // The samples' slope over plantTrees' 10-voxel window (they are hs apart; neighbours a voxel apart differ by a
+    // whole step on gentle slopes, so the run counts as no shorter than 3).
+    float steep = spread * 10.0 / max(1.41 * float(hs), 3.0);
     if (J >= 0.15) {
         for (int i = 0; i < 4; i++) {
             float2 wi = float2(b + o4[i]) + 0.5;
             float g = hs4[i], t = g;
-            if (g >= SEA + 2.0) {
-                JCan cn = jungleCanopy(wi, g, J, seed);
+            if (g >= SEA + 2.0 && steep < JUNGLE_CLIFF) {
+                JCan cn = jungleCanopy(wi, g, J, seed, 1.0 - smoothstep(JUNGLE_STEEP, JUNGLE_CLIFF, steep));
                 if (cn.hi > cn.lo) t = max(t, cn.hi);
                 int2 e0 = int2(floor(wi / EMERGENT_CELL));
                 for (int j = -1; j <= 1; j++)
@@ -2378,7 +2396,7 @@ static float2 coarseVeg(int2 cw, int k, float4 hs4, float H, uint seed) {
                         float y0, R;
                         int pads;
                         uint eh;
-                        if (!emergentIn(e0 + int2(ii, j), seed, J, ec, y0, R, pads, eh)) continue;
+                        if (steep >= JUNGLE_STEEP || g < SEA + 10.0 || !emergentIn(e0 + int2(ii, j), seed, J, ec, y0, R, pads, eh)) continue;
                         if (length_squared(wi - ec) > 4.4 * R * R) continue;
                         t = max(t, emergentTop(wi, ec, g, y0, R, pads, eh, seed));
                     }
@@ -3343,8 +3361,7 @@ static inline float megaWall(thread const Terrain& tr, float2 w) {
     return smoothstep(190.0, 270.0, mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y));
 }
 
-// A giant's bark, leaves or vines (surfaceAt), apart from the ground's shading: none of the ground's tones apply, and
-// kept out of line the terrain's own path does not carry its state.
+// A giant's bark, leaves or vines (surfaceAt), returned before the ground's shading: none of its tones apply.
 static Surface giantSurface(thread const Terrain& tr, Surface s, int k, int3 v, int3 n, float2 uv, float fp, float2 wq,
                                    float wy, float3 col, uint gsb, float gLoc, Giant gi, float cs, int2 mapOrigin, uint seed) {
     float y = float(v.y);

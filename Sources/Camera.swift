@@ -15,6 +15,7 @@ final class FlightCamera {
     private var facing: Double = 0
     private var shotYaw: Double?
     private var nextShot: Double = 0
+    private var nextPilgrim: Double = 0
     private var rimLift: Double = 0
     var sun = SIMD3<Double>(0, 1, 0)
     var pitchOverride: Double?
@@ -46,6 +47,9 @@ final class FlightCamera {
     // Sites a shot was built around, and when; each rests for a while so one place can't own the flight.
     private var framedAt: [UInt32: Double] = [:]
     private var focus: SIMD2<Double>?
+    // Giants already passed (by axis, rounded), and the one the flight is slowly heading for.
+    private var visitedGiants = Set<SIMD2<Int>>()
+    private var pilgrim: SIMD2<Double>?
 
     init(seed: UInt32, world: World, far: FarHeights) {
         self.world = world
@@ -384,10 +388,32 @@ final class FlightCamera {
             let w = (1 - max(along, 0) / 1000) * (1 - abs(across) / clear)
             steerGiant += (across >= 0 ? -1 : 1) * 0.09 * min(1, 2.5 * w)
         }
+        // The nearest giant not yet passed, up to 12k off, draws the heading gently toward a point beside it; one
+        // passed within 1500 (or 600 behind) is done with.
+        var steerPilgrim = 0.0
+        if time >= nextPilgrim {
+            nextPilgrim = time + 2
+            pilgrim = nil
+            var best = 12000.0
+            for g in world.giants {
+                let key = SIMD2(Int(g.pos.x.rounded()), Int(g.pos.y.rounded()))
+                if visitedGiants.contains(key) { continue }
+                let v = g.pos - p, d = simd_length(v)
+                if d < 600 || (d < 1500 && simd_dot(v, fwdFlat) < 0) { visitedGiants.insert(key); continue }
+                if d < best { best = d; pilgrim = g.pos }
+            }
+        }
+        if let g = pilgrim {
+            let v = g - p
+            let side = (v.x * fwdFlat.y - v.y * fwdFlat.x) >= 0 ? 1.0 : -1.0
+            let n = simd_normalize(SIMD2(-v.y, v.x)) * side
+            let aim = g + n * (GiantInfo.reach + 260)
+            steerPilgrim = sin(FlightCamera.angleDiff(atan2(aim.x - p.x, aim.y - p.y), yaw)) * 0.035
+        }
         let urgency = max(min(blockedAhead / 20, 1), 0.7 * crowd)
         avoidRate = routeYaw.map { sin(FlightCamera.angleDiff($0, yaw)) * 0.15 * urgency } ?? 0
         // The birds' sightline predictions (Wildlife.hidden) rely on turns of at most 0.09 rad/s.
-        let targetRate = max(-0.09, min(0.09, (drift + steerShot + steerKey + steerMoon) * (1 - urgency) + avoidRate + steerAway + steerGiant))
+        let targetRate = max(-0.09, min(0.09, (drift + steerShot + steerKey + steerMoon + steerPilgrim) * (1 - urgency) + avoidRate + steerAway + steerGiant))
         // Critically damped spring on yaw rate: turns take tens of seconds.
         let k = 0.25
         yawAccel += (k * k * (targetRate - yawRate) - 2 * k * yawAccel) * dt
