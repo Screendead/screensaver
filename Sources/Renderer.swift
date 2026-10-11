@@ -1736,7 +1736,8 @@ enum Snapshot {
         }
         // VR_FLIGHT=minutes: flies the autopilot that long, logging altitude, clearance and climb every 12 s and
         // writing a frame each minute next to the screenshot path. VR_FTRACE=1 also prints every 0.25 s: time, x, z, y, ground,
-        // yaw and the altitude terms (target, climb rate, need (-1: floor clamp), rim lift, regional floor, ahead).
+        // yaw, the altitude terms (target, climb rate, need (-1: floor clamp), rim lift, regional floor, ahead, planned climb)
+        // and the routing (blocked ahead, route offset).
         if let mins = Double(env["VR_FLIGHT"] ?? "") {
             r.camera.tracing = env["VR_FTRACE"] != nil
             var maxClimb = 0.0, minClear = Double.infinity, maxY = 0.0, lows = 0
