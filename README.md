@@ -29,7 +29,9 @@ It replaces the system screensaver. If you like, set System Settings › Lock Sc
 | --- | --- |
 | `--preview` | Show immediately; exits on input |
 | `--duration N` | Preview: exit after N seconds |
-| `--idle N` | Idle threshold in seconds (agent default 30) |
+| `--idle N` | Idle threshold in seconds; overrides the menu's setting (default 30) |
+| `--menu` | Run the menu bar item (the installed second agent) |
+| `--nodither` | Flat quantised colour, no ordered-dither pattern |
 | `--seed N` | Fixed world seed (default: random per activation) |
 | `--speed X` | Time multiplier (soak testing). Snapshots honour it too: `--times 60 --speed 20` simulates 1200 s |
 | `--battery` | Force the battery-quality path |
