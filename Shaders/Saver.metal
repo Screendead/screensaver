@@ -972,11 +972,10 @@ static inline void houseAt(Part P, int2 q, int2 c, thread HouseAt& h) {
 }
 
 // Roof top over the floor (before quantizing) and its rise per column there, from the eave line half a voxel over
-// the wall top; hipped roofs slope toward the gables too, rounded off at the corners.
+// the wall top; hipped roofs slope toward the gables too.
 static inline float2 roofProfile(thread const HouseAt& h) {
     int ridge = (h.Dw - 1) / 2;
     float d = float(h.f.hip ? min(h.dA, h.dG) : h.dA);
-    if (h.f.hip && h.dA < 2 && h.dG < 2) d = 2.0 - length(float2(2 - h.dA, 2 - h.dG));
     return float2(h.f.wall + 0.5 + h.f.pitch * max(d + 1.0, 0.0), d >= float(ridge) ? 0.0 : h.f.pitch);
 }
 
@@ -4417,7 +4416,8 @@ static float4 smoke(thread const Ctx& x, device const Site* sites, device const 
             float dist = length(o + d * tR - (A + u * sP));
             float hgt = mix(h0, h1, sP);
             float r = 0.6 + 0.12 * hgt;
-            float dens = exp(-(dist / r) * (dist / r)) * (1.0 - hgt / 28.0) * strength;
+            // Thin where it leaves the fire, so a plume seen from above does not veil its hearth.
+            float dens = exp(-(dist / r) * (dist / r)) * (1.0 - hgt / 28.0) * smoothstep(0.0, 3.0, hgt) * strength;
             if (dens < 0.01) continue;
             float3 wp = o + d * tR + float3(float(x.origin.x), 0, float(x.origin.y));
             dens *= saturate(0.55 + 0.8 * perlin3(wp / 2.5 - float3(0, x.time * 1.2, 0), x.seed + 330u));
