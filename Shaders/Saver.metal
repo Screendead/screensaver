@@ -3290,6 +3290,11 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     float gLoc = k == 0 ? float(gsb & 2047u) : 0.0;
     if (giant && k > 0) gLoc = gi.G + 6.0;
     bool gWood = giant && float(v.y) >= gLoc;
+    // A coarse forested column's top is its leaves (coarseVeg).
+    float vegLo = col.x - cdK.y;
+    bool vegLeaf = k > 0 && !giant && cdK.y > 0.0 && float(v.y) >= vegLo;
+    // Bark and leaves: the ground's own tones (rock strata, painted beds) would be worked out only to be replaced.
+    bool vegVox = gWood || vegLeaf || (tree && float(v.y) >= col.y);
     float H = giant ? (gWood ? col.x : gLoc) : tree ? col.y : built ? (col.z > col.y ? col.y : base) : col.x;
     // Just under a rock gap the voxel belongs to the floor below it: its height is the gap's floor. Further down it is
     // part of the wall the column makes as a whole, which shades as one with its neighbours'.
@@ -3366,7 +3371,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     // Beaches and beds take sand or crust, faces included, so they need none of the ground and rock tones.
     bool beach = H <= SEA + 1.2;
     // Rock tone shows on side and under faces, and on high treads; a low tread never reads it.
-    bool needStone = !beach && (!(n.y > 0 && !underGap) || H - SEA > 0.55 * 110.0);
+    bool needStone = !beach && !vegVox && (!(n.y > 0 && !underGap) || H - SEA > 0.55 * 110.0);
     float3 stone = needStone ? strataTone(wy, wq, seed, max(desert, rimW), fpA, wallM, lite) : float3(0);
 
     float lagoon = smoothstep(0.0, 0.35, lagoonAmount(c));
@@ -3401,7 +3406,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         // so broad hillsides read as layered contour bands rather than one repeated stair.
         float bandK = fract(floor(H / 6.0) * 0.618034);
         tread *= mix(float3(1.12, 1.04, 0.90), float3(0.90, 0.98, 1.10), bandK);
-        if (painted > 0.0) {
+        if (painted > 0.0 && !vegVox) {
             float2 p = w + seedOffset(seed);
             // Alluvium on the valley floors: pale, dusty sage.
             float fl = paintedFloor(p, seed);
@@ -3439,13 +3444,8 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         s.level = crustW;
     }
     // Coarse levels carry no trees: the share of a column under canopy tints its ground with their leaves.
-    bool vegLeaf = false;
-    float vegLo = 0.0;
     if (k > 0) {
         float2 cd = cdK;
-        // The top of a forested coarse column is its leaves (coarseVeg).
-        vegLo = col.x - cd.y;
-        vegLeaf = !giant && cd.y > 0.0 && float(v.y) >= vegLo;
         float cov = saturate(cd.x * COVER_GAIN);
         if (cov > 0.0) {
             float conifer = smoothstep(0.50, 0.32, c.temp);
