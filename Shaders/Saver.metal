@@ -932,21 +932,23 @@ static bool buildJetty(texture2d<float, access::read> hm, thread SiteGen& G, int
 }
 
 // A style's house: wall height over the floor, roof pitch (rise per column), the eave lip's depth, and the overhangs
-// past the walls across the ridge (lo, hi side) and beyond the gables. The door side's overhang is a porch or deck.
-struct HouseForm { int ovLo, ovHi, ovG; float wall, pitch, lip; bool round, hip, flat; };
+// past the walls across the ridge (lo, hi side) and beyond each gable. The door side's overhang is a porch or deck:
+// a longhouse's deck runs along it, a cabin's porch is under its front gable.
+struct HouseForm { int ovLo, ovHi, ovGLo, ovGHi; float wall, pitch, lip; bool round, hip, flat; };
 
 static inline HouseForm houseForm(int style, uint hh) {
     HouseForm f;
-    f.ovLo = 1; f.ovHi = 1; f.ovG = 1; f.wall = 2.5; f.pitch = 1.0; f.lip = 1.0; f.round = false; f.hip = false; f.flat = false;
+    f.ovLo = 1; f.ovHi = 1; f.ovGLo = 1; f.ovGHi = 1; f.wall = 2.5; f.pitch = 1.0; f.lip = 1.0; f.round = false; f.hip = false; f.flat = false;
     bool doorHi = (hh & 4u) != 0u;
     if (style == ST_MEADOW) { f.round = true; f.hip = true; f.pitch = 1.1; }
     else if (style == ST_TIMBER) { f.wall = 3.0; f.pitch = 1.25; f.lip = 0.75; }
     else if (style == ST_CABIN || style == ST_STILT) {
-        f.pitch = 1.5; f.lip = style == ST_CABIN ? 0.75 : 1.0;
-        if (doorHi) f.ovHi = 2; else f.ovLo = 2;
+        f.pitch = style == ST_CABIN ? 1.25 : 1.5; f.lip = 1.0;
+        if (style == ST_CABIN) { f.wall = 2.0; if (doorHi) f.ovGHi = 2; else f.ovGLo = 2; }
+        else if (doorHi) f.ovHi = 2; else f.ovLo = 2;
     }
-    else if (style == ST_CROFT) { f.ovLo = 0; f.ovHi = 0; f.ovG = 0; f.wall = 2.0; f.pitch = 0.8; f.round = true; f.hip = true; }
-    else if (style == ST_ADOBE || style == ST_PUEBLO) { f.flat = true; f.ovLo = 1; f.ovHi = 0; f.ovG = 0; f.wall = 3.0; }
+    else if (style == ST_CROFT) { f.ovLo = 0; f.ovHi = 0; f.ovGLo = 0; f.ovGHi = 0; f.wall = 2.0; f.pitch = 0.8; f.round = true; f.hip = true; }
+    else if (style == ST_ADOBE || style == ST_PUEBLO) { f.flat = true; f.ovLo = 1; f.ovHi = 0; f.ovGLo = 0; f.ovGHi = 0; f.wall = 3.0; }
     return f;
 }
 
@@ -964,8 +966,8 @@ static inline void houseAt(Part P, int2 q, int2 c, thread HouseAt& h) {
     int4 ij = partIJ(P, q, c);
     h.axisZ = (P.flags & F_AXISZ) != 0;
     h.f = houseForm((P.flags >> 12) & 15, uint(P.y2));
-    h.Lw = ij.z - 2 * h.f.ovG; h.Dw = ij.w - h.f.ovLo - h.f.ovHi;
-    h.iw = ij.x - h.f.ovG; h.jw = ij.y - h.f.ovLo;
+    h.Lw = ij.z - h.f.ovGLo - h.f.ovGHi; h.Dw = ij.w - h.f.ovLo - h.f.ovHi;
+    h.iw = ij.x - h.f.ovGLo; h.jw = ij.y - h.f.ovLo;
     h.dA = min(h.jw, h.Dw - 1 - h.jw); h.dG = min(h.iw, h.Lw - 1 - h.iw);
 }
 
@@ -1001,7 +1003,8 @@ static inline float houseTop(thread const HouseAt& h) {
 
 // The along-ridge column of a house's chimney: in the gable wall, outside it (a cabin's stack) or through the hip.
 static inline int chimneyAt(int style, int Lw, uint hh) {
-    int i = style == ST_CABIN ? -1 : style == ST_MEADOW ? 1 : style == ST_TIMBER ? 0 : -100;
+    if (style == ST_CABIN) return (hh & 4u) != 0u ? -1 : Lw;
+    int i = style == ST_MEADOW ? 1 : style == ST_TIMBER ? 0 : -100;
     return ((hh >> 12) & 1u) != 0u ? Lw - 1 - i : i;
 }
 
@@ -1058,19 +1061,25 @@ static inline int houseOpening(Part P, thread const HouseAt& h, uint side) {
     if (h.iw < 0 || h.jw < 0 || h.iw >= h.Lw || h.jw >= h.Dw) return 0;
     if (dj != 0) {
         if (!(dj < 0 ? h.jw == 0 : h.jw == h.Dw - 1) || h.iw == 0 || h.iw == h.Lw - 1) return 0;
-        bool doorWall = (dj > 0) == ((hh & 4u) != 0u);
+        bool doorWall = (dj > 0) == ((hh & 4u) != 0u) && style != ST_CABIN;
         if (doorWall && h.iw == h.Lw / 2) return 2;
         if (((h.iw - h.Lw / 2) & 1) != 0) return 0;
-        return k < 0.7 ? 1 : 0;
+        return k < (style == ST_CABIN ? 0.95 : 0.7) ? 1 : 0;
     }
     if (!(di < 0 ? h.iw == 0 : h.iw == h.Lw - 1)) return 0;
+    // A cabin's front gable: the door between two windows.
+    if (style == ST_CABIN) {
+        if ((di > 0) != ((hh & 4u) != 0u)) return 0;
+        int dr = abs(h.jw - (h.Dw - 1) / 2);
+        return dr == 0 ? 2 : dr == 1 ? 1 : 0;
+    }
     return h.jw == (h.Dw - 1) / 2 && k < 0.6 ? 1 : 0;
 }
 
 // Wall coordinates (iw along the ridge, jw across) to a column offset from the site centre.
 static inline int2 wallCol(Part P, thread const HouseForm& f, int iw, int jw) {
     bool axisZ = (P.flags & F_AXISZ) != 0;
-    int2 w0 = P.o + (axisZ ? int2(f.ovLo, f.ovG) : int2(f.ovG, f.ovLo));
+    int2 w0 = P.o + (axisZ ? int2(f.ovLo, f.ovGLo) : int2(f.ovGLo, f.ovLo));
     return w0 + (axisZ ? int2(jw, iw) : int2(iw, jw));
 }
 
@@ -1088,12 +1097,17 @@ static inline float3 houseDoor(Part P, uint sh, int k, bool path) {
     HouseForm f = houseForm(style, hh);
     bool axisZ = (P.flags & F_AXISZ) != 0;
     int4 ij = axisZ ? int4(0, 0, P.sz.y, P.sz.x) : int4(0, 0, P.sz.x, P.sz.y);
-    int Lw = ij.z - 2 * f.ovG, Dw = ij.w - f.ovLo - f.ovHi;
+    int Lw = ij.z - f.ovGLo - f.ovGHi, Dw = ij.w - f.ovLo - f.ovHi;
     int iw = Lw / 2, jw, out;
     if (f.flat) {
         uint uPlan = (hh >> 7) & 1u;
         if (style == ST_ADOBE && !path) { jw = 2; out = 1; }
         else { jw = Dw - 1; out = 1; if (style == ST_ADOBE) iw = uPlan != 0u ? Lw / 2 : (Lw + 2) / 2; }
+    } else if (style == ST_CABIN) {
+        bool hi = (hh & 4u) != 0u;
+        jw = (Dw - 1) / 2;
+        int oi = (hi ? 1 : -1) * (path ? (hi ? f.ovGHi : f.ovGLo) + 1 : 1);
+        return float3(float2(wallCol(P, f, (hi ? Lw - 1 : 0) + oi, jw)) + 0.5, 1.0);
     } else {
         bool hi = (hh & 4u) != 0u;
         jw = hi ? Dw - 1 : 0;
@@ -1140,6 +1154,12 @@ static bool buildHamlet(texture2d<float, access::read> hm, thread SiteGen& G, in
         float a = a0 + float(k) * 2.39996;
         int2 pos = c + int2(round(r * float2(cos(a), sin(a))));
         uint hh = pcg(h + 17u * uint(k) + 3u) & 0x7fffu;
+        if (style == ST_CABIN) {
+            // A cabin turns its porch gable to the hearth.
+            int2 dh = c - pos;
+            bool az = abs(dh.y) > abs(dh.x);
+            hh = (hh & ~5u) | (az ? 1u : 0u) | ((az ? dh.y : dh.x) > 0 ? 4u : 0u);
+        }
         bool axisZ = (hh & 1u) != 0u;
         int b9 = int((hh >> 9) % 3u), b11 = int((hh >> 11) & 1u);
         if (yurt) {
@@ -1164,16 +1184,16 @@ static bool buildHamlet(texture2d<float, access::read> hm, thread SiteGen& G, in
         HouseForm f = houseForm(style, hh);
         int Lw = 6 + (b9 & 1), Dw = 4 + b11;
         if (style == ST_TIMBER) { Lw = 7 + (b9 & 1); Dw = 5; }
-        else if (style == ST_CABIN) Dw = 5;
+        else if (style == ST_CABIN) { Lw = 5 + (b9 & 1); Dw = 5; }
         else if (style == ST_CROFT) Lw = 7 + b9;
         else if (stilt) Lw = 8 + b9;
         else if (style == ST_ADOBE) { Lw = 7 + b9; Dw = 7 + b11; }
         else if (pueblo) { Lw = 6 + b9; Dw = 5 + b11; }
-        int L = Lw + 2 * f.ovG, Dt = Dw + f.ovLo + f.ovHi;
+        int L = Lw + f.ovGLo + f.ovGHi, Dt = Dw + f.ovLo + f.ovHi;
         int2 sz = axisZ ? int2(Dt, L) : int2(L, Dt);
         int2 r0 = pos - sz / 2;
         if (any(r0 < 2) || any(r0 + sz >= n - 2) || !rectFree(rects, nr, r0, sz, pueblo ? 1 : 2)) continue;
-        int2 w0 = r0 + (axisZ ? int2(f.ovLo, f.ovG) : int2(f.ovG, f.ovLo));
+        int2 w0 = r0 + (axisZ ? int2(f.ovLo, f.ovGLo) : int2(f.ovGLo, f.ovLo));
         int2 wsz = axisZ ? int2(Dw, Lw) : int2(Lw, Dw);
         float lo, hi, alo, ahi;
         int wet, awet;
@@ -1789,17 +1809,15 @@ static Claim stampPart(Part P, int2 q, int2 c, float g, texture2d<float, access:
                 uint deck = uint(M_PLANK) | S_FLAT | (uint(FT_DECK) << S_FEAT);
                 return g < fl - 1.0 ? gapClaim(g, fl - 0.5, fl, deck) : solidClaim(fl, g, deck);
             }
-            // A cabin's porch roof on posts.
-            float Hp = fl + houseTop(h);
-            if (endPost) return solidClaim(Hp, g, post);
-            if (Hp - 0.5 > g + 1.0) return gapClaim(g, Hp - 0.5, Hp, mat);
-            return g < Hp ? solidClaim(Hp, g, mat) : noClaim();
+            return noClaim();
         }
         float H = fl + houseTop(h);
         if (!inWall) {
-            // Eaves and rakes: the roof's edge on air; a longhouse's ridge ends rise in horns.
+            // Eaves and rakes: the roof's edge on air; a longhouse's ridge ends rise in horns. A cabin's porch roof
+            // stands on posts at its front corners.
             if (stilt && h.jw == ridge && h.dG < 0) H += 1.0;
-            float under = H - h.f.lip;
+            if (h.dG < -1 && (h.jw == 0 || h.jw == h.Dw - 1)) return solidClaim(H, g, post);
+            float under = H - (style == ST_CABIN && h.dG < 0 && h.dA >= 0 ? max(h.f.lip, roofStep(h) + 0.25) : h.f.lip);
             if (under > g + 1.0) return gapClaim(g, under, H, mat);
             return g < H ? solidClaim(H, g, mat) : noClaim();
         }
@@ -2084,7 +2102,7 @@ static inline float flicker(float t, float i, uint seed) {
 // lights: x sun elevation, y night progress (0 dusk .. 1 dawn), z day index.
 static float lampLevel(int kind, uint h, float4 lights) {
     float sunY = lights.x, prog = lights.y;
-    float on = mix(0.03, -0.10, hashf(h));
+    float on = kind == L_WINDOW || kind == L_TENT ? mix(0.05, -0.03, hashf(h)) : mix(0.03, -0.10, hashf(h));
     float dark = smoothstep(on + 0.015, on - 0.015, sunY);
     if (kind == L_WINDOW || kind == L_TENT) {
         float off = hashf(pcg(h + 1u)) < 0.55 ? smoothstep(0.0, 0.03, prog - 0.45 - 0.4 * hashf(pcg(h + 2u))) : 0.0;
@@ -3337,7 +3355,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         if (house) {
             houseAt(P, v.xz, sc, ha);
             if (chim && (ha.jw == (ha.Dw - 1) / 2 || wy < Ht - ha.f.lip)) vm = M_STONE;
-            else if (feat == FT_VIGA || feat == FT_POST) vm = M_TIMBER;
+            else if (feat == FT_VIGA || (feat == FT_POST && (style != ST_CABIN || wy < Ht - roofStep(ha) - 0.25))) vm = M_TIMBER;
             else if (feat == FT_DECK) vm = M_PLANK;
             else if (float(v.y) < floorY) vm = style == ST_STILT ? M_TIMBER : M_STONE;
             else if (!ha.f.flat) {
@@ -3422,9 +3440,9 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
             float course = hashf(hash2i(int2(int(floor((n.y != 0 ? ra.x : wy) * 2.0)), int(floor(ra.y * 0.8))), seed + 330u));
             a *= 1.0 + fade * (0.14 * (course - 0.5) + 0.10 * perlin2(float2(ra.y * 4.0, wy * 0.7), seed + 312u));
         } else if (vm == M_SHINGLE) {
-            a = (style == ST_CABIN ? float3(0.20, 0.165, 0.13) : float3(0.20, 0.12, 0.075)) * (0.9 + 0.2 * k);
+            a = (style == ST_CABIN ? float3(0.25, 0.165, 0.10) : float3(0.20, 0.12, 0.075)) * (0.9 + 0.2 * k);
             float moss = saturate(perlin2(wq / 2.5, seed + 331u) + 0.5) * age;
-            a = mix(a, float3(0.09, 0.11, 0.05), 0.5 * mix(moss, 0.5 * age, 1.0 - fade));
+            a = mix(a, float3(0.09, 0.11, 0.05), (style == ST_CABIN ? 0.25 : 0.5) * mix(moss, 0.5 * age, 1.0 - fade));
             // Rows of shingles, each row's joints offset half a shingle.
             float rw = (n.y != 0 ? ra.x : wy) * 2.0;
             float u = ra.y * 1.5 + 0.5 * float(int(floor(rw)) & 1);
