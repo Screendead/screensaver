@@ -87,7 +87,8 @@ struct SkyClock {
 // A structure site as the camera and the smoke and halo lists see it, in world coordinates.
 struct SiteInfo {
     enum Kind: Int { case none = 0, henge, cairn, ruins, hamlet, jetty, camp }
-    struct Lamp { var pos: SIMD3<Double>; var kind: Int; var rise: Double; var index: Int }
+    // smoke: where its plume starts (rise > 0 only): a window lamp stands at its door, its chimney a few columns off.
+    struct Lamp { var pos: SIMD3<Double>; var kind: Int; var rise: Double; var index: Int; var smoke: SIMD3<Double> }
     var index: Int
     var id: UInt32
     var kind: Kind
@@ -378,7 +379,7 @@ final class World {
                         for k in 0..<np {
                             let v = (base + 32 + 16 * World.maxLamps + 16 * k).load(as: SIMD4<Int32>.self)
                             let kind = (v.y >> 16) & 0xff, style = (v.w >> 28) & 15
-                            desc += kind == 2 || kind == 10 ? " p\(kind)s\(style)" : " p\(kind)"
+                            desc += kind == 2 || kind == 10 ? " p\(kind)s\(style)" : kind == 11 ? " p11t\(v.z >> 16)" : " p\(kind)"
                         }
                         print("  site \(site.kind) \(Int(site.pos.x)),\(Int(site.pos.y)) r\(Int(site.radius)) lamps \(site.lamps.count)\(desc)")
                     }
@@ -422,8 +423,10 @@ final class World {
             var lamps: [SiteInfo.Lamp] = []
             for l in 0..<Int(info.w) {
                 let v = (base + 32 + 16 * l).load(as: SIMD4<Float>.self)
-                let k = Int(v.w) % 16
-                lamps.append(.init(pos: SIMD3(c.x + Double(v.x), Double(v.y), c.y + Double(v.z)), kind: k, rise: Double(Int(v.w) / 16), index: i * World.maxLamps + l))
+                let w = Int(v.w), k = w % 16, rise = Double((w / 16) % 64), code = w / 1024
+                let pos = SIMD3(c.x + Double(v.x), Double(v.y), c.y + Double(v.z))
+                let off = code > 0 ? SIMD3(Double(code % 32 - 16), rise, Double(code / 32 - 16)) : SIMD3(0, rise, 0)
+                lamps.append(.init(pos: pos, kind: k, rise: rise, index: i * World.maxLamps + l, smoke: pos + off))
             }
             list.append(SiteInfo(index: i, id: UInt32(bitPattern: head.w), kind: kind, pos: c + 0.5, radius: Double(info.x), lamps: lamps))
         }
@@ -722,7 +725,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     // Per screen tile (LAMP_TILES x LAMP_TILES in Shaders/Saver.metal), the haze lamps (bits 0-15) and smoke plumes
     // (bits 16-27) whose bounding spheres the tile's rays may cross; the shader loops only over those.
     static let lampTiles = 16
-    private static let lampReach: [Double] = [1, 20, 16, 8, 10, 24, 22]   // LAMP_R in Shaders/Saver.metal
+    private static let lampReach: [Double] = [1, 20, 16, 7, 10, 24, 22, 6]   // LAMP_R in Shaders/Saver.metal
     private var tileMasks = [UInt32](repeating: 0, count: 16 * 16)
     static let ditherCells = 864.0
     private var historyIndex = 0
@@ -1135,7 +1138,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         let cam = SIMD2(camera.position.x, camera.position.z)
         var near: [(Double, Int)] = []
         for site in world.sites {
-            for l in site.lamps where l.kind != 3 {
+            for l in site.lamps where l.kind != 3 && l.kind != 7 {
                 let d = simd_length(SIMD2(l.pos.x, l.pos.z) - cam)
                 if d < 1200 { near.append((d, l.index)) }
             }
@@ -1152,7 +1155,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         var near: [(Double, Int)] = []
         for site in world.sites {
             for l in site.lamps where l.rise > 0 {
-                let v = l.pos + SIMD3(0, l.rise, 0) - cam
+                let v = l.smoke - cam
                 let d = simd_length(v)
                 if d < 600, d < 40 || simd_dot(v, fwd) > -0.2 * d { near.append((d, l.index)) }
             }
@@ -1192,12 +1195,12 @@ final class Renderer: NSObject, MTKViewDelegate {
         for site in world.sites { for l in site.lamps { lamps[l.index] = l } }
         for i in 0..<Int(f.refs.x) {
             guard let l = lamps[Int(hazeRefs[i])] else { continue }
-            mark(l.pos, 3 * Renderer.lampReach[min(l.kind, 6)] + 0.5, 1 << UInt32(i))
+            mark(l.pos, 3 * Renderer.lampReach[min(l.kind, 7)] + 0.5, 1 << UInt32(i))
         }
         let wind = SIMD2(0.825336, 0.564642)
         for i in 0..<Int(f.refs.y) {
             guard let l = lamps[Int(hazeRefs[16 + i])] else { continue }
-            mark(l.pos + SIMD3(wind.x * 6, l.rise + 14, wind.y * 6), 16.5, 1 << UInt32(16 + i))
+            mark(l.smoke + SIMD3(wind.x * 6, 14, wind.y * 6), 16.5, 1 << UInt32(16 + i))
         }
     }
 
