@@ -1363,9 +1363,12 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
                 emergentIntervals(w, ec, tc.r, y0, R, pads, eh, seed, 0, rr);
             }
         // A trunk column is bark through the roof (merged with it, its leaves would start at the roof's underside).
-        if (gmax - gmin < 10.0 && !cleared && !eTrunk) {
+        if (!cleared && !eTrunk) {
             JCan cn = jungleCanopy(w, gs, J, seed);
-            if (cn.hi > cn.lo) {
+            // On steep ground the roof is a hanging wall of leaves to the ground: a floating roof there would show its
+            // dark underside from the slope below, and stand on stilts.
+            if (gmax - gmin >= 6.0) cn.lo = -1.0;
+            if (cn.hi > max(cn.lo, G)) {
                 gAdd(rr, cn.lo, cn.hi, GM_LEAF);
                 // Its crowns stand on poles; lianas hang from it.
                 if (cn.trunk) gAdd(rr, G, cn.lo, GM_WOOD);
@@ -2361,7 +2364,7 @@ static float2 coarseVeg(int2 cw, int k, float4 hs4, float H, uint seed) {
     int2 o4[4] = { int2(0), int2(hs, 0), int2(0, hs), int2(hs, hs) };
     // No roof on a cliff (plantTrees keeps it to ground level within 10 over +-5 voxels).
     float spread = max(max(hs4.x, hs4.y), max(hs4.z, hs4.w)) - min(min(hs4.x, hs4.y), min(hs4.z, hs4.w));
-    if (J >= 0.15 && spread < max(10.0, 0.6 * float(s))) {
+    if (J >= 0.15) {
         for (int i = 0; i < 4; i++) {
             float2 wi = float2(b + o4[i]) + 0.5;
             float g = hs4[i], t = g;
