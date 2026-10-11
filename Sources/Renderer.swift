@@ -697,6 +697,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
     let world: World
     let clipmap: Clipmap
+    let towers: Towers
     let camera: FlightCamera
     let wildlife: Wildlife
     // Ring of bird buffers, one per frame in flight; the semaphore keeps the CPU from overwriting one the GPU reads.
@@ -763,7 +764,8 @@ final class Renderer: NSObject, MTKViewDelegate {
               let lpos = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.maxLamps * 16, options: .storageModePrivate),
               let lstate = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.maxLamps * 16, options: .storageModePrivate),
               let world = World(device: device, library: lib, seed: seed),
-              let clipmap = Clipmap(device: device, library: lib, seed: seed) else { return nil }
+              let clipmap = Clipmap(device: device, library: lib, seed: seed),
+              let towers = Towers(device: device, library: lib, seed: seed) else { return nil }
         self.device = device
         self.queue = queue
         scenePipeline = sp
@@ -796,6 +798,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         lightDir = ldT
         self.world = world
         self.clipmap = clipmap
+        self.towers = towers
         // Spec offset displays by 90 s of the same flight; steering reads GPU heights, so displays
         // instead start at different places in the same world.
         camera = FlightCamera(seed: seed &+ UInt32(screenIndex) &* 7919)
@@ -809,8 +812,14 @@ final class Renderer: NSObject, MTKViewDelegate {
         camera.heightAt = { [unowned world] x, z in world.height(x: x, z: z) }
         camera.farHeightAt = { [unowned self] x, z in self.farHeight(x: x, z: z) }
         camera.sitesAt = { [unowned world] in world.sites }
+        camera.towersAt = { [unowned towers] in towers.list }
         wildlife.heightAt = camera.heightAt
+        // VR_START=x,z,yawDeg: the flight starts there (tests).
+        if let v = ProcessInfo.processInfo.environment["VR_START"]?.split(separator: ",").compactMap({ Double($0) }), v.count >= 3 {
+            camera.start(at: SIMD2(v[0], v[1]), yaw: v[2] * .pi / 180)
+        }
         world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
+        towers.update(center: SIMD2(camera.position.x, camera.position.z), queue: queue, wait: true)
         refreshFar(wait: true)
         camera.placeAtStart()
         // The coarse rings are built ahead of the first frame on the same queue, which orders that frame after them;
@@ -875,6 +884,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
             clock.advance(step)
             world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
+            towers.update(center: SIMD2(camera.position.x, camera.position.z), queue: queue, wait: world.synchronous)
             // Snapshots simulate long stretches without frames: keep the far heights following the camera.
             if world.synchronous && simTime + (dt * timeScale - remaining) - farSimClock > 2 {
                 farSimClock = simTime + (dt * timeScale - remaining)
@@ -1067,6 +1077,9 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentBuffer(lampState, offset: 0, index: 3)
             enc.setFragmentBytes(&hazeRefs, length: 128, index: 4)
             enc.setFragmentBytes(&tileMasks, length: tileMasks.count * 4, index: 7)
+            let tb = camera.basis, tanV = tan(25.0 * .pi / 180) * 1.05
+            towers.frameTable(eye: camera.position, fwd: tb.fwd, right: tb.right, up: tb.up, tanH: tanV * Double(aspect), tanV: tanV)
+            enc.setFragmentBytes(towers.table, length: Towers.tableBytes, index: 8)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
         }
@@ -1384,6 +1397,14 @@ enum Snapshot {
         r.prepare(outputSize: CGSize(width: w, height: h))
         r.headroom = settings.headroom ?? 0
         let env = ProcessInfo.processInfo.environment
+        // VR_TOWERS=n: lists the towers of the n-cell square of tower cells round the camera's start, nearest first.
+        if let n = Int(env["VR_TOWERS"] ?? "") {
+            let here = SIMD2(r.camera.position.x, r.camera.position.z)
+            for t in r.towers.scan(around: here, cells: n, queue: r.queue).sorted(by: { simd_length($0.pos - here) < simd_length($1.pos - here) }) {
+                print(String(format: "tower %.0f,%.0f dist %.0f kind %d member %d R0 %.0f base %.0f height %.0f top %.0f lit %d moist %.2f temp %.2f",
+                             t.pos.x, t.pos.y, simd_length(t.pos - here), t.kind, t.member, t.radius, t.base, t.height, t.top, t.lit ? 1 : 0, t.moist, t.temp))
+            }
+        }
         // VR_SHOW=kind,distance,height,bearing[,rank]: hold the camera on the rank-th nearest site of a kind
         // (1 henge .. 6 camp), `distance` from it along `bearing` degrees, `height` above the ground there.
         if let spec = env["VR_SHOW"] {
@@ -1423,6 +1444,9 @@ enum Snapshot {
             var maxClimb = 0.0, minClear = Double.infinity, maxY = 0.0, lows = 0
             var walled = 0, walledRun = 0, maxWalledRun = 0, fastClimb = 0, prevY = r.camera.position.y
             var lastY = r.camera.position.y
+            // Ruined towers: the closest the flight came to a plinth's edge below its top, and the seconds a tower stood in
+            // frame within 9k.
+            var towerEdge = Double.infinity, towerSeen = 0, towerClose = 0
             for i in 1...Int(mins * 60) {
                 for _ in 0..<4 { r.simulate(0.25) }
                 let p = r.camera.position
@@ -1433,6 +1457,14 @@ enum Snapshot {
                 minClear = min(minClear, p.y - g)
                 maxY = max(maxY, p.y)
                 if p.y < g + 2 { lows += 1 }
+                var seen = false
+                for t in r.towers.list {
+                    let v = t.pos - SIMD2(p.x, p.z), d = simd_length(v)
+                    if p.y < t.top { towerEdge = min(towerEdge, d - t.radius * 1.42) }
+                    if d < 9000, abs(atan2(sin(atan2(v.x, v.y) - r.camera.yaw), cos(atan2(v.x, v.y) - r.camera.yaw))) < 0.6 { seen = true }
+                    if d < 1500 { towerClose += 1 }
+                }
+                if seen { towerSeen += 1 }
                 let wall = r.camera.wallInFrame()
                 if wall >= 0.4 { walled += 1; walledRun += 1; maxWalledRun = max(maxWalledRun, walledRun) } else { walledRun = 0 }
                 if p.y - (i == 1 ? p.y : prevY) > 6 { fastClimb += 1 }
@@ -1454,6 +1486,7 @@ enum Snapshot {
                     write(bytes: bytes, width: w, height: h, to: path.replacingOccurrences(of: ".png", with: "_m\(i / 60).png"))
                 }
             }
+            print(String(format: "flight towers: closest plinth edge %.0f, seconds with a tower ahead within 9k %d, tower-seconds within 1.5k %d", towerEdge, towerSeen, towerClose))
             print(String(format: "flight done: max climb %.2f/s, min clearance %.1f, max y %.0f (ceiling %.0f), low seconds %d, walled seconds %d (longest %d), seconds climbing over 6/s %d", maxClimb, minClear, maxY, FlightCamera.ceiling, lows, walled, maxWalledRun, fastClimb))
             return
         }

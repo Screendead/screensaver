@@ -43,6 +43,8 @@ final class FlightCamera {
     private var hug: Double = 0
     // Structure sites on the loaded map.
     var sitesAt: () -> [SiteInfo] = { [] }
+    // Ruined towers round the camera (Sources/Towers.swift).
+    var towersAt: () -> [TowerInfo] = { [] }
     // Index of the current night, as the lamps read it (beacons and rites burn only on some nights).
     var nightIndex = 0
     // Sites a shot was built around, and when; each rests for a while so one place can't own the flight.
@@ -72,6 +74,22 @@ final class FlightCamera {
     }
 
     private func h(_ x: Double, _ z: Double) -> Double { heightAt(x, z) ?? farHeightAt(x, z) ?? 20 }
+
+    // Starts the flight here (tests: VR_START).
+    func start(at p: SIMD2<Double>, yaw y: Double) {
+        position.x = p.x
+        position.z = p.y
+        yaw = y
+    }
+
+    // A ruined tower as the routing sees it: a solid drum to its full height, a little wider than its plinth, so the
+    // sparse samples along a heading cannot pass between them and the flight turns off well before its walls.
+    private func towerTop(_ x: Double, _ z: Double) -> Double {
+        var m = -Double.infinity
+        for t in towersAt() where simd_length(SIMD2(x, z) - t.pos) < t.radius * 1.5 + 60 { m = max(m, t.top) }
+        return m
+    }
+    private func hSteer(_ x: Double, _ z: Double) -> Double { max(h(x, z), towerTop(x, z)) }
     // Far terrain: the 32-voxel max grid, else the fine map.
     private func hFar(_ x: Double, _ z: Double) -> Double { farHeightAt(x, z) ?? heightAt(x, z) ?? 20 }
 
@@ -86,7 +104,7 @@ final class FlightCamera {
             // The flight's width: a pillar between samples must still count.
             let w = min(dist * 0.12, 30)
             let l = q + side * w, r = q - side * w
-            let g = dist < 400 ? max(h(q.x, q.y), h(l.x, l.y), h(r.x, r.y)) : hFar(q.x, q.y)
+            let g = dist < 400 ? max(hSteer(q.x, q.y), hSteer(l.x, l.y), hSteer(r.x, r.y)) : max(hFar(q.x, q.y), towerTop(q.x, q.y))
             let allow = min(FlightCamera.ceiling - 30, position.y + 0.18 * dist)
             b += max(0, g - allow) / (1 + dist / 250)
         }
@@ -171,6 +189,32 @@ final class FlightCamera {
         return (min(0.5 * sum, 0.35 + 0.15 * night), top)
     }
 
+    // A ruined tower 1.2-9k off, framed when the heading passes about 900 off one of its flanks: by day the strongest
+    // landmark there is, at night (a few lit rooms on some) less so. The flank bearings are offered as shots.
+    private func towerFlanks() -> [(bearing: Double, tower: TowerInfo, d: Double)] {
+        let p = SIMD2(position.x, position.z)
+        var out: [(Double, TowerInfo, Double)] = []
+        for t in towersAt() where t.member == 0 || t.height > 500 {
+            let v = t.pos - p, d = simd_length(v)
+            guard d > 1200, d < 9000 else { continue }
+            let b = atan2(v.x, v.y), off = asin(min(1, 900 / d))
+            out.append((b + off, t, d))
+            out.append((b - off, t, d))
+        }
+        return out
+    }
+
+    private func towerInterest(_ heading: Double, night: Double) -> Double {
+        var best = 0.0
+        for f in towerFlanks() {
+            let a = abs(FlightCamera.angleDiff(f.bearing, heading))
+            guard a < 0.35 else { continue }
+            let w = (0.55 * (1 - night) + (f.tower.lit ? 0.3 : 0.1) * night) * (1 - a / 0.35) * min(1, (9000 - f.d) / 2000)
+            best = max(best, w)
+        }
+        return best
+    }
+
     // Hearths, camp fires and jetty lanterns burn every night; a henge is only worth a night shot when its
     // rite is lit, and a beacon adds to its hamlet. Mirrors lampLevel in Shaders/Saver.metal.
     private func litInterest(_ site: SiteInfo) -> Double {
@@ -228,7 +272,7 @@ final class FlightCamera {
         let water = wf < 0.1 ? 0 : (wf < 0.45 ? pool : pool - 2.0 * (wf - 0.45))
         let light = lightW * max(0, cos(heading - lightYaw)) * 0.8
         let turn = -0.25 * abs(FlightCamera.angleDiff(heading, yaw))
-        return relief + water + light + turn + wall + fill + open + siteInterest(heading, night: night).0 + { let v = vista(heading); return v.0 * (1 - night) - v.1 }()
+        return relief + water + light + turn + wall + fill + open + siteInterest(heading, night: night).0 + towerInterest(heading, night: night) + { let v = vista(heading); return v.0 * (1 - night) - v.1 }()
     }
 
     func placeAtStart() {
@@ -302,6 +346,7 @@ final class FlightCamera {
                     if simd_length(v) < 450, abs(FlightCamera.angleDiff(b, moonYaw)) < 1.0 { headings.append(b) }
                 }
             }
+            headings += towerFlanks().map { $0.bearing }.filter { abs(FlightCamera.angleDiff($0, yaw)) < 1.6 }
             let scored = headings.map { ($0, shotScore($0, lightYaw: lightYaw, lightW: lightW, noon: noon, night: nightW)) }
             let pick = scored.max { $0.1 < $1.1 }!
             shotYaw = pick.0
@@ -341,7 +386,7 @@ final class FlightCamera {
             let dv = SIMD2(sin(a), cos(a))
             for r in [30.0, 60.0, 110.0, 180.0, 260.0, 360.0] {
                 let q = p + dv * r
-                let over = h(q.x, q.y) - (position.y - 10)
+                let over = hSteer(q.x, q.y) - (position.y - 10)
                 if over > 0 { push -= dv * min(over / 60, 1) * (60 / r) }
             }
         }
