@@ -947,7 +947,7 @@ static inline float towerIvyDrop(float2 w, float2 c, float rot, int N, uint th, 
     float t = length(d) * sin(a - seg * fi - 0.5 * seg) + 97.0 * fi;
     float2 q = float2(t, rim * 0.4 + float(th & 255u) * 7.3);
     float mat = perlin2(q / 34.0, seed + 560u) + 0.35 * perlin2(q / 14.0, seed + 561u);
-    return min(room, 30.0 + 150.0 * wet) * saturate(2.0 * mat + 0.3 * wet - 0.45);
+    return min(room, 40.0 + 200.0 * wet) * saturate(2.0 * mat + 0.7 * wet - 0.3);
 }
 
 static inline Col terrainColumnS(int2 w, uint seed, int s) { return towerColumn(terrainColumnBase(w, seed), w, seed, s); }
