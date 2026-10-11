@@ -608,9 +608,10 @@ final class Clipmap {
     static let gapLevels = 4
     // Must match GAP2_LEVELS: levels 1...gap2Levels also carry a second gap (giants' crowns).
     static let gap2Levels = 2
-    let gaps: MTLTexture     // rgba16Float array, levels 1...gap2Levels: the column's gap (lo, hi) and a second below it
-    let gaps2: MTLTexture    // rg16Float array, the levels after them up to gapLevels: the column's gap
+    let gaps: MTLTexture     // rg16Float array, levels 1...gapLevels: the column's gap (lo, hi)
+    let gaps2: MTLTexture    // rg16Float array, levels 1...gap2Levels: a second gap below it (a giant crown's air)
     private let gapViews: [MTLTexture]
+    private let gap2Views: [MTLTexture]
     private let heightViews: [[MTLTexture]]
     private let coverViews: [MTLTexture]
     private let climateViews: [MTLTexture]
@@ -640,8 +641,8 @@ final class Clipmap {
             return device.makeTexture(descriptor: d)
         }
         guard let h = array(.r16Float, Clipmap.size, mips: true), let v = array(.rg8Unorm, Clipmap.size, mips: false),
-              let g = array(.rgba16Float, Clipmap.size, mips: false, slices: Clipmap.gap2Levels),
-              let g2 = array(.rg16Float, Clipmap.size, mips: false, slices: Clipmap.gapLevels - Clipmap.gap2Levels),
+              let g = array(.rg16Float, Clipmap.size, mips: false, slices: Clipmap.gapLevels),
+              let g2 = array(.rg16Float, Clipmap.size, mips: false, slices: Clipmap.gap2Levels),
               let c = array(.rgba16Float, Clipmap.size / 2, mips: false),
               let gen = pipeline("generateCoarse"), let red = pipeline("reduceMaxRegion"), let par = pipeline("reduceMaxParent") else { return nil }
         func slice(_ t: MTLTexture, _ k: Int, _ m: Int) -> MTLTexture? {
@@ -659,14 +660,19 @@ final class Clipmap {
             vv.append(tv)
             cv.append(tc)
         }
-        var gv: [MTLTexture] = []
+        var gv: [MTLTexture] = [], g2v: [MTLTexture] = []
         for k in 0..<Clipmap.gapLevels {
-            guard let t = k < Clipmap.gap2Levels ? slice(g, k, 0) : slice(g2, k - Clipmap.gap2Levels, 0) else { return nil }
+            guard let t = slice(g, k, 0) else { return nil }
             gv.append(t)
+        }
+        for k in 0..<Clipmap.gap2Levels {
+            guard let t = slice(g2, k, 0) else { return nil }
+            g2v.append(t)
         }
         gaps = g
         gaps2 = g2
         gapViews = gv
+        gap2Views = g2v
         height = h
         cover = v
         climate = c
@@ -749,6 +755,8 @@ final class Clipmap {
             enc.setTexture(climateViews[j.level], index: 1)
             enc.setTexture(coverViews[j.level], index: 2)
             enc.setTexture(gapViews[min(j.level, Clipmap.gapLevels - 1)], index: 3)
+            // Written only on levels 1...gap2Levels.
+            enc.setTexture(gap2Views[min(j.level, Clipmap.gap2Levels - 1)], index: 4)
             enc.setBytes(&region, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
             enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 1)
             enc.setBuffer(giants, offset: 0, index: 2)

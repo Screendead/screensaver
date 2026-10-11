@@ -2562,6 +2562,7 @@ kernel void generateCoarse(texture2d<float, access::write> hOut [[texture(0)]],
                            texture2d<float, access::write> cOut [[texture(1)]],
                            texture2d<float, access::write> vOut [[texture(2)]],
                            texture2d<float, access::write> gOut [[texture(3)]],
+                           texture2d<float, access::write> g2Out [[texture(4)]],
                            constant int4& region [[buffer(0)]],
                            constant int4& info [[buffer(1)]],
                            device const GiantRec* giants [[buffer(2)]],
@@ -2574,7 +2575,8 @@ kernel void generateCoarse(texture2d<float, access::write> hOut [[texture(0)]],
     float depth;
     float3 cc = coarseColumn(cw, k, seed, giants, cc2, depth);
     float H = cc.x;
-    if (k <= GAP_LEVELS) gOut.write(float4(cc.y, cc.z, cc2), uint2(cw & (COARSE_N - 1)));
+    if (k <= GAP_LEVELS) gOut.write(float4(cc.y, cc.z, 0, 0), uint2(cw & (COARSE_N - 1)));
+    if (k <= GAP2_LEVELS) g2Out.write(float4(cc2, 0, 0), uint2(cw & (COARSE_N - 1)));
     float2 centre = float2(cw * s) + 0.5 * float(s);
     // Expected share of the column under leaves: planting chance per tree cell times a mean canopy of ~13 columns.
     float cover = saturate(groveDensity(centre, H, seed) * 13.0 / float(TREE_CELL * TREE_CELL));
@@ -2673,8 +2675,8 @@ struct Terrain {
     float globalMax;
     texture2d<float> hx;         // r16Float: mip 0 the column tops, mips from 1 their maxima (the DDA's skips)
     texture2d<uint> gx;          // the 1-voxel map's extra gaps (packGaps)
-    texture2d_array<float> cg;   // levels 1...GAP2_LEVELS: each column's gap (lo, hi) and second gap below it
-    texture2d_array<float> cg2;  // levels GAP2_LEVELS + 1...GAP_LEVELS: each column's gap
+    texture2d_array<float> cg;   // levels 1...GAP_LEVELS: each column's gap (lo, hi)
+    texture2d_array<float> cg2;  // levels 1...GAP2_LEVELS: a second gap below it (a giant crown's air)
     texture2d<float> hb;         // band mips (bandTop): the air a cell leaves open under canopies
     uint seed;
     device const GiantRec* giants; // the giant table (placeGiants)
@@ -2690,20 +2692,14 @@ static inline float maxAt(thread const Terrain& tr, int k, int2 mc, int m) {
 }
 
 // Column (H, gapLo, gapHi, first leaf) of frame-local level cell c, unmorphed.
-// e2: a coarse giant column's second gap, below the principal one (zero elsewhere), from the same read.
-static inline float4 columnLE(thread const Terrain& tr, int k, int2 c, thread float2& e2) {
-    e2 = 0.0;
+static inline float4 columnL(thread const Terrain& tr, int k, int2 c) {
     if (k == 0) return tr.hm.read(uint2(clamp(c, int2(0), int2(tr.size - 1))), 0);
     uint2 t = uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1));
     float H = tr.ch.read(t, uint(k - 1), 0).r;
     if (k > GAP_LEVELS) return float4(H, 0, 0, 0);
-    // Levels 1 and 2 carry a second gap (rgba); 3 and 4 one (cg2).
-    float4 g = k <= GAP2_LEVELS ? tr.cg.read(t, uint(k - 1)) : float4(tr.cg2.read(t, uint(k - 1 - GAP2_LEVELS)).rg, 0, 0);
-    e2 = g.ba;
-    return float4(H, g.rg, 0);
+    float2 g = tr.cg.read(t, uint(k - 1)).rg;
+    return float4(H, g, 0);
 }
-
-static inline float4 columnL(thread const Terrain& tr, int k, int2 c) { float2 e2; return columnLE(tr, k, c, e2); }
 
 static inline float groundL(thread const Terrain& tr, int k, int2 c) {
     if (k == 0) return groundAt(tr.hm, c, tr.size);
@@ -2741,7 +2737,7 @@ static inline float parentH(thread const Terrain& tr, int k, int2 c) {
 static inline float2 parentGap2(thread const Terrain& tr, int k, int2 c) {
     if (k + 1 > GAP2_LEVELS) return float2(0);
     int2 w = c + (k == 0 ? tr.origin : tr.origin >> k);
-    return tr.cg.read(uint2((w >> 1) & (COARSE_N - 1)), uint(k)).ba;
+    return tr.cg2.read(uint2((w >> 1) & (COARSE_N - 1)), uint(k)).rg;
 }
 
 // A lower gap across the morph band: toward the parent's second gap where it has one (opening from its floor where
@@ -2754,8 +2750,7 @@ static inline float2 morphGap2(float2 g, float2 p2, float w) {
 static inline float2 parentGap(thread const Terrain& tr, int k, int2 c) {
     if (k + 1 > GAP_LEVELS) return float2(0);
     int2 w = c + (k == 0 ? tr.origin : tr.origin >> k);
-    uint2 t = uint2((w >> 1) & (COARSE_N - 1));
-    return k + 1 <= GAP2_LEVELS ? tr.cg.read(t, uint(k)).rg : tr.cg2.read(t, uint(k - GAP2_LEVELS)).rg;
+    return tr.cg.read(uint2((w >> 1) & (COARSE_N - 1)), uint(k)).rg;
 }
 
 // Morph weight toward the next level at frame-local xz p: 0 inside the band, 1 from 1.5 parent columns before the
@@ -2769,9 +2764,8 @@ static inline float morphAt(thread const Terrain& tr, int k, float2 p) {
 // from the parent's floor where it has none), or closes from the top where the parent has none, so at the handoff the
 // level equals the next one exactly.
 // w: the morph weight (columnMorphW).
-static inline float3 columnMorphWE(thread const Terrain& tr, int k, int2 c, float w, thread float2& e2) {
-    float3 col = columnLE(tr, k, c, e2).rgb;
-    if (w > 0.0) e2 = morphGap2(e2, parentGap2(tr, k, c), w);
+static inline float3 columnMorphW(thread const Terrain& tr, int k, int2 c, float w) {
+    float3 col = columnL(tr, k, c).rgb;
     if (w > 0.0) {
         col.x = mix(col.x, parentH(tr, k, c), w);
         float2 pg = parentGap(tr, k, c);
@@ -2785,18 +2779,12 @@ static inline float3 columnMorphWE(thread const Terrain& tr, int k, int2 c, floa
     return col;
 }
 
-// columnMorphWE for a ray at height y: a coarse column's gaps lie under its top, so a ray above it needs only the top
-// (one read rather than two).
-static inline float3 columnMorphTrace(thread const Terrain& tr, int k, int2 c, float w, float y, thread float2& e2) {
-    if (k > 0) {
-        float H = tr.ch.read(uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1)), uint(k - 1), 0).r;
-        if (w > 0.0) H = mix(H, parentH(tr, k, c), w);
-        if (y >= H) { e2 = 0.0; return float3(H, 0, 0); }
-    }
-    return columnMorphWE(tr, k, c, w, e2);
+// A coarse column's gap below the principal one, morphed by w: on levels 1...GAP2_LEVELS a giant crown's air under it
+// (cg2), else none. Only a point under the principal gap can be in it.
+static inline float2 secondGapW(thread const Terrain& tr, int k, int2 c, float w) {
+    float2 g = k <= GAP2_LEVELS ? tr.cg2.read(uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1)), uint(k - 1)).rg : float2(0);
+    return w > 0.0 ? morphGap2(g, parentGap2(tr, k, c), w) : g;
 }
-
-static inline float3 columnMorphW(thread const Terrain& tr, int k, int2 c, float w) { float2 e2; return columnMorphWE(tr, k, c, w, e2); }
 
 static inline float3 columnMorph(thread const Terrain& tr, int k, int2 c) {
     return columnMorphW(tr, k, c, morphAt(tr, k, (float2(c) + 0.5) * tr.lod[k].w));
@@ -2915,15 +2903,16 @@ static Hit trace(thread const Terrain& tr, float3 o, float3 d, float tMax, int m
         // it); a ray passing over it moves on as a skip would. A ray above the column never needs its gaps, which lie
         // at least two voxels under its top: coarse levels read them only for a ray inside.
         float wm = morphAt(tr, k, (float2(lc) + 0.5) * s);
-        float2 e2;
-        float3 col = columnMorphTrace(tr, k, lc, wm, yA, e2);
+        float3 col = columnMorphW(tr, k, lc, wm);
         float H = col.x, gl = col.y, gh = col.z;
         bool inGap = yA >= gl && yA < gh;
-        // Coarse giant columns carry a second gap below the principal one (cg .ba).
-        if (yA >= e2.x && yA < e2.y) { inGap = true; gl = e2.x; gh = e2.y; }
-        if (!inGap && k == 0 && gh > gl && yA < gl) {
-            float4 e = extraGaps(tr.gx.read(uint2(lc)));
-            if (wm > 0.0) { e.xy = morphGap2(e.xy, parentGap2(tr, 0, lc), wm); e.w = mix(e.w, e.z, wm); }
+        // Under the principal gap: the 1-voxel map's extra gaps, a coarse giant column's air under its crown.
+        if (!inGap && k <= GAP2_LEVELS && gh > gl && yA < gl) {
+            float4 e;
+            if (k == 0) {
+                e = extraGaps(tr.gx.read(uint2(lc)));
+                if (wm > 0.0) { e.xy = morphGap2(e.xy, parentGap2(tr, 0, lc), wm); e.w = mix(e.w, e.z, wm); }
+            } else e = float4(secondGapW(tr, k, lc, wm), 0, 0);
             bool g1 = yA >= e.x && yA < e.y, g2 = yA >= e.z && yA < e.w;
             inGap = g1 || g2;
             gl = g1 ? e.x : e.z;
@@ -3354,6 +3343,80 @@ static inline float megaWall(thread const Terrain& tr, float2 w) {
     return smoothstep(190.0, 270.0, mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y));
 }
 
+// A giant's bark, leaves or vines (surfaceAt), apart from the ground's shading: none of the ground's tones apply, and
+// kept out of line the terrain's own path does not carry its state.
+static Surface giantSurface(thread const Terrain& tr, Surface s, int k, int3 v, int3 n, float2 uv, float fp, float2 wq,
+                                   float wy, float3 col, uint gsb, float gLoc, Giant gi, float cs, int2 mapOrigin, uint seed) {
+    float y = float(v.y);
+    s.autumn = 0.0;
+    float runLo = gLoc, runHi = col.x;
+    int gm = GM_WOOD;
+    if (k == 0) {
+        float4 e = extraGaps(tr.gx.read(uint2(clamp(v.xz, int2(0), int2(tr.size - 1)))));
+        float3 g0 = float3(e.z, e.x, col.y), g1 = float3(e.w, e.y, col.z);
+        int ri = 0, nG = 0;
+        bool found = false;
+        for (int i = 0; i < 3; i++) {
+            if (g1[i] <= g0[i]) continue;
+            nG++;
+            if (found) continue;
+            if (y >= g1[i]) { ri++; runLo = g1[i]; }
+            else { runHi = g0[i]; found = true; }
+        }
+        float leafStart = float((gsb >> 11) & 2047u);
+        int rm = ri < 3 ? int((gsb >> (22u + 2u * uint(ri))) & 3u) : GM_WOOD;
+        gm = ri == nG && y >= leafStart ? GM_LEAF : rm;
+        if (ri == nG && gm == GM_LEAF) runLo = leafStart;
+    } else {
+        float2 q = float2(v.xz * int(cs) + mapOrigin) + 0.5 * cs - gi.c;
+        bool above = col.z > col.y && y >= col.z;
+        // Bark only on the trunk; elsewhere a solid coarse column is the crown's skirt of leaves and vines.
+        gm = above || length(q) > 40.0 || (y - gi.G > gi.yT * 0.55 && length(q) > 24.0) ? GM_LEAF : GM_WOOD;
+        runLo = above ? col.z : gLoc;
+    }
+    float3 a;
+    if (gm == GM_LEAF) {
+        float kq = saturate(perlin2(wq / 31.0, seed + 601u) * 0.9 + 0.5);
+        uint pal = k == 0 ? (gsb >> 28) & 7u : giantPalette(gi.h);
+        a = pal == 2u ? mix(float3(0.024, 0.070, 0.060), float3(0.050, 0.098, 0.066), kq)
+                      : mix(float3(0.034, 0.078, 0.050), float3(0.075, 0.112, 0.042), kq);
+        // A rust flush drifts over part of the crown, strongest on its upper leaves.
+        if (pal == 3u) a = mix(a, float3(0.115, 0.062, 0.030), 0.7 * smoothstep(0.05, 0.45, perlin2(wq / 23.0, seed + 604u) + 0.25 * saturate((y - runLo) / max(runHi - runLo, 1.0))));
+        int2 tx = int2(floor(uv * 16.0));
+        int3 tk = n.y != 0 ? int3(v.x * 16 + tx.x, v.y * 2 + max(n.y, 0), v.z * 16 + tx.y)
+                : n.x != 0 ? int3(v.x * 2 + max(n.x, 0), v.y * 16 + tx.y, v.z * 16 + tx.x)
+                           : int3(v.x * 16 + tx.x, v.y * 16 + tx.y, v.z * 2 + max(n.z, 0));
+        uint th = hash3i(tk, seed + 94u);
+        float tex = hashf(th) < 0.35 ? 0.72 : 1.0 + 0.12 * hashf(pcg(th));
+        a *= mix(tex, 0.92, smoothstep(0.015, 0.04, fp));
+        a *= mix(0.62, 1.18, saturate((y - runLo) / max(runHi - runLo - 1.0, 1.0)));
+        s.mat = 1;
+        s.canopy = 1.0;
+    } else if (gm == GM_VINE) {
+        a = float3(0.036, 0.050, 0.028) * (0.85 + 0.3 * hashf(hash2i(v.xz, seed + 602u)));
+        s.mat = 1;
+        s.canopy = mix(1.0, 0.75, smoothstep(6.0, 80.0, col.x - y));
+    } else {
+        // Bark in vertical ridges, mossed where it faces up and low down.
+        a = float3(0.115, 0.098, 0.082);
+        float fade = 1.0 - smoothstep(0.1, 0.5, fp);
+        if (fade > 0.0) a *= 1.0 + 0.40 * fade * perlin3(float3(wq.x / 1.6, wy / 12.0, wq.y / 1.6), seed + 600u);
+        float moss = saturate((n.y > 0 ? 0.75 : 0.05) + 0.6 * perlin3(float3(wq.x, wy * 0.7, wq.y) / 6.0, seed + 603u)
+                              - 0.5 * smoothstep(gLoc + 15.0, gLoc + 140.0, wy));
+        a = mix(a, float3(0.062, 0.092, 0.040), moss);
+        s.mat = 2;
+        s.canopy = mix(1.0, 0.75, smoothstep(6.0, 80.0, col.x - y));
+    }
+    s.albedo = a;
+    s.tread = a;
+    s.face = a;
+    s.H = runHi;
+    s.pale = 0;
+    s.slope = 0;
+    s.level = 0;
+    return s;
+}
+
 // Surface of level k's column v (xz in level cells) on face n; uv is the face position in [0, 1) of the column.
 // Coarse columns are s voxels wide but still unit voxels tall, and carry no structures.
 // lite: seen in rippled water, so detail finer than the ripples' blur is shaded at its mean.
@@ -3444,6 +3507,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     float wy = n.y != 0 ? float(v.y + max(n.y, 0)) : float(v.y) + uv.y;
     float nb = n.x < 0 ? hx0 : n.x > 0 ? hx1 : n.z < 0 ? hz0 : hz1;
     s.riser = n.y == 0 ? H - nb : 0.0;
+    if (gWood) return giantSurface(tr, s, k, v, n, uv, fp, wq, wy, col, gsb, gLoc, gi, cs, mapOrigin, seed);
     Climate c = climateL(tr, k, (float2(v.xz) + 0.5) * cs);
     float desert = desertAmount(c);
     // Painted-hill beds belong to low mounds; on the great walls their 11-voxel bands would read as stripes.
@@ -3625,7 +3689,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         leaf *= mix(0.85, 1.15, saturate((float(v.y) - leafLo) / max(col.x - leafLo - 1.0, 1.0)));
         s.albedo = leaf;
         s.tread = leaf;
-            s.H = col.x;
+        s.H = col.x;
         s.mat = 1;
         s.canopy = 1.0;
     } else if (tree && float(v.y) >= col.y) {
@@ -3641,74 +3705,6 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         s.canopy = 1.0;
     }
     if (giant && !gWood && col.x > gLoc + 4.0) s.canopy = 0.7;
-    if (gWood) {
-        float y = float(v.y);
-        float runLo = gLoc, runHi = col.x;
-        int gm = GM_WOOD;
-        if (k == 0) {
-            float4 e = extraGaps(tr.gx.read(uint2(clamp(v.xz, int2(0), int2(tr.size - 1)))));
-            float3 g0 = float3(e.z, e.x, col.y), g1 = float3(e.w, e.y, col.z);
-            int ri = 0, nG = 0;
-            bool found = false;
-            for (int i = 0; i < 3; i++) {
-                if (g1[i] <= g0[i]) continue;
-                nG++;
-                if (found) continue;
-                if (y >= g1[i]) { ri++; runLo = g1[i]; }
-                else { runHi = g0[i]; found = true; }
-            }
-            float leafStart = float((gsb >> 11) & 2047u);
-            int rm = ri < 3 ? int((gsb >> (22u + 2u * uint(ri))) & 3u) : GM_WOOD;
-            gm = ri == nG && y >= leafStart ? GM_LEAF : rm;
-            if (ri == nG && gm == GM_LEAF) runLo = leafStart;
-        } else {
-            float2 q = float2(v.xz * int(cs) + mapOrigin) + 0.5 * cs - gi.c;
-            bool above = col.z > col.y && y >= col.z;
-            // Bark only on the trunk; elsewhere a solid coarse column is the crown's skirt of leaves and vines.
-            gm = above || length(q) > 40.0 || (y - gi.G > gi.yT * 0.55 && length(q) > 24.0) ? GM_LEAF : GM_WOOD;
-            runLo = above ? col.z : gLoc;
-        }
-        float3 a;
-        if (gm == GM_LEAF) {
-            float kq = saturate(perlin2(wq / 31.0, seed + 601u) * 0.9 + 0.5);
-            uint pal = k == 0 ? (gsb >> 28) & 7u : giantPalette(gi.h);
-            a = pal == 2u ? mix(float3(0.024, 0.070, 0.060), float3(0.050, 0.098, 0.066), kq)
-                          : mix(float3(0.034, 0.078, 0.050), float3(0.075, 0.112, 0.042), kq);
-            // A rust flush drifts over part of the crown, strongest on its upper leaves.
-            if (pal == 3u) a = mix(a, float3(0.115, 0.062, 0.030), 0.7 * smoothstep(0.05, 0.45, perlin2(wq / 23.0, seed + 604u) + 0.25 * saturate((y - runLo) / max(runHi - runLo, 1.0))));
-            int2 tx = int2(floor(uv * 16.0));
-            int3 tk = n.y != 0 ? int3(v.x * 16 + tx.x, v.y * 2 + max(n.y, 0), v.z * 16 + tx.y)
-                    : n.x != 0 ? int3(v.x * 2 + max(n.x, 0), v.y * 16 + tx.y, v.z * 16 + tx.x)
-                               : int3(v.x * 16 + tx.x, v.y * 16 + tx.y, v.z * 2 + max(n.z, 0));
-            uint th = hash3i(tk, seed + 94u);
-            float tex = hashf(th) < 0.35 ? 0.72 : 1.0 + 0.12 * hashf(pcg(th));
-            a *= mix(tex, 0.92, smoothstep(0.015, 0.04, fp));
-            a *= mix(0.62, 1.18, saturate((y - runLo) / max(runHi - runLo - 1.0, 1.0)));
-            s.mat = 1;
-            s.canopy = 1.0;
-        } else if (gm == GM_VINE) {
-            a = float3(0.036, 0.050, 0.028) * (0.85 + 0.3 * hashf(hash2i(v.xz, seed + 602u)));
-            s.mat = 1;
-            s.canopy = mix(1.0, 0.75, smoothstep(6.0, 80.0, col.x - y));
-        } else {
-            // Bark in vertical ridges, mossed where it faces up and low down.
-            a = float3(0.115, 0.098, 0.082);
-            float fade = 1.0 - smoothstep(0.1, 0.5, fp);
-            if (fade > 0.0) a *= 1.0 + 0.40 * fade * perlin3(float3(wq.x / 1.6, wy / 12.0, wq.y / 1.6), seed + 600u);
-            float moss = saturate((n.y > 0 ? 0.75 : 0.05) + 0.6 * perlin3(float3(wq.x, wy * 0.7, wq.y) / 6.0, seed + 603u)
-                                  - 0.5 * smoothstep(gLoc + 15.0, gLoc + 140.0, wy));
-            a = mix(a, float3(0.062, 0.092, 0.040), moss);
-            s.mat = 2;
-            s.canopy = mix(1.0, 0.75, smoothstep(6.0, 80.0, col.x - y));
-        }
-        s.albedo = a;
-        s.tread = a;
-        s.face = a;
-        s.H = runHi;
-        s.pale = 0;
-        s.slope = 0;
-        s.level = 0;
-    }
     if (built && float(v.y) >= base) {
         uint sb = st.read(uint2(clamp(v.xz, int2(0), int2(tr.size - 1)))).r;
         int mat = int(sb & 15u);
@@ -4886,7 +4882,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         c *= 0.35 + 0.9 * lit;
         if (floor(h0 / 100.0) != floor(hx / 100.0) || floor(h0 / 100.0) != floor(hz / 100.0)) c *= 0.6;
         // Gaps (overhangs, caves, bridges) in magenta.
-        if (k <= GAP_LEVELS) { float2 gp = k <= GAP2_LEVELS ? cg.read(uint2(ci & (COARSE_N - 1)), uint(k - 1)).rg : cg2.read(uint2(ci & (COARSE_N - 1)), uint(k - 1 - GAP2_LEVELS)).rg; if (gp.y > gp.x) c = float3(1, 0, 1); }
+        if (k <= GAP_LEVELS) { float2 gp = cg.read(uint2(ci & (COARSE_N - 1)), uint(k - 1)).rg; if (gp.y > gp.x) c = float3(1, 0, 1); }
         float2 wc = cell * cs;
         // Forest provinces: jungle warm, old growth cool; giants white.
         float2 pv = provincesBaked(pvTex, wc);
