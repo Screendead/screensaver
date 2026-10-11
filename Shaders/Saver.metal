@@ -1967,8 +1967,18 @@ static inline float3 autumnLeaf(float2 w, float birch, uint seed) {
 // with a slow horizontal warp, so a layer runs continuously across neighbouring columns and around canyon walls.
 // Bed edges widen and fine terms fade with the pixel footprint fp (voxels per pixel).
 // `wall` (0..1) marks the great walls of mega relief, whose rock reads as formations from foot to rim.
-static inline float3 strataTone(float y, float2 w, uint seed, float desertAmt, float fp, float wall = 0.0) {
-    float yd = y + 1.2 * perlin2(w / 140.0, seed + 24u) + 0.3 * perlin2(w / 30.0, seed + 25u);
+// Formation tones (cap rock, wall rock, shale, buff) by index. Selects, not a local array: indexing one per pixel puts
+// it in scratch memory, which costs more than all the noise around it.
+static inline float3 formationWarm(int i) {
+    return i == 0 ? float3(0.62, 0.56, 0.47) : i == 1 ? float3(0.55, 0.31, 0.21) : i == 2 ? float3(0.34, 0.31, 0.30) : float3(0.60, 0.47, 0.33);
+}
+static inline float3 formationCool(int i) {
+    return i == 0 ? float3(0.48, 0.47, 0.44) : i == 1 ? float3(0.27, 0.28, 0.31) : i == 2 ? float3(0.42, 0.36, 0.29) : float3(0.20, 0.21, 0.24);
+}
+
+// lite (reflections): rippled water blurs a 30-voxel dip wobble of a fraction of a voxel away.
+static inline float3 strataTone(float y, float2 w, uint seed, float desertAmt, float fp, float wall = 0.0, bool lite = false) {
+    float yd = y + 1.2 * perlin2(w / 140.0, seed + 24u) + (lite ? 0.0 : 0.3 * perlin2(w / 30.0, seed + 25u));
     // Beds of uneven thickness (the phase runs faster and slower up the face) with soft contacts: an even, hard-edged
     // 16-voxel zebra reads as posterised banding on a tall face.
     float k = 0.5 + 0.5 * sin(yd * 0.38 + 5.0 * perlin2(float2(yd / 41.0, 0.27), seed + 39u)
@@ -1985,19 +1995,19 @@ static inline float3 strataTone(float y, float2 w, uint seed, float desertAmt, f
     if (fz > 0.0) {
         float f = saturate(perlin2(float2(yd / 380.0 + 0.6 * perlin2(w / 2600.0, seed + 29u), 0.13), seed + 30u) * 0.8 + 0.5) * 3.0;
         float fi = min(floor(f), 2.0), ff = smoothstep(0.35, 0.65, f - fi);
-        const float3 warm[4] = { float3(0.62, 0.56, 0.47), float3(0.55, 0.31, 0.21), float3(0.34, 0.31, 0.30), float3(0.60, 0.47, 0.33) };
-        const float3 cool[4] = { float3(0.48, 0.47, 0.44), float3(0.27, 0.28, 0.31), float3(0.42, 0.36, 0.29), float3(0.20, 0.21, 0.24) };
         float wm = saturate(desertAmt + 0.5);
-        float3 fa = mix(cool[int(fi)], warm[int(fi)], wm), fb = mix(cool[int(fi) + 1], warm[int(fi) + 1], wm);
+        float3 fa = mix(formationCool(int(fi)), formationWarm(int(fi)), wm), fb = mix(formationCool(int(fi) + 1), formationWarm(int(fi) + 1), wm);
         base = mix(base, mix(fa, fb, ff), 0.55 * fz);
         // Weathering: stains and lichen in broad drifts, so a great face never reads as one flat grey plane. Taken in
         // the face's own plane (across it and up it), never by ground position alone, which would streak a wall
         // from foot to rim.
         float along = w.x + w.y;
         float st = perlin2(float2(along / 80.0, yd / 45.0), seed + 34u)
-                 + 0.5 * perlin2(float2(along / 26.0, yd / 17.0), seed + 35u) * (1.0 - smoothstep(1.0, 4.0, fp));
+                 + (fp < 4.0 ? 0.5 * perlin2(float2(along / 26.0, yd / 17.0), seed + 35u) * (1.0 - smoothstep(1.0, 4.0, fp)) : 0.0);
         base *= 1.0 + 0.22 * fz * st;
     }
+    // Past here every term has faded to its mean.
+    if (fp >= 1.8) return base;
 
     float yb = yd / 2.4;
     float bi = floor(yb), bf = yb - bi;
@@ -2022,16 +2032,19 @@ static inline float2 paintedLateral(float2 w, uint seed) {
     return float2(14.0 * perlin2(w / 520.0, seed + 114u) + 1.5 * perlin2(w / 90.0, seed + 115u), 0.35 * perlin2(w / 900.0, seed + 118u));
 }
 
+static inline float3 paintedPal(int i) {
+    return i == 0 ? float3(0.21, 0.19, 0.18) : i == 1 ? float3(0.43, 0.24, 0.17) : i == 2 ? float3(0.53, 0.41, 0.26)
+         : i == 3 ? float3(0.53, 0.47, 0.39) : float3(0.45, 0.40, 0.40);
+}
+
 // `lat` is the column's (dip offset, lateral facies shift) from paintedLateral.
 static inline float3 paintedTone(float y, float2 lat, uint seed, float fp) {
     float yd = y + lat.x;
     float v = perlin2(float2(yd / 11.0, 0.37), seed + 116u) + (fp < 1.8 ? 0.3 * perlin2(float2(yd / 4.0, 0.71), seed + 117u) * (1.0 - smoothstep(0.6, 1.8, fp)) : 0.0) + lat.y;
     float t = saturate(v * 0.75 + 0.5) * 4.0;
     float i = min(floor(t), 3.0), f = t - i;
-    const float3 pal[5] = { float3(0.21, 0.19, 0.18), float3(0.43, 0.24, 0.17), float3(0.53, 0.41, 0.26),
-                            float3(0.53, 0.47, 0.39), float3(0.45, 0.40, 0.40) };
     float e = clamp(fp * 0.5, 0.12, 0.5);
-    return mix(pal[int(i)], pal[int(i) + 1], smoothstep(0.5 - e, 0.5 + e, f));
+    return mix(paintedPal(int(i)), paintedPal(int(i) + 1), smoothstep(0.5 - e, 0.5 + e, f));
 }
 
 // Wind ripples on sand. Crests are level sets of a Perlin-warped wind field, so they bend and pinch across a dune,
@@ -2073,8 +2086,10 @@ static inline float megaWall(thread const Terrain& tr, float2 w) {
 
 // Surface of level k's column v (xz in level cells) on face n; uv is the face position in [0, 1) of the column.
 // Coarse columns are s voxels wide but still unit voxels tall, and carry no structures.
+// lite: seen in rippled water, so detail finer than the ripples' blur is shaded at its mean.
 static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device const Site* sites, device const float4* lampState,
-                         int k, int3 v, int3 n, float2 uv, float fp, float fpA, float3 p, uint seed, float time) {
+                         int k, int3 v, int3 n, float2 uv, float fp, float fpA, float3 p, uint seed, float time, bool lite = false) {
+    if (lite) { fp = max(fp, 4.0); fpA = max(fpA, 4.0); }
     Surface s;
     s.slope = 0;
     s.mat = 0;
@@ -2134,7 +2149,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     bool beach = H <= SEA + 1.2;
     // Rock tone shows on side and under faces, and on high treads; a low tread never reads it.
     bool needStone = !beach && (!(n.y > 0 && !underGap) || H - SEA > 0.55 * 110.0);
-    float3 stone = needStone ? strataTone(wy, wq, seed, max(desert, rimW), fpA, wallM) : float3(0);
+    float3 stone = needStone ? strataTone(wy, wq, seed, max(desert, rimW), fpA, wallM, lite) : float3(0);
 
     float lagoon = smoothstep(0.0, 0.35, lagoonAmount(c));
     // Pale ground (sand, salt, snow) sits well below the clouds, and drifts in tone so open flats never read as one sheet.
@@ -2400,9 +2415,8 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         s.riser = n.y == 0 ? Ht - nb : 0.0;
         s.level = (sb & S_FLAT) != 0u && n.y > 0 ? 1.0 : 0.0;
         if (roof) {
-            const float3 planes[6] = { float3(0, 1, 0), float3(-0.7071, 0.7071, 0), float3(0.7071, 0.7071, 0),
-                                       float3(0, 0.7071, -0.7071), float3(0, 0.7071, 0.7071), float3(0, 1, 0) };
-            s.nrm = planes[plane];
+            s.nrm = plane == 1u ? float3(-0.7071, 0.7071, 0) : plane == 2u ? float3(0.7071, 0.7071, 0)
+                  : plane == 3u ? float3(0, 0.7071, -0.7071) : plane == 4u ? float3(0, 0.7071, 0.7071) : float3(0, 1, 0);
         }
     }
     return s;
@@ -2435,12 +2449,14 @@ static float skyVisibility(thread const Terrain& tr, int k, float2 c, float y, i
     float cs = tr.lod[k].w;
     float2 fo = float2(levelOrigin(tr, k) & (COARSE_N - 1));
     float occ = 0.0;
-    const int2 dirs[8] = { int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1), int2(1, 1), int2(-1, 1), int2(1, -1), int2(-1, -1) };
     for (int i = 0; i < 8; i += mode == 2 ? 2 : 1) {
+        // (1,0) (-1,0) (0,1) (0,-1) (1,1) (-1,1) (1,-1) (-1,-1), computed: a local table indexed in a loop of dynamic
+        // stride lives in scratch memory.
+        int2 dir = i < 2 ? int2(i == 0 ? 1 : -1, 0) : i < 4 ? int2(0, i == 2 ? 1 : -1) : int2((i & 1) == 0 ? 1 : -1, i < 6 ? 1 : -1);
         float m = 0.0;
         for (int r = mode > 0 ? 2 : 1; r <= (mode > 0 ? 2 : 3); r++) {
             float dist = float(r * 2) * (i < 4 ? 1.0 : 1.414);
-            float2 q = c + float2(dirs[i] * (r * 2));
+            float2 q = c + float2(dir * (r * 2));
             float rise = (k == 0 ? tr.hx.sample(bl, q * inv, level(0)).r
                                  : tr.ch.sample(blr, (q / cs + fo) / float(COARSE_N), uint(k - 1), level(0)).r) - y;
             m = max(m, rise / sqrt(rise * rise + dist * dist));
@@ -2533,6 +2549,7 @@ struct Ctx {
     texture2d<float> slowTex;
     float4 slowInfo;
     uint tiles;                   // haze lamps (bits 0-15) and smoke plumes (16-27) that may touch this pixel's screen tile
+    bool inWater;                 // shading what rippled water reflects: detail under the ripples' blur at its mean
 };
 
 // Baked fine cloud field where it covers q, else evaluated.
@@ -2682,7 +2699,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, int shadows)
     float fp = h.t * x.pixelAngle; // voxels per pixel
     // Footprint stretched across a grazing face, for detail that must fade before it aliases along the view.
     float fpA = fp / max(abs(dot(n, d)), 0.15);
-    Surface s = surfaceAt(x.tr, x.st, x.sites, x.lampState, k, h.voxel, h.normal, uv, fp, fpA, p, x.seed, x.time);
+    Surface s = surfaceAt(x.tr, x.st, x.sites, x.lampState, k, h.voxel, h.normal, uv, fp, fpA, p, x.seed, x.time, x.inWater);
     // Prefilter: from ~1/10 voxel per pixel, relax AO and shadows and give risers their tread colour, so
     // distant stairs read as contour bands, not moire.
     float wf = smoothstep(0.025, 0.20, fp);
@@ -3432,13 +3449,15 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         if (x.quality > 0.5 && (int(f.shadow.y) & 4) == 0) {
             // Rippled reflections of water past 300 trace from the 2-voxel ring: its far shore reads the same, at half
             // the steps.
-            Hit rh = trace(x.tr, wp + float3(0, 0.02, 0), r, x.tr.rmax, 260, max(wl, tw > 300.0 ? 1 : 0));
+            Hit rh = trace(x.tr, wp + float3(0, 0.02, 0), r, x.tr.rmax, 260, max(wl, tw > 600.0 ? 2 : tw > 300.0 ? 1 : 0));
             // Shadowed: unshadowed, a sun-facing wall in the shade of the far rim mirrors as a pale streak.
             if (rh.hit) {
                 open = 0.0;
                 // Land the haze all but hides needs no shading.
-                float T = fogTransmittance(x, wp, r, rh.t);
-                refl = applyFogT(x, T < 0.01 || (x.prof & 8) ? float3(0.0) : shadeL(x, wp, r, rh, x.shadowMode == 1.0 ? 2 : 1), wp, r, T);
+                float T = fogTransmittance(x, wp, r, rh.t, 2);
+                Ctx xw = x;
+                xw.inWater = true;
+                refl = applyFogT(x, T < 0.01 || (x.prof & 8) ? float3(0.0) : shadeL(xw, wp, r, rh, x.shadowMode == 1.0 ? 2 : 1), wp, r, T);
             } else {
                 refl = softCloudSky(x, wp, r);
             }
