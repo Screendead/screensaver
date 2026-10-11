@@ -6337,16 +6337,19 @@ static float3 shadeL(thread const Ctx& x, thread const Light& L, float3 o, float
     return shade(x, L, o, d, h, shadows, inWater);
 }
 
-// Converges on the actual sky colour as fog thickens (T -> 0), so fogged land meets the sky with no seam.
-static inline float3 fogColor(thread const Ctx& x, float3 d, float T) {
+// Converges on the actual sky colour as fog thickens (T -> 0), so fogged land meets the sky with no seam (less the
+// land's solid floor, which fades out toward the world's edge).
+static inline float3 fogColor(thread const Ctx& x, float3 d, float T, float solid = 0.0) {
     // At night the sky's horizon gradient is mirrored below it, so far land and sea dim smoothly downward.
     float y = max(d.y, -d.y * x.L.night);
     float3 c = skyColor(float3(d.x, mix(y, y * 0.5 + 0.12, T), d.z), x.L, false, x.seed, x.time);
     // Aerial colour cools away from the sun so far ridges separate from the sky.
     float away = saturate(dot(normalize(d.xz + 1e-5), normalize(x.L.sun.xz + 1e-5)) * 0.5 + 0.5);
     float3 cool = mix(float3(0.80, 0.82, 0.95), float3(0.52, 0.55, 0.88), x.L.gold);
-    return c * mix(float3(1.0), mix(cool, float3(1.0), away * away), T);
+    return c * mix(float3(1.0), mix(cool, float3(1.0), away * away), T) * mix(float3(1.0), cool * 0.9, solid * (1.0 - T));
 }
+
+constant float LAND_SOLID = 0.5;
 
 // Share of the lowland air haze left at height y (Sources/Sight.swift ports it).
 static inline float airAloft(float y) { return exp(-max(y - 120.0, 0.0) / 400.0); }
@@ -6393,16 +6396,22 @@ static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, 
     return exp(-((heightTerm + air + mist) * clear + 6.0 * smoothstep(x.tr.fadeStart, x.tr.rmax, r)));
 }
 
-static float3 applyFogT(thread const Ctx& x, float3 col, float3 o, float3 d, float T) {
+// solid: land, which even fully hazed stays a shade darker and cooler than the sky behind it, so a far range or a
+// tepui's upper wall reads as a solid layer and not a cut-out of the sky; 0 at the world's edge, which goes to sky.
+static float3 applyFogT(thread const Ctx& x, float3 col, float3 o, float3 d, float T, float solid = 0.0) {
     // Thin haze in-scatters less than the full horizon radiance; only thick fog converges on the sky.
     // Forward scatter fades out above the horizon as the sky's does, so fully hazed land matches the sky behind it.
     float scatter = min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night) * mix(1.0, smoothstep(0.1, 0.0, d.y), smoothstep(0.5, 0.0, T));
-    float3 f = (fogColor(x, d, T) + x.L.keyCol * scatter) * mix(mix(0.3, 0.12, x.L.gold), 1.0, smoothstep(0.1, 0.9, 1.0 - T));
+    float3 f = (fogColor(x, d, T, solid) + x.L.keyCol * scatter) * mix(mix(0.3, 0.12, x.L.gold), 1.0, smoothstep(0.1, 0.9, 1.0 - T));
     return mix(f, col, T);
 }
 
 static float3 applyFog(thread const Ctx& x, float3 col, float3 o, float3 d, float t) {
     return applyFogT(x, col, o, d, fogTransmittance(x, o, d, t));
+}
+
+static inline float landSolid(thread const Ctx& x, float3 p) {
+    return LAND_SOLID * (1.0 - smoothstep(x.tr.fadeStart, x.tr.rmax, length(p.xz - x.tr.cam)));
 }
 
 // In-scatter of the nearest lamps' light along a ray to tEnd: the closed-form integral of 1/(r^2 + 4) - 1/(Rh^2 + 4)
@@ -6942,7 +6951,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
                 open = 0.0;
                 // Land the haze all but hides needs no shading.
                 float T = fogTransmittance(x, wp, r, rh.t, 2);
-                refl = applyFogT(x, T < 0.01 || (x.prof & 8) ? float3(0.0) : shadeL(x, x.L, wp, r, rh, x.shadowMode == 1.0 ? 2 : 1, true), wp, r, T);
+                refl = applyFogT(x, T < 0.01 || (x.prof & 8) ? float3(0.0) : shadeL(x, x.L, wp, r, rh, x.shadowMode == 1.0 ? 2 : 1, true), wp, r, T,
+                                 landSolid(x, wp + r * rh.t));
             } else {
                 refl = softCloudSky(x, wp, r);
             }
@@ -7064,7 +7074,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             }
     }
     if (f.misc2.z == 3) return float4(float3(fogTransmittance(x, o, d, tSurf)), 1);
-    if (f.misc2.z != 2) col = Tfog >= 0.0 ? applyFogT(x, col, o, d, Tfog) : applyFog(x, col, o, d, tSurf);
+    if (f.misc2.z != 2) col = Tfog >= 0.0 ? applyFogT(x, col, o, d, Tfog, landSolid(x, o + d * h.t)) : applyFog(x, col, o, d, tSurf);
     // A summit above the cloud base is seen through the slab in front of it.
     if (!(x.prof & 32) && !water && h.hit && o.y < CLOUD_Y0 && o.y + d.y * h.t > CLOUD_Y0) {
         CloudSample cl = cloudSheet(x, o, d, h.t, 6);
