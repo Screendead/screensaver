@@ -918,7 +918,14 @@ static inline Col towerColumn(Col col, int2 w, uint seed, int s) {
     float2 wf = float2(w) + 0.5;
     Tower T;
     TowerGroup g;
-    if (!towerFind(wf, 0.0, seed, T, g) || !towerGroupStands(g, seed)) return col;
+    if (!towerFind(wf, 0.0, seed, T, g)) return col;
+    // Most of a member's reach is open ground, off its plinth and its rubble: those columns are let go before asking
+    // whether the group stands, which costs two terrain columns and the province fields.
+    float2 d0 = wf - T.c, f0 = float2(cos(T.th0), sin(T.th0));
+    float along = dot(d0, f0), across = abs(dot(d0, float2(-f0.y, f0.x)));
+    bool rubble = along > T.R0 * 0.9 && along < T.R0 * 2.7 && across < T.R0 * (0.8 + 0.003 * along);
+    if (!rubble && towerPlan(T, d0).reff >= T.R0 * 1.42) return col;
+    if (!towerGroupStands(g, seed)) return col;
     T.Hb = towerBase(T, seed);
     if (T.Hb > TOWER_BASE_MAX) return col;
     return towerShape(col, T, wf, s, seed);
