@@ -7142,7 +7142,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         }
         float glowAmt = smoothstep(0.03, -0.14, x.L.sun.y);
         if (glowAmt > 0.0 && !(x.prof & 128))
-            col += seaGlow(x, d, wp, ww, wl, tw, h.hit ? SEA - (o.y + d.y * h.t) : 1e3, e0, fres, glowAmt * (1.0 - salt));
+            col += seaGlow(x, d, wp, ww, wl, tw, h.hit ? SEA - (o.y + d.y * h.t) : 1e3, e0, fres, glowAmt * (1.0 - 0.7 * salt));
         tSurf = tw;
     } else if (h.hit) {
         col = lit;
