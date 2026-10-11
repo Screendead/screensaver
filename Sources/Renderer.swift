@@ -32,13 +32,37 @@ struct Frame {
     var slowCloud = SIMD4<Float>()
 }
 
-enum GPU {
-    static func library(device: MTLDevice) -> MTLLibrary? {
-        if let url = Bundle.main.url(forResource: "Saver", withExtension: "metallib"),
-           let lib = try? device.makeLibrary(URL: url) { return lib }
+// The shader library and its pipeline states, shared by the renderers of one activation (a screen each).
+final class GPU {
+    let device: MTLDevice
+    let library: MTLLibrary
+    private var compute: [String: MTLComputePipelineState] = [:]
+    private var render: [String: MTLRenderPipelineState] = [:]
+
+    init?(device: MTLDevice) {
+        self.device = device
+        if let url = Bundle.main.url(forResource: "Saver", withExtension: "metallib"), let lib = try? device.makeLibrary(URL: url) {
+            library = lib
+            return
+        }
         // Loose build: metallib next to the binary.
         let exe = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
-        return try? device.makeLibrary(URL: exe.appendingPathComponent("Saver.metallib"))
+        guard let lib = try? device.makeLibrary(URL: exe.appendingPathComponent("Saver.metallib")) else { return nil }
+        library = lib
+    }
+
+    func pipeline(_ name: String) -> MTLComputePipelineState? {
+        if let p = compute[name] { return p }
+        let p = library.makeFunction(name: name).flatMap { try? device.makeComputePipelineState(function: $0) }
+        compute[name] = p
+        return p
+    }
+
+    func pipeline(_ key: String, _ descriptor: () -> MTLRenderPipelineDescriptor) -> MTLRenderPipelineState? {
+        if let p = render[key] { return p }
+        let p = try? device.makeRenderPipelineState(descriptor: descriptor())
+        render[key] = p
+        return p
     }
 }
 
@@ -275,10 +299,9 @@ final class World {
         return false
     }
 
-    init?(device: MTLDevice, library: MTLLibrary, seed: UInt32) {
-        func pipeline(_ name: String) -> MTLComputePipelineState? {
-            library.makeFunction(name: name).flatMap { try? device.makeComputePipelineState(function: $0) }
-        }
+    init?(gpu: GPU, seed: UInt32) {
+        let device = gpu.device
+        let pipeline = gpu.pipeline as (String) -> MTLComputePipelineState?
         let sd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: World.size, height: World.size, mipmapped: false)
         sd.usage = [.shaderRead, .shaderWrite]
         sd.storageMode = .private
@@ -692,10 +715,9 @@ final class Clipmap {
     private var job: Job?
     private var completed = [Int](repeating: 0, count: Clipmap.levels)
 
-    init?(device: MTLDevice, library: MTLLibrary, seed: UInt32) {
-        func pipeline(_ name: String) -> MTLComputePipelineState? {
-            library.makeFunction(name: name).flatMap { try? device.makeComputePipelineState(function: $0) }
-        }
+    init?(gpu: GPU, seed: UInt32) {
+        let device = gpu.device
+        let pipeline = gpu.pipeline as (String) -> MTLComputePipelineState?
         func array(_ format: MTLPixelFormat, _ n: Int, mips: Bool, slices: Int = Clipmap.levels) -> MTLTexture? {
             let d = MTLTextureDescriptor()
             d.textureType = .type2DArray
@@ -979,45 +1001,42 @@ final class Renderer: NSObject, MTKViewDelegate {
         0.52 + 0.12 * sin(simTime * 0.0021 + 1.0) + 0.06 * sin(simTime * 0.0057 + 4.0)
     }
 
-    init?(device: MTLDevice, outputFormat: MTLPixelFormat, seed: UInt32, screenIndex: Int, battery: Bool) {
-        guard let queue = device.makeCommandQueue(), let lib = GPU.library(device: device) else { return nil }
-        let scene = MTLRenderPipelineDescriptor()
-        scene.vertexFunction = lib.makeFunction(name: "fullscreenVertex")
-        scene.colorAttachments[0].pixelFormat = .rgba16Float
-        let post = MTLRenderPipelineDescriptor()
-        post.vertexFunction = lib.makeFunction(name: "fullscreenVertex")
-        post.fragmentFunction = lib.makeFunction(name: "postFragment")
-        post.colorAttachments[0].pixelFormat = outputFormat
-        let taa = MTLRenderPipelineDescriptor()
-        taa.vertexFunction = lib.makeFunction(name: "fullscreenVertex")
-        taa.fragmentFunction = lib.makeFunction(name: "taaFragment")
-        taa.colorAttachments[0].pixelFormat = .rgba16Float
-        func sceneVariant(towers: Bool, bands: Bool) -> MTLRenderPipelineDescriptor {
-            let fc = MTLFunctionConstantValues()
-            var b = bands, t = towers
-            fc.setConstantValue(&b, type: .bool, index: 0)
-            fc.setConstantValue(&t, type: .bool, index: 1)
-            let d = scene.copy() as! MTLRenderPipelineDescriptor
-            d.fragmentFunction = try? lib.makeFunction(name: "sceneFragment", constantValues: fc)
+    init?(gpu: GPU, outputFormat: MTLPixelFormat, seed: UInt32, screenIndex: Int, battery: Bool) {
+        let device = gpu.device, lib = gpu.library
+        guard let queue = device.makeCommandQueue() else { return nil }
+        func fullscreen(_ fragment: MTLFunction?, _ format: MTLPixelFormat) -> MTLRenderPipelineDescriptor {
+            let d = MTLRenderPipelineDescriptor()
+            d.vertexFunction = lib.makeFunction(name: "fullscreenVertex")
+            d.fragmentFunction = fragment
+            d.colorAttachments[0].pixelFormat = format
             return d
         }
-        let sceneStates = [false, true].map { t in [false, true].compactMap { b in try? device.makeRenderPipelineState(descriptor: sceneVariant(towers: t, bands: b)) } }
+        func sceneVariant(towers: Bool, bands: Bool) -> MTLRenderPipelineState? {
+            gpu.pipeline("scene \(towers) \(bands)") {
+                let fc = MTLFunctionConstantValues()
+                var b = bands, t = towers
+                fc.setConstantValue(&b, type: .bool, index: 0)
+                fc.setConstantValue(&t, type: .bool, index: 1)
+                return fullscreen(try? lib.makeFunction(name: "sceneFragment", constantValues: fc), .rgba16Float)
+            }
+        }
+        let sceneStates = [false, true].map { t in [false, true].compactMap { b in sceneVariant(towers: t, bands: b) } }
         guard sceneStates.allSatisfy({ $0.count == 2 }),
-              let tp = try? device.makeRenderPipelineState(descriptor: taa),
-              let pp = try? device.makeRenderPipelineState(descriptor: post),
-              let cf = lib.makeFunction(name: "cloudField").flatMap({ try? device.makeComputePipelineState(function: $0) }),
-              let csf = lib.makeFunction(name: "cloudSlowField").flatMap({ try? device.makeComputePipelineState(function: $0) }),
-              let shP = lib.makeFunction(name: "bakeShadowHeight").flatMap({ try? device.makeComputePipelineState(function: $0) }),
-              let hzP = lib.makeFunction(name: "bakeHorizon").flatMap({ try? device.makeComputePipelineState(function: $0) }),
+              let tp = gpu.pipeline("taa", { fullscreen(lib.makeFunction(name: "taaFragment"), .rgba16Float) }),
+              let pp = gpu.pipeline("post \(outputFormat.rawValue)", { fullscreen(lib.makeFunction(name: "postFragment"), outputFormat) }),
+              let cf = gpu.pipeline("cloudField"),
+              let csf = gpu.pipeline("cloudSlowField"),
+              let shP = gpu.pipeline("bakeShadowHeight"),
+              let hzP = gpu.pipeline("bakeHorizon"),
               let hzB = device.makeBuffer(length: 1024 * 4, options: .storageModePrivate),
-              let pvP = lib.makeFunction(name: "bakeProvinces").flatMap({ try? device.makeComputePipelineState(function: $0) }),
-              let lampP = lib.makeFunction(name: "updateLamps").flatMap({ try? device.makeComputePipelineState(function: $0) }),
-              let lightP = lib.makeFunction(name: "bakeLights").flatMap({ try? device.makeComputePipelineState(function: $0) }),
+              let pvP = gpu.pipeline("bakeProvinces"),
+              let lampP = gpu.pipeline("updateLamps"),
+              let lightP = gpu.pipeline("bakeLights"),
               let lpos = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.maxLamps * 16, options: .storageModePrivate),
               let lstate = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.maxLamps * 16, options: .storageModePrivate),
-              let world = World(device: device, library: lib, seed: seed),
-              let clipmap = Clipmap(device: device, library: lib, seed: seed),
-              let towers = Towers(device: device, library: lib, seed: seed) else { return nil }
+              let world = World(gpu: gpu, seed: seed),
+              let clipmap = Clipmap(gpu: gpu, seed: seed),
+              let towers = Towers(gpu: gpu, seed: seed) else { return nil }
         self.device = device
         self.queue = queue
         scenePipelines = sceneStates
@@ -1098,9 +1117,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         battery && edgeRadius <= Clipmap.handoff(Clipmap.levels - 1) ? Clipmap.levels - 1 : Clipmap.levels
     }
 
-    convenience init?(view: MTKView, screen: NSScreen, seed: UInt32, screenIndex: Int, battery: Bool) {
+    convenience init?(view: MTKView, gpu: GPU, screen: NSScreen, seed: UInt32, screenIndex: Int, battery: Bool) {
         let backingScale = screen.backingScaleFactor
-        guard let device = view.device else { return nil }
         let edr = screen.maximumPotentialExtendedDynamicRangeColorComponentValue > 1
         if edr {
             view.colorPixelFormat = .rgba16Float
@@ -1111,7 +1129,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         view.framebufferOnly = true
         view.preferredFramesPerSecond = battery ? 30 : 60
-        self.init(device: device, outputFormat: view.colorPixelFormat, seed: seed, screenIndex: screenIndex, battery: battery)
+        self.init(gpu: gpu, outputFormat: view.colorPixelFormat, seed: seed, screenIndex: screenIndex, battery: battery)
         view.autoResizeDrawable = false
         screenPixels = CGSize(width: view.bounds.width * backingScale, height: view.bounds.height * backingScale)
         // postFragment gives every pixel of a cell the cell's colour, so presenting the cell grid and letting the layer
@@ -1676,8 +1694,8 @@ final class Renderer: NSObject, MTKViewDelegate {
 // Offscreen render to PNG, for checking visuals without a display.
 enum Snapshot {
     static func run(settings: Settings, path: String) {
-        guard let device = MTLCreateSystemDefaultDevice(),
-              let r = Renderer(device: device, outputFormat: .rgba8Unorm, seed: settings.seed == 0 ? 1 : settings.seed,
+        guard let device = MTLCreateSystemDefaultDevice(), let gpu = GPU(device: device),
+              let r = Renderer(gpu: gpu, outputFormat: .rgba8Unorm, seed: settings.seed == 0 ? 1 : settings.seed,
                                screenIndex: 0, battery: settings.forceBattery) else {
             FileHandle.standardError.write("renderer init failed\n".data(using: .utf8)!)
             return

@@ -132,7 +132,7 @@ final class SaverController {
         battery = settings.forceBattery || SystemState.onBattery()
         // A different seed per session keeps the world non-repeating across activations.
         let sessionSeed = settings.seed != 0 ? settings.seed : UInt32.random(in: 1...UInt32.max)
-        let device = MTLCreateSystemDefaultDevice()
+        let gpu = MTLCreateSystemDefaultDevice().flatMap { GPU(device: $0) }
 
         screenFrames = screens.map(\.frame)
         for (index, screen) in screens.enumerated() {
@@ -148,9 +148,9 @@ final class SaverController {
             window.onInput = { [weak self] in self?.dismiss() }
 
             // A screen whose renderer can't start still gets covered, in black.
-            if let device {
-                let view = MTKView(frame: CGRect(origin: .zero, size: screen.frame.size), device: device)
-                if let renderer = Renderer(view: view, screen: screen, seed: sessionSeed, screenIndex: index, battery: battery) {
+            if let gpu {
+                let view = MTKView(frame: CGRect(origin: .zero, size: screen.frame.size), device: gpu.device)
+                if let renderer = Renderer(view: view, gpu: gpu, screen: screen, seed: sessionSeed, screenIndex: index, battery: battery) {
                     renderer.timeScale = settings.timeScale
                     window.contentView = view
                     renderers.append((renderer, view))

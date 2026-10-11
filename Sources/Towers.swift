@@ -35,8 +35,9 @@ final class Towers {
     private(set) var table = [UInt8](repeating: 0, count: Towers.tableBytes)
     private(set) var tableCount = 0
 
-    init?(device: MTLDevice, library: MTLLibrary, seed: UInt32) {
-        guard let f = library.makeFunction(name: "placeTowers"), let p = try? device.makeComputePipelineState(function: f),
+    init?(gpu: GPU, seed: UInt32) {
+        let device = gpu.device
+        guard let p = gpu.pipeline("placeTowers"),
               let b = device.makeBuffer(length: Towers.grid * Towers.grid * Towers.members * Towers.recordSize, options: .storageModeShared)
         else { return nil }
         self.device = device
