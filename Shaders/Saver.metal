@@ -2782,6 +2782,17 @@ static inline float3 columnMorphWE(thread const Terrain& tr, int k, int2 c, floa
     return col;
 }
 
+// columnMorphWE for a ray at height y: a coarse column's gaps lie under its top, so a ray above it needs only the top
+// (one read rather than two).
+static inline float3 columnMorphTrace(thread const Terrain& tr, int k, int2 c, float w, float y, thread float2& e2) {
+    if (k > 0) {
+        float H = tr.ch.read(uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1)), uint(k - 1), 0).r;
+        if (w > 0.0) H = mix(H, parentH(tr, k, c), w);
+        if (y >= H) { e2 = 0.0; return float3(H, 0, 0); }
+    }
+    return columnMorphWE(tr, k, c, w, e2);
+}
+
 static inline float3 columnMorphW(thread const Terrain& tr, int k, int2 c, float w) { float2 e2; return columnMorphWE(tr, k, c, w, e2); }
 
 static inline float3 columnMorph(thread const Terrain& tr, int k, int2 c) {
@@ -2902,7 +2913,7 @@ static Hit trace(thread const Terrain& tr, float3 o, float3 d, float tMax, int m
         // at least two voxels under its top: coarse levels read them only for a ray inside.
         float wm = morphAt(tr, k, (float2(lc) + 0.5) * s);
         float2 e2;
-        float3 col = columnMorphWE(tr, k, lc, wm, e2);
+        float3 col = columnMorphTrace(tr, k, lc, wm, yA, e2);
         float H = col.x, gl = col.y, gh = col.z;
         bool inGap = yA >= gl && yA < gh;
         // Coarse giant columns carry a second gap below the principal one (cg .ba).
