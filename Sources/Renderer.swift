@@ -124,6 +124,9 @@ final class World {
         let rawGaps: MTLTexture
         let structTex: MTLTexture
         let sites: MTLBuffer
+        // PROTOTYPE band mips (bandTop in Shaders/Saver.metal), one view per mip.
+        let band: MTLTexture
+        let bandViews: [MTLTexture]
         var origin = SIMD2<Int32>(Int32.min, Int32.min)
         var globalMax: Float = 255
         var cpuHeights: [Float] = []
@@ -146,6 +149,12 @@ final class World {
             let gd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Uint, width: World.size, height: World.size, mipmapped: false)
             gd.usage = [.shaderRead, .shaderWrite]
             gd.storageMode = .private
+            let bd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Float, width: World.size, height: World.size, mipmapped: true)
+            bd.usage = [.shaderRead, .shaderWrite, .pixelFormatView]
+            bd.storageMode = .private
+            guard let bt = device.makeTexture(descriptor: bd) else { return nil }
+            band = bt
+            bandViews = (0..<bt.mipmapLevelCount).map { bt.makeTextureView(pixelFormat: .rg16Float, textureType: .type2D, levels: $0..<($0 + 1), slices: 0..<1)! }
             guard let t = device.makeTexture(descriptor: td), let x = device.makeTexture(descriptor: xd), let g = device.makeTexture(descriptor: gd),
                   let c = device.makeTexture(descriptor: cd), let st = device.makeTexture(descriptor: sd),
                   let sb = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.siteStride, options: .storageModeShared) else { return nil }
@@ -177,6 +186,9 @@ final class World {
     private let climatePipeline: MTLComputePipelineState
     private let sitePipeline: MTLComputePipelineState
     private let stampPipeline: MTLComputePipelineState
+    private let bandTopPipeline: MTLComputePipelineState
+    private let bandReducePipeline: MTLComputePipelineState
+    private let bandFlagPipeline: MTLComputePipelineState
     private let scratch: [MTLTexture]
     // Max mips 1 and 2 of the plain heights (r) and solid floors (g) for the CPU readback: the map's own mips from 1 up also bound the
     // level-1 columns, which the camera must not steer by.
@@ -195,6 +207,7 @@ final class World {
     var globalMax: Float { buffers[active].globalMax }
     var siteBuffer: MTLBuffer { buffers[active].sites }
     var structTex: MTLTexture { buffers[active].structTex }
+    var bandTex: MTLTexture { buffers[active].band }
     var sites: [SiteInfo] { buffers[active].siteList }
 
     init?(device: MTLDevice, library: MTLLibrary, seed: UInt32) {
@@ -207,6 +220,7 @@ final class World {
         guard let gen = pipeline("generateHeight"), let red = pipeline("reduceMax"), let redBase = pipeline("reduceMaxBase"), let redCpu = pipeline("reduceCpu"), let cpt = pipeline("copyTop"),
               let clean = pipeline("cleanupColumns"),
               let plant = pipeline("plantTrees"), let clim = pipeline("bakeClimate"), let place = pipeline("placeSites"), let stamp = pipeline("stampStructures"),
+              let bTop = pipeline("bandTop"), let bRed = pipeline("bandReduce"), let bFlag = pipeline("bandFlag"),
               let s0 = device.makeTexture(descriptor: sd), let s1 = device.makeTexture(descriptor: sd), let q = device.makeCommandQueue(),
               let a = Buffer(device: device), let b = Buffer(device: device) else { return nil }
         var mips: [MTLTexture] = []
@@ -231,6 +245,9 @@ final class World {
         climatePipeline = clim
         sitePipeline = place
         stampPipeline = stamp
+        bandTopPipeline = bTop
+        bandReducePipeline = bRed
+        bandFlagPipeline = bFlag
         scratch = [s0, s1]
         buffers = [a, b]
     }
@@ -313,6 +330,7 @@ final class World {
                     enc.setTexture(buf.climate, index: 0)
                     enc.setTexture(buf.levels[0], index: 1)
                     enc.setTexture(buf.gx, index: 2)
+                    enc.setTexture(buf.structTex, index: 3)
                 default:
                     enc.setComputePipelineState(climatePipeline)
                     enc.setTexture(buf.climate, index: 0)
@@ -336,15 +354,35 @@ final class World {
                 enc.dispatchThreads(MTLSize(width: World.size, height: World.size, depth: 1), threadsPerThreadgroup: tg)
                 // Scratch 0 still holds the raw columns that level 1 averages.
                 enc.setComputePipelineState(reduceBasePipeline)
+                enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
                 enc.setTexture(buf.levels[0], index: 0)
                 enc.setTexture(scratch[0], index: 1)
                 enc.setTexture(buf.levels[1], index: 2)
                 let s1 = World.size >> 1
                 enc.dispatchThreads(MTLSize(width: s1, height: s1, depth: 1), threadsPerThreadgroup: tg)
+                enc.setComputePipelineState(bandTopPipeline)
+                enc.setTexture(buf.levels[0], index: 0)
+                enc.setTexture(buf.gx, index: 1)
+                enc.setTexture(buf.bandViews[0], index: 2)
+                enc.dispatchThreads(MTLSize(width: World.size, height: World.size, depth: 1), threadsPerThreadgroup: tg)
+                enc.setComputePipelineState(bandReducePipeline)
+                for l in 1..<buf.bandViews.count {
+                    enc.setTexture(buf.bandViews[l - 1], index: 0)
+                    enc.setTexture(buf.bandViews[l], index: 1)
+                    let s = max(1, World.size >> l)
+                    enc.dispatchThreads(MTLSize(width: s, height: s, depth: 1), threadsPerThreadgroup: MTLSize(width: min(16, s), height: min(16, s), depth: 1))
+                }
                 enc.setComputePipelineState(reducePipeline)
                 for l in 2..<buf.levels.count {
                     enc.setTexture(buf.levels[l - 1], index: 0)
                     enc.setTexture(buf.levels[l], index: 1)
+                    let s = max(1, World.size >> l)
+                    enc.dispatchThreads(MTLSize(width: s, height: s, depth: 1), threadsPerThreadgroup: MTLSize(width: min(16, s), height: min(16, s), depth: 1))
+                }
+                enc.setComputePipelineState(bandFlagPipeline)
+                for l in 1..<buf.levels.count {
+                    enc.setTexture(buf.levels[l], index: 0)
+                    enc.setTexture(buf.bandViews[l], index: 1)
                     let s = max(1, World.size >> l)
                     enc.dispatchThreads(MTLSize(width: s, height: s, depth: 1), threadsPerThreadgroup: MTLSize(width: min(16, s), height: min(16, s), depth: 1))
                 }
@@ -460,7 +498,7 @@ final class Clipmap {
     let cover: MTLTexture    // r8Unorm array: canopy cover
     let climate: MTLTexture  // rgba16Float array at half resolution
     // Must match GAP_LEVELS in Shaders/Saver.metal: levels 1...gapLevels carry one gap per column.
-    static let gapLevels = 3
+    static let gapLevels = 4
     let gaps: MTLTexture     // rg16Float array, one slice per level up to gapLevels: the column's gap (lo, hi)
     private let gapViews: [MTLTexture]
     private let heightViews: [[MTLTexture]]
@@ -491,7 +529,7 @@ final class Clipmap {
             return device.makeTexture(descriptor: d)
         }
         guard let h = array(.r16Float, Clipmap.size, mips: true), let v = array(.r8Unorm, Clipmap.size, mips: false),
-              let g = array(.rg16Float, Clipmap.size, mips: false, slices: Clipmap.gapLevels),
+              let g = array(.rgba16Float, Clipmap.size, mips: false, slices: Clipmap.gapLevels),
               let c = array(.rgba16Float, Clipmap.size / 2, mips: false),
               let gen = pipeline("generateCoarse"), let red = pipeline("reduceMaxRegion"), let par = pipeline("reduceMaxParent") else { return nil }
         func slice(_ t: MTLTexture, _ k: Int, _ m: Int) -> MTLTexture? {
@@ -1063,6 +1101,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentTexture(world.maxTex, index: 12)
             enc.setFragmentTexture(world.gapTex, index: 13)
             enc.setFragmentTexture(clipmap.gaps, index: 14)
+            enc.setFragmentTexture(world.bandTex, index: 15)
             enc.setFragmentBuffer(lampPos, offset: 0, index: 2)
             enc.setFragmentBuffer(lampState, offset: 0, index: 3)
             enc.setFragmentBytes(&hazeRefs, length: 128, index: 4)

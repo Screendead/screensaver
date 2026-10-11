@@ -600,6 +600,287 @@ static inline float birchAmount(float2 w, uint seed) {
     return smoothstep(0.22, 0.38, perlin2((w + seedOffset(seed)) / 110.0, seed + 95u));
 }
 
+// MARK: - Giant trees (PROTOTYPE: one hard-coded Hometree; see scratchpad trees_design.md)
+
+constant float2 PROTO_GIANT = float2(-330.0, 250.0);
+constant uint PROTO_SEED = 606u;
+// Ground at the axis (the giant's parts are placed from it; roots and flanges meet each column's own ground).
+constant float PROTO_G = 28.0;
+constant float GIANT_REACH = 210.0;
+constant float GIANT_A = -4000.0;
+constant uint ST_GIANT = 1u << 31;
+constant uint GAP_GIANT = 2u;
+constant bool BAND_SKIP = true;
+constant int GIANT_LIMBS = 12;
+constant int GIANT_FLANGES = 9;
+constant int GM_WOOD = 0, GM_LEAF = 1, GM_VINE = 2;
+
+struct Giant { float2 c; float G; uint h; float yT; };
+
+static inline bool giantNear(float2 w, uint seed, float pad) {
+    return seed == PROTO_SEED && length_squared(w - PROTO_GIANT) < (GIANT_REACH + pad) * (GIANT_REACH + pad);
+}
+
+static inline Giant protoGiant(uint seed) {
+    Giant g;
+    g.c = PROTO_GIANT;
+    g.h = pcg(seed + 777u);
+    g.G = PROTO_G;
+    g.yT = 235.0;
+    return g;
+}
+
+struct GLimb { float3 p0, p1, p2; float r0, r1; float L; };
+
+static inline GLimb giantLimb(thread const Giant& g, int i) {
+    uint hi = pcg(g.h + 1000u + uint(i) * 131u);
+    float f = (float(i) + 0.5) / float(GIANT_LIMBS);
+    float y0 = g.yT * mix(0.42, 0.98, f) + 12.0 * (hashf(hi) - 0.5);
+    float az = float(i) * 2.39996 + 0.5 * hashf(pcg(hi));
+    float L = mix(125.0, 62.0, f) * (0.85 + 0.3 * hashf(pcg(hi + 1u)));
+    float2 dir = float2(cos(az), sin(az)), perp = float2(-dir.y, dir.x);
+    float bend = (hashf(pcg(hi + 2u)) - 0.5) * 0.5;
+    GLimb l;
+    l.p0 = float3(dir * 8.0, y0).xzy;
+    l.p1 = float3(dir * L * 0.45 + perp * L * bend * 0.4, y0 + L * 0.34).xzy;
+    l.p2 = float3(dir * L + perp * L * bend, y0 + L * 0.30 + 6.0 * hashf(pcg(hi + 3u))).xzy;
+    l.r0 = mix(10.0, 5.5, f);
+    l.r1 = mix(2.6, 1.6, f);
+    l.L = L;
+    return l;
+}
+
+static inline float3 bez(GLimb l, float t) { return mix(mix(l.p0, l.p1, t), mix(l.p1, l.p2, t), t); }
+
+// Pad j: centre (xz relative to the axis, y absolute), radius, thickness. Each limb carries a clump at its tip, a
+// second beside it and, on the longer lower limbs, a third part way out; the last few are the crown's dome.
+constant int GIANT_PADS = GIANT_LIMBS * 3 + 4;
+
+static inline float4 giantPad(thread const Giant& g, int j, thread float& thick) {
+    if (j >= GIANT_LIMBS * 3) {
+        int d = j - GIANT_LIMBS * 3;
+        uint hd = pcg(g.h + 900u + uint(d));
+        float a = float(d) * 2.1 + hashf(hd);
+        float2 o = d == 0 ? float2(0) : float2(cos(a), sin(a)) * (26.0 + 14.0 * hashf(pcg(hd)));
+        thick = d == 0 ? 50.0 : 30.0;
+        return float4(o.x, g.G + g.yT + (d == 0 ? 36.0 : 14.0 + 10.0 * hashf(pcg(hd + 1u))), o.y, d == 0 ? 50.0 : 34.0);
+    }
+    GLimb l = giantLimb(g, j / 3);
+    int kind = j % 3;
+    uint hp = pcg(g.h + 1500u + uint(j) * 29u);
+    float3 p = kind == 1 ? bez(l, 0.62) : l.p2;
+    float R = kind == 0 ? 0.36 * l.L + 12.0 : kind == 1 ? 0.28 * l.L + 6.0 : 0.26 * l.L + 8.0;
+    thick = kind == 0 ? 22.0 + 0.12 * l.L : 16.0 + 0.08 * l.L;
+    if (kind == 1 && l.L < 95.0) R = 0.0;
+    if (kind == 2) {
+        float2 dir = normalize(l.p2.xz - l.p0.xz);
+        float side = hashf(hp) < 0.5 ? -1.0 : 1.0;
+        p.xz += float2(-dir.y, dir.x) * side * (0.30 * l.L) - dir * 0.12 * l.L;
+        p.y += 4.0 + 10.0 * hashf(pcg(hp));
+    }
+    return float4(p.x, g.G + p.y + (kind == 1 ? 3.0 : 6.0), p.z, R);
+}
+
+// Solid runs of a column at offset q from the axis (ground gl): appended as intervals, then sorted and merged.
+struct GRuns { float lo[24]; float hi[24]; int m[24]; int n; };
+
+static inline void gAdd(thread GRuns& r, float lo, float hi, int m) {
+    if (hi - lo < 0.5 || r.n >= 24) return;
+    r.lo[r.n] = lo; r.hi[r.n] = hi; r.m[r.n] = m; r.n++;
+}
+
+static inline float giantTrunkR(thread const Giant& g, float2 q, float yr) {
+    float t = saturate(yr / (g.yT + 30.0));
+    float R = mix(25.0, 8.0, t * t * (3.0 - 2.0 * t)) + 26.0 * exp(-max(yr, 0.0) / 18.0);
+    // Braided like a strangler fig's mass of roots: deep flutes that twist slowly up the trunk.
+    float th = atan2(q.y, q.x) + yr / 150.0;
+    float f = perlin3(float3(cos(th) * 2.6, sin(th) * 2.6, yr / 34.0), g.h + 5u);
+    return R * (1.0 + 0.34 * f);
+}
+
+static void giantIntervals(thread const Giant& g, float2 wq, float gl, int lod, thread GRuns& r) {
+    float2 q = wq - g.c;
+    float d = length(q);
+    float G = g.G;
+    r.n = 0;
+    // Trunk: marched up from the ground (its radius is not monotone in height once fluted).
+    if (d < 80.0) {
+        float lo = -1.0;
+        float yTop = g.yT + 34.0;
+        for (float yr = gl - G; yr < yTop; yr += 1.0) {
+            bool in = d < giantTrunkR(g, q, yr + 0.5);
+            if (in && lo < 0.0) lo = G + yr;
+            if (!in && lo >= 0.0) { gAdd(r, lo, G + yr, GM_WOOD); lo = -1.0; }
+        }
+        if (lo >= 0.0) gAdd(r, lo, G + yTop, GM_WOOD);
+    }
+    // Buttress flanges, sinuous plates falling away from the trunk, each running on as a root that arches clear of
+    // the ground and dives back in.
+    for (int i = 0; i < GIANT_FLANGES; i++) {
+        uint hi = pcg(g.h + uint(i) * 7919u);
+        float phi = (float(i) + 0.6 * hashf(hi)) * 6.2831853 / float(GIANT_FLANGES);
+        float2 dir = float2(cos(phi), sin(phi));
+        float along = dot(q, dir);
+        if (along < 8.0) continue;
+        float Lb = 40.0 + 36.0 * hashf(pcg(hi));
+        float La = 45.0 + 70.0 * hashf(pcg(hi + 1u));
+        if (along > Lb + La) continue;
+        float side = dot(q, float2(-dir.y, dir.x)) + 9.0 * perlin2(float2(along / 38.0, float(i) * 3.7), g.h + 11u) * smoothstep(10.0, 50.0, along);
+        float Hb = 30.0 + 42.0 * hashf(pcg(hi + 2u));
+        if (along < Lb) {
+            float u = saturate((along - 14.0) / (Lb - 14.0));
+            float w = mix(7.0, 2.5, u);
+            if (abs(side) < 0.5 * w) {
+                float top = G + Hb * pow(1.0 - u, 1.7) * (1.0 + 0.12 * perlin2(float2(along / 9.0, float(i)), g.h + 12u)) + 2.0;
+                gAdd(r, gl - 2.0, max(top, gl + 1.0), GM_WOOD);
+            }
+        }
+        float s = (along - Lb * 0.75) / (Lb * 0.25 + La);
+        if (s > 0.0 && s < 1.0) {
+            float rr = mix(2.8, 1.3, s);
+            if (abs(side) < rr) {
+                float arch = max(0.0, sin(s * 3.14159 * 2.0 + hashf(pcg(hi + 3u)))) * (6.0 + 10.0 * hashf(pcg(hi + 4u))) * (1.0 - s);
+                float yc = gl + arch;
+                float hh = sqrt(rr * rr - side * side);
+                gAdd(r, yc - hh, yc + hh + 0.5, GM_WOOD);
+            }
+        }
+    }
+    // Limbs, and props dropped from them to the ground like a banyan's.
+    for (int i = 0; i < GIANT_LIMBS; i++) {
+        GLimb l = giantLimb(g, i);
+        float2 a = l.p0.xz, b = l.p2.xz;
+        float2 ab = b - a;
+        float tt = saturate(dot(q - a, ab) / dot(ab, ab));
+        if (length(q - (a + ab * tt)) > l.L * 0.3 + 10.0) continue;
+        float lo = 1e9, hi = -1e9;
+        for (int k = 0; k <= 28; k++) {
+            float t = float(k) / 28.0;
+            float3 p = bez(l, t);
+            float rad = mix(l.r0, l.r1, t);
+            float dh = length(q - p.xz);
+            if (dh < rad) {
+                float hh = sqrt(rad * rad - dh * dh);
+                lo = min(lo, p.y - hh);
+                hi = max(hi, p.y + hh);
+            }
+        }
+        if (hi > lo) gAdd(r, G + lo, G + hi, GM_WOOD);
+        // Aerial roots: dropped from the limb, leaning out as they fall, thickening where they root.
+        for (int k = 0; k < 3; k++) {
+            uint hp = pcg(g.h + uint(i) * 97u + uint(k) * 13u + 400u);
+            if (hashf(hp) > 0.45 || lod >= 2) continue;
+            float t = 0.35 + 0.2 * float(k) + 0.1 * hashf(pcg(hp));
+            float3 top = bez(l, t);
+            float2 out = normalize(top.xz + 1e-3) * (4.0 + 10.0 * hashf(pcg(hp + 2u)));
+            float3 foot = float3(top.x + out.x, gl - G - 1.0, top.z + out.y);
+            float rad = 1.3 + 1.4 * hashf(pcg(hp + 1u));
+            float2 ab2 = foot.xz - top.xz;
+            float tq = saturate(dot(q - top.xz, ab2) / max(dot(ab2, ab2), 1e-3));
+            if (length(q - (top.xz + ab2 * tq)) > rad + 2.0) continue;
+            float lo2 = 1e9, hi2 = -1e9;
+            for (int m = 0; m <= 24; m++) {
+                float u = float(m) / 24.0;
+                // Straight down at first, swinging out low: a hanging root that found the ground.
+                float3 pp = float3(mix(top.x, foot.x, u * u), mix(top.y, foot.y, u), mix(top.z, foot.z, u * u));
+                float rr = rad * (1.0 + 0.8 * smoothstep(0.75, 1.0, u));
+                float dh = length(q - pp.xz);
+                if (dh < rr) {
+                    float hh = max(sqrt(rr * rr - dh * dh), 0.5 * abs(top.y - foot.y) / 24.0 + 0.5);
+                    lo2 = min(lo2, pp.y - hh);
+                    hi2 = max(hi2, pp.y + hh);
+                }
+            }
+            if (hi2 > lo2) gAdd(r, G + lo2, G + hi2, GM_WOOD);
+        }
+    }
+    // Canopy pads: broad, flat-bottomed clouds of leaves with lumpy tops, the tiers of the crown; vines hang from them.
+    float lump = 0.6 * perlin2(wq / 13.0, g.h + 20u) + 0.4 * perlin2(wq / 5.5, g.h + 21u);
+    float sag = perlin2(wq / 7.0, g.h + 22u);
+    float padBot = 1e9;
+    for (int j = 0; j < GIANT_PADS; j++) {
+        float T;
+        float4 P = giantPad(g, j, T);
+        if (P.w <= 0.0) continue;
+        float2 dq = q - P.xz;
+        float dd = length(dq);
+        if (dd > P.w * 1.3) continue;
+        float2 u2 = dq / max(dd, 1e-3);
+        float edge = P.w * (1.0 + 0.32 * perlin2(u2 * 1.8 + float(j) * 5.3, g.h + 23u) + 0.12 * perlin2(u2 * 4.5 + float(j), g.h + 24u));
+        if (dd >= edge) continue;
+        float u = dd / edge;
+        float top = P.y + T * 0.55 * sqrt(1.0 - u * u) + 7.0 * lump;
+        float bot = P.y - T * 0.40 * pow(1.0 - u * u, 0.5) + 3.0 * sag;
+        if (top > bot + 1.0) { gAdd(r, floor(bot), floor(top) + 1.0, GM_LEAF); padBot = min(padBot, floor(bot)); }
+    }
+    if (padBot < 1e8 && lod == 0) {
+        uint hv = hash2i(int2(floor(wq)), g.h + 30u);
+        float mask = smoothstep(0.0, 0.35, perlin2(wq / 19.0, g.h + 31u));
+        if (hashf(hv) < 0.035 * mask) {
+            float len = 4.0 + 30.0 * pow(hashf(pcg(hv)), 2.0);
+            gAdd(r, max(padBot - len, gl + 3.0), padBot + 1.0, GM_VINE);
+        }
+    }
+}
+
+// The column a giant makes at world column wq over ground gl: up to four solid runs (the lowest from the ground), as
+// (top, principal gap) plus two extra gaps and per-run material. False if nothing of it stands over this column.
+struct GCol { float H, gl, gh; float4 e; float leafStart; uint mats; };
+
+static bool giantColumn(thread const Giant& g, float2 wq, float gl, float tlo, float thi, thread GCol& o, int lod = 0) {
+    GRuns r;
+    giantIntervals(g, wq, gl, lod, r);
+    if (r.n == 0) return false;
+    gAdd(r, tlo, thi, GM_LEAF);
+    // Sort by start.
+    for (int i = 1; i < r.n; i++) {
+        float a = r.lo[i], b = r.hi[i];
+        int m = r.m[i];
+        int j = i - 1;
+        while (j >= 0 && r.lo[j] > a) { r.lo[j + 1] = r.lo[j]; r.hi[j + 1] = r.hi[j]; r.m[j + 1] = r.m[j]; j--; }
+        r.lo[j + 1] = a; r.hi[j + 1] = b; r.m[j + 1] = m;
+    }
+    // Merge into runs, the ground run first; gaps under two voxels close. Per run: material (leaf beats vine beats
+    // wood by covered height) and the lowest leaf.
+    float RL[8], RH[8], leafLo[8], leafH[8], vineH[8];
+    int n = 1;
+    RL[0] = 0.0; RH[0] = gl; leafLo[0] = 1e9; leafH[0] = 0; vineH[0] = 0;
+    for (int i = 0; i < r.n; i++) {
+        float a = max(r.lo[i], 0.0), b = r.hi[i];
+        if (b <= a) continue;
+        if (a <= RH[n - 1] + 2.0) RH[n - 1] = max(RH[n - 1], b);
+        else if (n < 8) { RL[n] = a; RH[n] = b; leafLo[n] = 1e9; leafH[n] = 0; vineH[n] = 0; n++; }
+        else RH[n - 1] = max(RH[n - 1], b);
+        if (r.m[i] == GM_LEAF) { leafLo[n - 1] = min(leafLo[n - 1], a); leafH[n - 1] += b - a; }
+        if (r.m[i] == GM_VINE) vineH[n - 1] += b - a;
+    }
+    if (n == 1 && RH[0] <= gl) return false;
+    // At most four runs: close the narrowest gaps.
+    while (n > 4) {
+        int best = 1;
+        float bw = 1e9;
+        for (int i = 1; i < n; i++) if (RL[i] - RH[i - 1] < bw) { bw = RL[i] - RH[i - 1]; best = i; }
+        RH[best - 1] = RH[best];
+        leafLo[best - 1] = min(leafLo[best - 1], leafLo[best]);
+        leafH[best - 1] += leafH[best];
+        vineH[best - 1] += vineH[best];
+        for (int i = best; i < n - 1; i++) { RL[i] = RL[i + 1]; RH[i] = RH[i + 1]; leafLo[i] = leafLo[i + 1]; leafH[i] = leafH[i + 1]; vineH[i] = vineH[i + 1]; }
+        n--;
+    }
+    o.H = RH[n - 1];
+    o.gl = n >= 2 ? RH[n - 2] : 0.0;
+    o.gh = n >= 2 ? RL[n - 1] : 0.0;
+    o.e = float4(n >= 3 ? RH[n - 3] : 0.0, n >= 3 ? RL[n - 2] : 0.0, n >= 4 ? RH[n - 4] : 0.0, n >= 4 ? RL[n - 3] : 0.0);
+    o.leafStart = leafLo[n - 1] < 1e8 ? max(leafLo[n - 1], RL[n - 1]) : o.H;
+    o.mats = 0u;
+    for (int i = 0; i < min(n - 1, 3); i++) {
+        float len = RH[i] - max(RL[i], i == 0 ? gl : RL[i]);
+        uint m = leafH[i] > 0.4 * len ? uint(GM_LEAF) : vineH[i] > 0.4 * len ? uint(GM_VINE) : uint(GM_WOOD);
+        o.mats |= m << (2u * uint(i));
+    }
+    return true;
+}
+
 // Grove density: a low-frequency Perlin field gated by climate; zero on sand, snow, desert and water.
 static inline float groveDensity(float2 w, float g, uint seed) {
     float2 p = w + seedOffset(seed);
@@ -620,12 +901,15 @@ static inline float groveDensity(float2 w, float g, uint seed) {
     float scrub = painted * smoothstep(fl + 3.0, fl + 0.5, g) * (1.0 - smoothstep(0.02, 0.2, saltAmount(c)))
                 * smoothstep(0.2, 0.45, perlin2(p / 60.0, seed + 113u));
     // Lone trees dot even dry grassland; groves need moisture.
-    return (0.02 * open + mix(0.32, 0.45, autumn) * dense * wet + 0.35 * scrub) * band;
+    float dens = (0.02 * open + mix(0.32, 0.45, autumn) * dense * wet + 0.35 * scrub) * band;
+    // PROTOTYPE: a jungle round the giant.
+    if (seed == PROTO_SEED) dens = max(dens, 0.62 * smoothstep(650.0, 260.0, length(w - PROTO_GIANT)) * smoothstep(SEA + 2.0, SEA + 6.0, g));
+    return dens;
 }
 
 struct Tree { bool ok; int2 c; float g; int lo; int top; int kind; };
 
-static Tree treeInCell(texture2d<float, access::read> src, texture2d<uint, access::read> gx, int2 cell, int2 origin, uint seed) {
+static Tree treeInCell(texture2d<float, access::read> src, texture2d<uint, access::read_write> gx, int2 cell, int2 origin, uint seed) {
     Tree t;
     t.ok = false;
     uint h = hash2i(cell, seed + 92u);
@@ -695,7 +979,8 @@ static inline int2 canopySpan(Tree t, int2 o) {
 // voxel; g then holds the ground height (b = g on trunks and buried canopies, b = w under a floating canopy).
 kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
                        texture2d<float, access::write> dst [[texture(1)]],
-                       texture2d<uint, access::read> gx [[texture(2)]],
+                       texture2d<uint, access::read_write> gx [[texture(2)]],
+                       texture2d<uint, access::write> st [[texture(3)]],
                        constant int4& info [[buffer(0)]],
                        constant uint& row0 [[buffer(1)]],
                        uint2 g [[thread_position_in_grid]]) {
@@ -727,6 +1012,17 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
             if (all(o == 0) && t.kind != 0) trunk = true;
         }
     float G = col.r;
+    if (giantNear(float2(wc) + 0.5, uint(info.w), 0.0)) {
+        Giant gi = protoGiant(uint(info.w));
+        GCol gc;
+        float tlo = trunk ? G : float(lo), thi = float(hi) > G ? float(hi) : 0.0;
+        if (giantColumn(gi, float2(wc) + 0.5, G, tlo, thi, gc)) {
+            dst.write(float4(gc.H, gc.gl, gc.gh, GIANT_A), gid);
+            gx.write(uint4(uint(gc.e.x), uint(gc.e.y), uint(gc.e.z) | (GAP_GIANT << 11), uint(gc.e.w)), gid);
+            st.write(uint4(ST_GIANT | uint(G) | (uint(gc.leafStart) << 11) | (gc.mats << 22), 0, 0, 0), gid);
+            return;
+        }
+    }
     if (float(hi) <= G) { dst.write(col, gid); return; }
     float leaf = max(float(lo), G);
     bool floating = !trunk && leaf > G;
@@ -750,6 +1046,43 @@ kernel void copyTop(texture2d<float, access::read> src [[texture(0)]],
                     uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
     dst.write(float4(src.read(gid).r, 0, 0, 0), gid);
+}
+
+// PROTOTYPE band mips: per cell the height band [x, y) every column in it leaves open, so a ray under a giant's crown
+// skips cells as one over the tops does. A giant column offers its tallest gap, any other column the air above it.
+kernel void bandTop(texture2d<float, access::read> src [[texture(0)]],
+                    texture2d<uint, access::read> gx [[texture(1)]],
+                    texture2d<float, access::write> dst [[texture(2)]],
+                    uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
+    float4 c = src.read(gid);
+    float2 b = float2(c.r, 4096.0);
+    if (c.a == GIANT_A) {
+        float4 e = extraGaps(gx.read(gid));
+        float2 g = c.b > c.g ? float2(c.g, c.b) : float2(0);
+        if (e.y - e.x > g.y - g.x) g = e.xy;
+        if (e.w - e.z > g.y - g.x) g = e.zw;
+        if (g.y - g.x >= 4.0) b = g;
+    }
+    dst.write(float4(b, 0, 0), gid);
+}
+
+kernel void bandReduce(texture2d<float, access::read> src [[texture(0)]],
+                       texture2d<float, access::write> dst [[texture(1)]],
+                       uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
+    uint2 s = gid * 2;
+    float2 a = src.read(s).rg, b = src.read(s + uint2(1, 0)).rg, c = src.read(s + uint2(0, 1)).rg, d = src.read(s + uint2(1, 1)).rg;
+    dst.write(float4(max(max(a.x, b.x), max(c.x, d.x)), min(min(a.y, b.y), min(c.y, d.y)), 0, 0), gid);
+}
+
+// Negates a max mip's cells whose band is a real one (under a giant's crown), after every mip is built.
+kernel void bandFlag(texture2d<float, access::read_write> mx [[texture(0)]],
+                     texture2d<float, access::read> band [[texture(1)]],
+                     uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= mx.get_width() || gid.y >= mx.get_height()) return;
+    float2 b = band.read(gid).rg;
+    if (b.y < 4000.0 && b.y - b.x >= 4.0) mx.write(float4(-abs(mx.read(gid).r)), gid);
 }
 
 kernel void reduceMax(texture2d<float, access::read> src [[texture(0)]],
@@ -1576,14 +1909,20 @@ static inline float coarseCombine(float a, float b, float c, float d, float s) {
 
 // Mip 1 of the 1-voxel map also bounds the level-1 column over it, which the morph band slides toward: the
 // four raw columns combined as coarseHeight combines them.
+static inline float3 coarseColumn(int2 cw, int k, uint seed, thread float2& g2);
+static inline float3 coarseColumn(int2 cw, int k, uint seed) { float2 g2; return coarseColumn(cw, k, seed, g2); }
+
 kernel void reduceMaxBase(texture2d<float, access::read> src [[texture(0)]],
                           texture2d<float, access::read> raw [[texture(1)]],
                           texture2d<float, access::write> dst [[texture(2)]],
+                          constant int4& info [[buffer(0)]],
                           uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
     uint2 s = gid * 2;
     float m = max(max(src.read(s).r, src.read(s + uint2(1, 0)).r), max(src.read(s + uint2(0, 1)).r, src.read(s + uint2(1, 1)).r));
     float parent = coarseCombine(raw.read(s).r, raw.read(s + uint2(1, 0)).r, raw.read(s + uint2(0, 1)).r, raw.read(s + uint2(1, 1)).r, 2.0);
+    int2 cw = (int2(s) + info.xy) >> 1;
+    if (giantNear(float2(cw * 2) + 1.0, uint(info.w), 2.0)) parent = max(parent, coarseColumn(cw, 1, uint(info.w)).x);
     dst.write(float4(max(m, parent), 0, 0, 0), gid);
 }
 
@@ -1598,15 +1937,51 @@ constant float COVER_GAIN = 2.5;
 // Levels 1 to GAP_LEVELS carry one gap per column, the carved principal gaps of their four samples: the rounded means of
 // those there are, where they overlap, under at least two voxels of roof (a coarse column hollow wherever any sample is,
 // or a recess's ragged back wall stands in it as a row of pillars). Their outline (H) ignores gaps.
-constant int GAP_LEVELS = 3;
+constant int GAP_LEVELS = 4;
 
-static inline float3 coarseColumn(int2 cw, int k, uint seed) {
+static inline float3 coarseColumn(int2 cw, int k, uint seed, thread float2& g2) {
+    g2 = 0.0;
     int s = 1 << k, off = s >> 2, hs = s >> 1;
     int2 b = cw * s + off;
     Col c0 = terrainColumn(b, seed), c1 = terrainColumn(b + int2(hs, 0), seed);
     Col c2 = terrainColumn(b + int2(0, hs), seed), c3 = terrainColumn(b + int2(hs, hs), seed);
     float H = coarseCombine(c0.h, c1.h, c2.h, c3.h, float(s));
-    if (k > GAP_LEVELS) return float3(H, 0, 0);
+    // PROTOTYPE giant: where at least two samples stand in it, the mean of their tops, of their lowest gaps (the air
+    // under the crown, the second gap) and of the tallest gap above that (between tiers, the principal one); solid
+    // where two are trunk.
+    if (giantNear(float2(b + hs / 2) + 0.5, seed, float(s))) {
+        Giant gi = protoGiant(seed);
+        float hs4[4] = { c0.h, c1.h, c2.h, c3.h };
+        int2 o4[4] = { int2(0), int2(hs, 0), int2(0, hs), int2(hs, hs) };
+        float nT = 0.0, sH = 0.0, nS = 0.0;
+        float4 sLow = 0.0, sUp = 0.0;   // (sum lo, sum hi, count, -)
+        for (int i = 0; i < 4; i++) {
+            GCol gc;
+            if (giantColumn(gi, float2(b + o4[i]) + 0.5, hs4[i], 0.0, 0.0, gc, k)) {
+                nT += 1.0;
+                sH += gc.H;
+                float2 gs[3] = { gc.e.zw, gc.e.xy, float2(gc.gl, gc.gh) };
+                int lowI = -1;
+                for (int j = 0; j < 3; j++) if (gs[j].y > gs[j].x) { lowI = j; break; }
+                if (lowI < 0) { nS += 1.0; continue; }
+                sLow += float4(gs[lowI], 1.0, 0.0);
+                float2 up = float2(0);
+                for (int j = lowI + 1; j < 3; j++) if (gs[j].y - gs[j].x > up.y - up.x) up = gs[j];
+                if (up.y > up.x) sUp += float4(up, 1.0, 0.0);
+            }
+        }
+        if (nT >= 2.0) {
+            float top = floor(sH / nT + 0.5);
+            if (k > GAP_LEVELS || nS >= 2.0 || sLow.z < 1.0) return float3(max(top, H), 0, 0);
+            float2 lowG = floor(sLow.xy / sLow.z + 0.5);
+            lowG.x = max(lowG.x, H);
+            if (lowG.y - lowG.x < 2.0 || top - lowG.y < 1.0) return float3(max(top, H), 0, 0);
+            float2 upG = sUp.z >= max(1.0, 0.5 * sLow.z) ? floor(sUp.xy / sUp.z + 0.5) : float2(0);
+            if (upG.y - upG.x >= 2.0 && upG.x >= lowG.y + 2.0 && top - upG.y >= 1.0) { g2 = lowG; return float3(top, upG); }
+            return float3(top, lowG);
+        }
+    }
+    if (k > GAP_LEVELS || k > 3) return float3(H, 0, 0);
     float n = 0, lo = 0, hi = 0, maxLo = 0, minHi = 1e9;
     if (c0.carved && c0.gh > c0.gl) { n += 1; lo += c0.gl; hi += c0.gh; maxLo = max(maxLo, c0.gl); minHi = min(minHi, c0.gh); }
     if (c1.carved && c1.gh > c1.gl) { n += 1; lo += c1.gl; hi += c1.gh; maxLo = max(maxLo, c1.gl); minHi = min(minHi, c1.gh); }
@@ -1619,7 +1994,7 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed) {
     return float3(H, lo, hi);
 }
 
-static inline float coarseHeight(int2 cw, int k, uint seed) { return coarseColumn(cw, k, seed).x; }
+static inline float coarseHeight(int2 cw, int k, uint seed) { float2 g2; return coarseColumn(cw, k, seed, g2).x; }
 
 // Writes the world cells region.xy + [0, region.zw) of level info.x into its toroidal slice (texel = cell & 2047):
 // height and canopy cover, and every second cell also the half-resolution climate texel it starts.
@@ -1634,9 +2009,10 @@ kernel void generateCoarse(texture2d<float, access::write> hOut [[texture(0)]],
     int k = info.x, s = 1 << k;
     uint seed = uint(info.y);
     int2 cw = region.xy + int2(gid);
-    float3 cc = coarseColumn(cw, k, seed);
+    float2 cc2;
+    float3 cc = coarseColumn(cw, k, seed, cc2);
     float H = cc.x;
-    if (k <= GAP_LEVELS) gOut.write(float4(cc.y, cc.z, 0, 0), uint2(cw & (COARSE_N - 1)));
+    if (k <= GAP_LEVELS) gOut.write(float4(cc.y, cc.z, cc2), uint2(cw & (COARSE_N - 1)));
     float2 centre = float2(cw * s) + 0.5 * float(s);
     // Expected share of the column under leaves: planting chance per tree cell times a mean canopy of ~13 columns.
     float cover = saturate(groveDensity(centre, H, seed) * 13.0 / float(TREE_CELL * TREE_CELL));
@@ -1734,25 +2110,31 @@ struct Terrain {
     texture2d<float> hx;         // r16Float: mip 0 the column tops, mips from 1 their maxima (the DDA's skips)
     texture2d<uint> gx;          // the 1-voxel map's extra gaps (packGaps)
     texture2d_array<float> cg;   // levels 1...GAP_LEVELS: each column's gap (lo, hi)
+    texture2d<float> hb;         // PROTOTYPE band mips (bandTop)
 };
 
 static inline int2 levelOrigin(thread const Terrain& tr, int k) { return k == 0 ? int2(0) : tr.origin >> k; }
 
 // Max height of mip-m cell mc (in the level's own aligned cell index).
 static inline float maxAt(thread const Terrain& tr, int k, int2 mc, int m) {
-    if (k == 0) return tr.hx.read(uint2(clamp(mc, int2(0), int2((tr.size >> m) - 1))), m).r;
+    if (k == 0) return abs(tr.hx.read(uint2(clamp(mc, int2(0), int2((tr.size >> m) - 1))), m).r);
     return tr.ch.read(uint2(mc & ((COARSE_N >> m) - 1)), uint(k - 1), uint(m)).r;
 }
 
 // Column (H, gapLo, gapHi, first leaf) of frame-local level cell c, unmorphed.
-static inline float4 columnL(thread const Terrain& tr, int k, int2 c) {
+// e2: a coarse giant column's second gap, below the principal one (zero elsewhere), from the same read.
+static inline float4 columnLE(thread const Terrain& tr, int k, int2 c, thread float2& e2) {
+    e2 = 0.0;
     if (k == 0) return tr.hm.read(uint2(clamp(c, int2(0), int2(tr.size - 1))), 0);
     uint2 t = uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1));
     float H = tr.ch.read(t, uint(k - 1), 0).r;
     if (k > GAP_LEVELS) return float4(H, 0, 0, 0);
-    float2 g = tr.cg.read(t, uint(k - 1)).rg;
-    return float4(H, g, 0);
+    float4 g = tr.cg.read(t, uint(k - 1));
+    e2 = g.ba;
+    return float4(H, g.rg, 0);
 }
+
+static inline float4 columnL(thread const Terrain& tr, int k, int2 c) { float2 e2; return columnLE(tr, k, c, e2); }
 
 static inline float groundL(thread const Terrain& tr, int k, int2 c) {
     if (k == 0) return groundAt(tr.hm, c, tr.size);
@@ -1796,8 +2178,9 @@ static inline float morphAt(thread const Terrain& tr, int k, float2 p) {
 // from the parent's floor where it has none), or closes from the top where the parent has none, so at the handoff the
 // level equals the next one exactly.
 // w: the morph weight (columnMorphW).
-static inline float3 columnMorphW(thread const Terrain& tr, int k, int2 c, float w) {
-    float3 col = columnL(tr, k, c).rgb;
+static inline float3 columnMorphWE(thread const Terrain& tr, int k, int2 c, float w, thread float2& e2) {
+    float3 col = columnLE(tr, k, c, e2).rgb;
+    e2.y = mix(e2.y, e2.x, w);
     if (w > 0.0) {
         col.x = mix(col.x, parentH(tr, k, c), w);
         float2 pg = parentGap(tr, k, c);
@@ -1810,6 +2193,8 @@ static inline float3 columnMorphW(thread const Terrain& tr, int k, int2 c, float
     }
     return col;
 }
+
+static inline float3 columnMorphW(thread const Terrain& tr, int k, int2 c, float w) { float2 e2; return columnMorphWE(tr, k, c, w, e2); }
 
 static inline float3 columnMorph(thread const Terrain& tr, int k, int2 c) {
     return columnMorphW(tr, k, c, morphAt(tr, k, (float2(c) + 0.5) * tr.lod[k].w));
@@ -1902,7 +2287,14 @@ static Hit trace(thread const Terrain& tr, float3 o, float3 d, float tMax, int m
         float yA = o.y + d.y * t, yB = o.y + d.y * tCell;
         if (level > 0) {
             // Mips from 1 up also bound the next level's columns, which morph-band columns rise or sink toward.
-            if (min(yA, yB) >= maxAt(tr, k, mc, level)) {
+            // On the 1-voxel map a negative max flags a cell with an open band under a giant's crown (bandFlag).
+            float mx = k == 0 ? tr.hx.read(uint2(clamp(mc, int2(0), int2((tr.size >> level) - 1))), level).r : maxAt(tr, k, mc, level);
+            bool clear = min(yA, yB) >= abs(mx);
+            if (!clear && mx < 0.0 && BAND_SKIP) {
+                float2 bd = tr.hb.read(uint2(clamp(mc, int2(0), int2((tr.size >> level) - 1))), level).rg;
+                clear = min(yA, yB) >= bd.x && max(yA, yB) < bd.y;
+            }
+            if (clear) {
                 lastAxis = tb.x < tb.y ? 0 : 2;
                 nudge = select(float2(0), sign(d.xz) * 0.01, tb <= tCell + 1e-4);
                 t = tCell;
@@ -1917,9 +2309,12 @@ static Hit trace(thread const Terrain& tr, float3 o, float3 d, float tMax, int m
         // it); a ray passing over it moves on as a skip would. A ray above the column never needs its gaps, which lie
         // at least two voxels under its top: coarse levels read them only for a ray inside.
         float wm = morphAt(tr, k, (float2(lc) + 0.5) * s);
-        float3 col = columnMorphW(tr, k, lc, wm);
+        float2 e2;
+        float3 col = columnMorphWE(tr, k, lc, wm, e2);
         float H = col.x, gl = col.y, gh = col.z;
         bool inGap = yA >= gl && yA < gh;
+        // PROTOTYPE: coarse giant columns carry a second gap below the principal one (cg .ba).
+        if (yA >= e2.x && yA < e2.y) { inGap = true; gl = e2.x; gh = e2.y; }
         if (!inGap && k == 0 && gh > gl && yA < gl) {
             float4 e = extraGaps(tr.gx.read(uint2(lc)));
             e.yw = mix(e.yw, e.xz, wm);
@@ -1982,7 +2377,7 @@ kernel void bakeHorizon(device float* out [[buffer(0)]],
     uint gid = tid.y;
     int levels = int(f.fade.z);
     Terrain tr { hm, coarse, coarse, coarse, hm, f.lod, f.mapInfo.xy, f.mapInfo.z, levels,
-                 f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, 0.0, hx, gx, cg };
+                 f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, 0.0, hx, gx, cg, hx };
     float a = (float(gid) + 0.5) * 6.2831853 / float(HORIZON_BINS);
     float2 dir = float2(sin(a), cos(a));
     float3 o = f.camPos.xyz;
@@ -2356,10 +2751,21 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     // A structure stands on this column from voxel `base` up; below it (or below its gap) is the terrain.
     float base = -col4.a;
     bool built = col4.a < 0.0 && base < col.x;
-    float H = tree ? col.y : built ? (col.z > col.y ? col.y : base) : col.x;
+    // PROTOTYPE giant: on the 1-voxel map its columns carry GIANT_A, with the ground and materials in st; further out
+    // its columns are known by distance.
+    bool giant = k == 0 ? col4.a == GIANT_A : giantNear(float2(v.xz * int(cs) + mapOrigin) + 0.5 * cs, seed, cs);
+    uint gsb = giant && k == 0 ? st.read(uint2(clamp(v.xz, int2(0), int2(tr.size - 1)))).r : 0u;
+    float gLoc = k == 0 ? float(gsb & 2047u) : 0.0;
+    Giant gi;
+    if (giant && k > 0) {
+        gi = protoGiant(seed);
+        gLoc = gi.G;
+    }
+    bool gWood = giant && float(v.y) >= gLoc;
+    float H = giant ? (gWood ? col.x : gLoc) : tree ? col.y : built ? (col.z > col.y ? col.y : base) : col.x;
     // Just under a rock gap the voxel belongs to the floor below it: its height is the gap's floor. Further down it is
     // part of the wall the column makes as a whole, which shades as one with its neighbours'.
-    if (!tree && !built && col.z > col.y && float(v.y) < col.y) {
+    if (!tree && !built && !giant && col.z > col.y && float(v.y) < col.y) {
         float seg = col.y;
         if (k == 0) {
             float4 e = extraGaps(tr.gx.read(uint2(clamp(v.xz, int2(0), int2(tr.size - 1)))));
@@ -2423,7 +2829,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     }
     // A side face looking into a rock gap (a shelter's back wall) is rock under a roof too: by its neighbours' tops it
     // would read as a low riser and take the tread colour, column by column.
-    bool underGap = !tree && !built && ((col.z > col.y && float(v.y) < col.z)
+    bool underGap = !tree && !built && !giant && ((col.z > col.y && float(v.y) < col.z)
                     || (n.y == 0 && frontCol.a == 0.0 && frontCol.b > frontCol.g && float(v.y) >= frontCol.g && float(v.y) < frontCol.b));
 
     float salt = saltAmount(c);
@@ -2585,6 +2991,69 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         }
         s.tread = s.albedo;
         s.canopy = 1.0;
+    }
+    if (giant && !gWood && col.x > gLoc + 4.0) s.canopy = 0.7;
+    if (gWood) {
+        float y = float(v.y);
+        float runLo = gLoc, runHi = col.x;
+        int gm = GM_WOOD;
+        if (k == 0) {
+            float4 e = extraGaps(tr.gx.read(uint2(clamp(v.xz, int2(0), int2(tr.size - 1)))));
+            float3 g0 = float3(e.z, e.x, col.y), g1 = float3(e.w, e.y, col.z);
+            int ri = 0, nG = 0;
+            bool found = false;
+            for (int i = 0; i < 3; i++) {
+                if (g1[i] <= g0[i]) continue;
+                nG++;
+                if (found) continue;
+                if (y >= g1[i]) { ri++; runLo = g1[i]; }
+                else { runHi = g0[i]; found = true; }
+            }
+            float leafStart = float((gsb >> 11) & 2047u);
+            gm = ri == nG ? (y >= leafStart ? GM_LEAF : GM_WOOD) : int((gsb >> (22u + 2u * uint(ri))) & 3u);
+            if (ri == nG && gm == GM_LEAF) runLo = leafStart;
+        } else {
+            float2 q = float2(v.xz * int(cs) + mapOrigin) + 0.5 * cs - gi.c;
+            bool above = col.z > col.y && y >= col.z;
+            gm = above || (y - gi.G > gi.yT * 0.55 && length(q) > 24.0) ? GM_LEAF : GM_WOOD;
+            runLo = above ? col.z : gLoc;
+        }
+        float3 a;
+        if (gm == GM_LEAF) {
+            float kq = saturate(perlin2(wq / 31.0, seed + 601u) * 0.9 + 0.5);
+            a = mix(float3(0.034, 0.078, 0.050), float3(0.075, 0.112, 0.042), kq);
+            int2 tx = int2(floor(uv * 16.0));
+            int3 tk = n.y != 0 ? int3(v.x * 16 + tx.x, v.y * 2 + max(n.y, 0), v.z * 16 + tx.y)
+                    : n.x != 0 ? int3(v.x * 2 + max(n.x, 0), v.y * 16 + tx.y, v.z * 16 + tx.x)
+                               : int3(v.x * 16 + tx.x, v.y * 16 + tx.y, v.z * 2 + max(n.z, 0));
+            uint th = hash3i(tk, seed + 94u);
+            float tex = hashf(th) < 0.35 ? 0.72 : 1.0 + 0.12 * hashf(pcg(th));
+            a *= mix(tex, 0.92, smoothstep(0.015, 0.04, fp));
+            a *= mix(0.62, 1.18, saturate((y - runLo) / max(runHi - runLo - 1.0, 1.0)));
+            s.mat = 1;
+            s.canopy = 1.0;
+        } else if (gm == GM_VINE) {
+            a = float3(0.036, 0.050, 0.028) * (0.85 + 0.3 * hashf(hash2i(v.xz, seed + 602u)));
+            s.mat = 1;
+            s.canopy = mix(1.0, 0.75, smoothstep(6.0, 80.0, col.x - y));
+        } else {
+            // Bark in vertical ridges, mossed where it faces up and low down.
+            a = float3(0.115, 0.098, 0.082);
+            float fade = 1.0 - smoothstep(0.1, 0.5, fp);
+            if (fade > 0.0) a *= 1.0 + 0.40 * fade * perlin3(float3(wq.x / 1.6, wy / 12.0, wq.y / 1.6), seed + 600u);
+            float moss = saturate((n.y > 0 ? 0.75 : 0.05) + 0.6 * perlin3(float3(wq.x, wy * 0.7, wq.y) / 6.0, seed + 603u)
+                                  - 0.5 * smoothstep(gLoc + 15.0, gLoc + 140.0, wy));
+            a = mix(a, float3(0.062, 0.092, 0.040), moss);
+            s.mat = 2;
+            s.canopy = mix(1.0, 0.75, smoothstep(6.0, 80.0, col.x - y));
+        }
+        s.albedo = a;
+        s.tread = a;
+        s.face = a;
+        s.H = runHi;
+        s.pale = 0;
+        s.slope = 0;
+        s.level = 0;
     }
     if (built && float(v.y) >= base) {
         uint sb = st.read(uint2(clamp(v.xz, int2(0), int2(tr.size - 1)))).r;
@@ -3713,6 +4182,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
                               texture2d<float> shadowNear [[texture(9)]], texture2d<float> shadowFar [[texture(10)]],
                               texture2d<float> slowTex [[texture(11)]], texture2d<float> hx [[texture(12)]],
                               texture2d<uint> gx [[texture(13)]], texture2d_array<float> cg [[texture(14)]],
+                              texture2d<float> hb [[texture(15)]],
                               device const Site* sites [[buffer(1)]], device const float4* lampPos [[buffer(2)]],
                               device const float4* lampState [[buffer(3)]], constant int4* refs [[buffer(4)]],
                               device const float4* birds [[buffer(5)]], device const float* horizon [[buffer(6)]],
@@ -3728,7 +4198,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     float gmax = f.misc.y;
     for (int k = 1; k < levels; k++) gmax = max(gmax, coarse.read(uint2(0), uint(k - 1), coarse.get_num_mip_levels() - 1).r + 1.0);
     if (int(f.shadow.y) & 2) gmax = min(gmax, 260.0);
-    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg };
+    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, hb };
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
             2.0 * tanH * f.resolution.w, f.misc.w, makeLight(f.sunDir.xyz),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
