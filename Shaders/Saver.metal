@@ -3039,7 +3039,9 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // columns, so its jogging faces light as one wall rather than striping light and dark.
     if (ov > 0.0 && h.normal.y == 0 && wf > 0.0) {
         float2 gw = rf.yz;
-        if (dot(gw, gw) > 1e-3) nl = normalize(mix(nl, normalize(float3(gw.x, 0.0, gw.y)), ov * wf));
+        // Only toward the face's own side: a hollow behind the face (a pillar standing in a cave) says nothing of it.
+        float3 nw = float3(gw.x, 0.0, gw.y) * rsqrt(max(dot(gw, gw), 1e-6));
+        if (dot(gw, gw) > 1e-3 && dot(nw, n) > 0.2) nl = normalize(mix(nl, nw, ov * wf));
     }
     if (any(s.nrm != 0.0)) nl = s.nrm;
     nl = normalize(mix(nl, float3(0, 1, 0), s.level));
@@ -3156,13 +3158,16 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     float svY = wf2 > 0.0 ? mix(p.y, groundSmoothL(x.tr, k, p.xz), wf2) : p.y;
     float sv = x.prof & 16 ? 1.0 : skyVisibility(x.tr, k, svAt, svY, lite || fp > 5.0 ? 2 : fp > 2.0 ? 1 : 0);
     // Under a roof the sky comes only through the mouth: the visibility counts in full, and the deeper in, the less.
-    skyFill *= mix(1.0, sv * mix(1.0, sv, roofW), mix(mix(0.55, 0.85, hiSun), 1.0, roofW));
+    // (The visibility samples only six voxels out: in a shelter it reads the roof all round, so the mouth's share has a floor.)
+    float svr = mix(sv, max(sv, 0.4), roofW);
+    skyFill *= mix(1.0, svr * mix(1.0, 0.6 + 0.4 * svr, roofW), mix(mix(0.55, 0.85, hiSun), 1.0, roofW));
     // A wall sees half the dome, and the half it sees is the dimmer horizon side; without this a riser in shade
     // outshines the sunlit tread above it under a low sun.
     skyFill *= 0.5 + 0.5 * saturate(nl.y);
     float3 bounce = (1.0 - saturate(nl.y)) * 0.35 * alb * L.keyCol * max(L.key.y, 0.0);
-    // Light bounced into a hollow comes in through its mouth; an underside stays well under the lit top of its slab.
-    bounce *= mix(1.0, 0.1 + 0.5 * sv, ov);
+    // Light bounced into a hollow comes in through its mouth, off the lit ground outside: dim, never black; an underside
+    // stays well under the lit top of its slab.
+    bounce *= mix(1.0, 0.7 + 0.2 * sv, ov);
     // High sun: risers sit in cooler shade so terraces keep their modelling at noon.
     float3 riserShade = mix(float3(1.0), float3(0.82, 0.86, 0.95),
                             (h.normal.y == 0 ? 1.0 - saturate(nl.y) : 0.0) * smoothstep(0.3, 0.6, L.key.y) * smoothstep(1.5, 4.0, drop) * (1.0 - ov));
