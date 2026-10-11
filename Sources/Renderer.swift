@@ -126,8 +126,6 @@ final class World {
         let sites: MTLBuffer
         var origin = SIMD2<Int32>(Int32.min, Int32.min)
         var globalMax: Float = 255
-        var cpuHeights: [Float] = []
-        var cpuFloors: [Float] = []
         var siteList: [SiteInfo] = []
 
         init?(device: MTLDevice) {
@@ -183,6 +181,10 @@ final class World {
     private let cpuMips: [MTLTexture]
     private var buffers: [Buffer]
     private var active = 0
+    // The active map's CPU copy, held here so the camera's many lookups read it directly.
+    private var cpuOrigin = SIMD2<Int32>(Int32.min, Int32.min)
+    private var cpuHeights: [Float] = []
+    private var cpuFloors: [Float] = []
     private var job: (index: Int, origin: SIMD2<Int32>, next: Int, t0: CFTimeInterval)?
     private var pending = false
     var synchronous = false
@@ -361,8 +363,6 @@ final class World {
         let finish = { [weak self] (heights: [Float], floors: [Float], top: Float) in
             guard let self else { return }
             buf.origin = o
-            buf.cpuHeights = heights
-            buf.cpuFloors = floors
             buf.globalMax = top + 1
             buf.siteList = World.readSites(buf.sites)
             if World.logSites {
@@ -374,6 +374,9 @@ final class World {
                 print("sites at (\(o.x),\(o.y)): henge \(counts[1]) cairn \(counts[2]) ruins \(counts[3]) hamlet \(counts[4]) jetty \(counts[5]) camp \(counts[6]) total \(buf.siteList.count)")
             }
             self.active = index
+            self.cpuOrigin = o
+            self.cpuHeights = heights
+            self.cpuFloors = floors
             self.pending = false
             if Renderer.logTiming { print(String(format: "world regen %.1f ms (%@)", (CACurrentMediaTime() - t0) * 1000, wait ? "sync" : "async")) }
         }
@@ -426,22 +429,37 @@ final class World {
 
     // Conservative (4x4 max) height in world coords.
     func height(x: Double, z: Double) -> Double? {
-        let b = buffers[active]
         let s = World.size >> World.cpuLevel
-        let cx = Int(floor((x - Double(b.origin.x)) / Double(1 << World.cpuLevel)))
-        let cz = Int(floor((z - Double(b.origin.y)) / Double(1 << World.cpuLevel)))
-        guard cx >= 0, cz >= 0, cx < s, cz < s, !b.cpuHeights.isEmpty else { return nil }
-        return Double(b.cpuHeights[cz * s + cx])
+        let cx = Int(floor((x - Double(cpuOrigin.x)) / Double(1 << World.cpuLevel)))
+        let cz = Int(floor((z - Double(cpuOrigin.y)) / Double(1 << World.cpuLevel)))
+        guard cx >= 0, cz >= 0, cx < s, cz < s, !cpuHeights.isEmpty else { return nil }
+        return Double(cpuHeights[cz * s + cx])
     }
 
     // Lower bound in world coords: every column of the 4x4 cell is solid from the ground up to at least this.
     func solidFloor(x: Double, z: Double) -> Double? {
-        let b = buffers[active]
         let s = World.size >> World.cpuLevel
-        let cx = Int(floor((x - Double(b.origin.x)) / Double(1 << World.cpuLevel)))
-        let cz = Int(floor((z - Double(b.origin.y)) / Double(1 << World.cpuLevel)))
-        guard cx >= 0, cz >= 0, cx < s, cz < s, !b.cpuFloors.isEmpty else { return nil }
-        return Double(b.cpuFloors[cz * s + cx])
+        let cx = Int(floor((x - Double(cpuOrigin.x)) / Double(1 << World.cpuLevel)))
+        let cz = Int(floor((z - Double(cpuOrigin.y)) / Double(1 << World.cpuLevel)))
+        guard cx >= 0, cz >= 0, cx < s, cz < s, !cpuFloors.isEmpty else { return nil }
+        return Double(cpuFloors[cz * s + cx])
+    }
+}
+
+// Far heights for the camera: level 3's max mip 2 (32-voxel cells, toroidal, about +-7.7k around the camera),
+// read back whenever level 3 changes; conservative, being a max.
+final class FarHeights {
+    static let n = 512, cell = 32.0
+    fileprivate var heights: [Float16] = []
+    fileprivate var centre = SIMD2<Int>(Int.min, Int.min)
+
+    // Conservative terrain height at world (x, z) out to about 7.7k, or nil.
+    func height(x: Double, z: Double) -> Double? {
+        guard !heights.isEmpty else { return nil }
+        let cx = Int(floor(x / FarHeights.cell)), cz = Int(floor(z / FarHeights.cell))
+        guard abs(cx - centre.x) < 236, abs(cz - centre.y) < 236 else { return nil }
+        let n = FarHeights.n
+        return Double(heights[(cz & (n - 1)) * n + (cx & (n - 1))])
     }
 }
 
@@ -473,6 +491,7 @@ final class Clipmap {
     private var lo: [SIMD2<Int32>?] = Array(repeating: nil, count: Clipmap.levels)
     private struct Job { var level: Int; var x0: Int32; var z0: Int32; var w: Int32; var h: Int32; var done: Int32; var newLo: SIMD2<Int32> }
     private var job: Job?
+    private var completed = [Int](repeating: 0, count: Clipmap.levels)
 
     init?(device: MTLDevice, library: MTLLibrary, seed: UInt32) {
         func pipeline(_ name: String) -> MTLComputePipelineState? {
@@ -540,12 +559,15 @@ final class Clipmap {
     // Level k (1...levels) holds a whole window.
     func ready(_ k: Int) -> Bool { lo[k - 1] != nil }
 
+    // Counts the jobs encoded for level k: its contents change only when this does.
+    func generation(_ k: Int) -> Int { completed[k - 1] }
+
     // Forgets the windows, so the next encode rebuilds every level whole (VR_COARSE_FULL: checks strips against it).
     func invalidate() { lo = Array(repeating: nil, count: Clipmap.levels); job = nil }
 
-    private func nextJob(_ center: SIMD2<Double>, active: Int) -> Job? {
+    private func nextJob(_ center: SIMD2<Double>, active: Int, only: Int?) -> Job? {
         let n = Int32(Clipmap.size), step = Int32(Clipmap.snap)
-        for i in 0..<active {
+        for i in only.map({ [$0 - 1] }) ?? Array(0..<active) {
             let t = Clipmap.target(center, level: i + 1)
             guard let cur = lo[i], abs(t.x - cur.x) <= 8 * step, abs(t.y - cur.y) <= 8 * step else {
                 lo[i] = nil
@@ -565,11 +587,11 @@ final class Clipmap {
         return nil
     }
 
-    // Encodes pending generation for levels 1...active: one piece, or with `drain` everything the camera position
-    // needs. Levels past `active` are dropped, to be rebuilt whole once they are active again.
-    func encode(into cb: MTLCommandBuffer, center: SIMD2<Double>, drain: Bool, active: Int) {
+    // Encodes pending generation for levels 1...active (or level `only` alone): one piece, or with `drain` everything
+    // the camera position needs. Levels past `active` are dropped, to be rebuilt whole once they are active again.
+    func encode(into cb: MTLCommandBuffer, center: SIMD2<Double>, drain: Bool, active: Int, only: Int? = nil) {
         for i in active..<Clipmap.levels { lo[i] = nil }
-        if let j = job, j.level >= active { job = nil }
+        if let j = job, j.level >= active || only.map({ j.level != $0 - 1 }) ?? false { job = nil }
         // A level more than a strip behind the camera could soon be read past its window: catch it up at once. In
         // flight that never happens: at 15 voxels/s a level-1 strip falls due at most every 8.5 s and takes 17
         // frames. Only the outermost level, which the edge waits for, is ever built whole in pieces.
@@ -578,11 +600,11 @@ final class Clipmap {
             return lo[i].map { abs($0.x - t.x) > Int32(Clipmap.snap) || abs($0.y - t.y) > Int32(Clipmap.snap) } ?? (i < active - 1)
         }
         var budget = drain || lagging ? Int.max : 1
-        if job == nil { job = nextJob(center, active: active) }
+        if job == nil { job = nextJob(center, active: active, only: only) }
         guard job != nil, let enc = cb.makeComputeCommandEncoder() else { return }
         defer { enc.endEncoding() }
         while budget > 0 {
-            if job == nil { job = nextJob(center, active: active) }
+            if job == nil { job = nextJob(center, active: active, only: only) }
             guard var j = job else { return }
             let full = j.w == Int32(Clipmap.size) && j.h == Int32(Clipmap.size)
             let long = max(j.w, j.h)
@@ -634,6 +656,7 @@ final class Clipmap {
                                     threadsPerThreadgroup: MTLSize(width: min(16, Int(r.z)), height: min(16, Int(r.w)), depth: 1))
             }
             lo[j.level] = j.newLo
+            completed[j.level] += 1
             if Renderer.logTiming { print("coarse level \(j.level + 1) window \(j.newLo) (\(j.w)x\(j.h))") }
             job = nil
         }
@@ -655,17 +678,14 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var shadowBand = [0, 0]
     private var shadowValid = false
     private var shadowFrom: (cam: SIMD2<Double>, key: SIMD3<Double>)?
-    // Far heights for the camera: level 3's max mip 2 (32-voxel cells, toroidal, about +-7.7k around the camera),
-    // read back every few frames; conservative, being a max.
-    private let farTex: MTLTexture
     // The terrain horizon around the camera (bakeHorizon): sky pixels above it skip the trace.
     private let horizonPipeline: MTLComputePipelineState
     private let horizonBuf: MTLBuffer
-    private var farHeights: [Float16] = []
-    private var farCentre = SIMD2<Int>(Int.min, Int.min)
+    let far = FarHeights()
     private var farAge = 0
+    // Level 3's generation last read back, and the one far.heights holds.
+    private var farRequested = -1, farHeld = -1
     private var farSimClock = -1e9
-    static let farN = 512, farCell = 32.0
     // The fine cloud field only drifts with the wind, so it is baked once around the camera (in drifted
     // coordinates) and re-baked when the camera nears its edge.
     private var cloudTex: MTLTexture?
@@ -731,6 +751,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     // Holds the time of day fixed for snapshots, so exposure and the shot director see the rendered sun.
     var pinnedPhase: Double?
     var renderScale: Double
+    // The screen's size in pixels: the dither grid follows it, while the drawable holds just one pixel per cell.
+    private var screenPixels = CGSize.zero
 
     // Cover drifts between clear and broken skies over tens of minutes.
     var cloudCover: Double {
@@ -781,11 +803,6 @@ final class Renderer: NSObject, MTKViewDelegate {
         sd.storageMode = .private
         guard let sm0 = device.makeTexture(descriptor: sd), let sm1 = device.makeTexture(descriptor: sd) else { return nil }
         shadowMaps = [sm0, sm1]
-        let fd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Float, width: Renderer.farN, height: Renderer.farN, mipmapped: false)
-        fd.usage = [.shaderRead]
-        fd.storageMode = .shared
-        guard let ft = device.makeTexture(descriptor: fd) else { return nil }
-        farTex = ft
         lampPipeline = lampP
         lightPipeline = lightP
         lampPos = lpos
@@ -801,7 +818,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         self.towers = towers
         // Spec offset displays by 90 s of the same flight; steering reads GPU heights, so displays
         // instead start at different places in the same world.
-        camera = FlightCamera(seed: seed &+ UInt32(screenIndex) &* 7919)
+        camera = FlightCamera(seed: seed &+ UInt32(screenIndex) &* 7919, world: world, far: far)
         wildlife = Wildlife(seed: seed &+ UInt32(screenIndex) &* 7919)
         birdBuffers = (0..<3).compactMap { _ in device.makeBuffer(length: Wildlife.bufferLength, options: .storageModeShared) }
         guard birdBuffers.count == 3 else { return nil }
@@ -809,20 +826,18 @@ final class Renderer: NSObject, MTKViewDelegate {
         renderScale = battery ? 0.7 : 1.0
         edgeRadius = Clipmap.handoff(battery ? Clipmap.levels - 1 : Clipmap.levels)
         super.init()
-        camera.heightAt = { [unowned world] x, z in world.height(x: x, z: z) }
-        camera.farHeightAt = { [unowned self] x, z in self.farHeight(x: x, z: z) }
-        camera.sitesAt = { [unowned world] in world.sites }
+        wildlife.heightAt = { [unowned world] x, z in world.height(x: x, z: z) }
         camera.towersAt = { [unowned towers] in towers.list }
-        wildlife.heightAt = camera.heightAt
         // VR_START=x,z,yawDeg: the flight starts there (tests).
         if let v = ProcessInfo.processInfo.environment["VR_START"]?.split(separator: ",").compactMap({ Double($0) }), v.count >= 3 {
             camera.start(at: SIMD2(v[0], v[1]), yaw: v[2] * .pi / 180)
         }
         world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
         towers.update(center: SIMD2(camera.position.x, camera.position.z), queue: queue, wait: true)
-        refreshFar(wait: true)
+        // Placing the camera reads only the far heights, which level 3 holds: the CPU waits for that level alone.
+        refreshFar(only: 3)
         camera.placeAtStart()
-        // The coarse rings are built ahead of the first frame on the same queue, which orders that frame after them;
+        // The other rings are built ahead of the first frame on the same queue, which orders that frame after them;
         // nothing waits on the CPU. Afterwards only strips are rewritten.
         if let cb = queue.makeCommandBuffer() {
             let t0 = CACurrentMediaTime()
@@ -856,8 +871,13 @@ final class Renderer: NSObject, MTKViewDelegate {
         view.preferredFramesPerSecond = battery ? 30 : 60
         self.init(device: device, outputFormat: view.colorPixelFormat, seed: seed, screenIndex: screenIndex, battery: battery)
         view.autoResizeDrawable = false
-        view.drawableSize = CGSize(width: view.bounds.width * backingScale, height: view.bounds.height * backingScale)
-        prepare(outputSize: view.drawableSize)
+        screenPixels = CGSize(width: view.bounds.width * backingScale, height: view.bounds.height * backingScale)
+        // postFragment gives every pixel of a cell the cell's colour, so presenting the cell grid and letting the layer
+        // scale it up with nearest filtering shows the same pixels.
+        let s = sizes(screenPixels)
+        view.drawableSize = CGSize(width: s.ow, height: s.oh)
+        (view.layer as? CAMetalLayer)?.magnificationFilter = .nearest
+        prepare(outputSize: screenPixels)
         view.delegate = self
     }
 
@@ -888,7 +908,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             // Snapshots simulate long stretches without frames: keep the far heights following the camera.
             if world.synchronous && simTime + (dt * timeScale - remaining) - farSimClock > 2 {
                 farSimClock = simTime + (dt * timeScale - remaining)
-                refreshFar(wait: true)
+                refreshFar()
             }
             remaining -= step
         }
@@ -913,7 +933,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         return Sight(pos: camera.position, fwd: b.fwd, right: b.right, up: b.up, tanV: tanV, aspect: Double(aspect),
                      pixelAngle: 2 * tanV / Double(max(sceneSize.height, 1)), sunY: clock.sunDirection.y,
                      worldEdge: Clipmap.handoff(Clipmap.levels), floorReach: min(880, edge) - 140 - 6 - abs(Double(Renderer.lodShift)),
-                     floorAt: { [unowned world] x, z in world.solidFloor(x: x, z: z) })
+                     world: world)
     }
 
     // Scene and history sizes for an output size: the retro dither shows one flat colour per cell, so the temporal
@@ -1036,8 +1056,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.dispatchThreads(MTLSize(width: 16, height: 1024, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 1, depth: 1))
         }
         bakes?.endEncoding()
-        farAge += 1
-        if farAge >= 20 { farAge = 0; encodeFar(into: cb, wait: false) }
+        // Snapshots refresh the far heights synchronously as they simulate.
+        if !world.synchronous { updateFar(into: cb) }
         birdSlots.wait()
         cb.addCompletedHandler { [birdSlots] _ in birdSlots.signal() }
         let birdBuf = birdBuffers[birdIndex]
@@ -1203,47 +1223,64 @@ final class Renderer: NSObject, MTKViewDelegate {
         enc.endEncoding()
     }
 
-    // Conservative terrain height at world (x, z) out to about 7.7k, or nil.
-    func farHeight(x: Double, z: Double) -> Double? {
-        guard !farHeights.isEmpty else { return nil }
-        let cx = Int(floor(x / Renderer.farCell)), cz = Int(floor(z / Renderer.farCell))
-        guard abs(cx - farCentre.x) < 236, abs(cz - farCentre.y) < 236 else { return nil }
-        let n = Renderer.farN
-        return Double(farHeights[(cz & (n - 1)) * n + (cx & (n - 1))])
+    func farHeight(x: Double, z: Double) -> Double? { far.height(x: x, z: z) }
+
+    private var farCameraCell: SIMD2<Int> {
+        SIMD2(Int(floor(camera.position.x / FarHeights.cell)), Int(floor(camera.position.z / FarHeights.cell)))
     }
 
-    private func encodeFar(into cb: MTLCommandBuffer, wait: Bool) {
-        guard clipmap.ready(3), let blit = cb.makeBlitCommandEncoder() else { return }
+    // Copies the far heights into a buffer the CPU reads once `cb` completes.
+    private func encodeFar(into cb: MTLCommandBuffer) -> MTLBuffer? {
+        let n = FarHeights.n
+        guard clipmap.ready(3), let buf = device.makeBuffer(length: n * n * 2, options: .storageModeShared),
+              let blit = cb.makeBlitCommandEncoder() else { return nil }
         blit.copy(from: clipmap.height, sourceSlice: 2, sourceLevel: 2, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-                  sourceSize: MTLSize(width: Renderer.farN, height: Renderer.farN, depth: 1),
-                  to: farTex, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+                  sourceSize: MTLSize(width: n, height: n, depth: 1),
+                  to: buf, destinationOffset: 0, destinationBytesPerRow: n * 2, destinationBytesPerImage: n * n * 2)
         blit.endEncoding()
-        let centre = SIMD2(Int(floor(camera.position.x / Renderer.farCell)), Int(floor(camera.position.z / Renderer.farCell)))
-        let read = { [weak self] in
-            guard let self else { return }
-            let n = Renderer.farN
-            var raw = [Float16](repeating: 0, count: n * n)
-            self.farTex.getBytes(&raw, bytesPerRow: n * 2, from: MTLRegionMake2D(0, 0, n, n), mipmapLevel: 0)
-            self.farHeights = raw
-            self.farCentre = centre
+        return buf
+    }
+
+    private static func readFar(_ buf: MTLBuffer) -> [Float16] {
+        Array(UnsafeBufferPointer(start: buf.contents().assumingMemoryBound(to: Float16.self), count: FarHeights.n * FarHeights.n))
+    }
+
+    // Level 3 changes only when its window moves a strip, every 512 voxels of flight: its heights are read back then,
+    // off the main thread. The range farHeight trusts still follows the camera every 20 frames, as the window does.
+    private func updateFar(into cb: MTLCommandBuffer) {
+        let gen = clipmap.generation(3)
+        if gen != farRequested, let buf = encodeFar(into: cb) {
+            farRequested = gen
+            cb.addCompletedHandler { [weak self] cb in
+                guard cb.status == .completed else { DispatchQueue.main.async { self?.farRequested = -1 }; return }
+                let heights = Renderer.readFar(buf)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.far.heights = heights
+                    self.farHeld = gen
+                    self.far.centre = self.farCameraCell
+                }
+            }
         }
-        if wait { return }
-        cb.addCompletedHandler { _ in DispatchQueue.main.async(execute: read) }
+        farAge += 1
+        if farAge >= 20 {
+            farAge = 0
+            if farHeld == gen && clipmap.ready(3) { far.centre = farCameraCell }
+        }
     }
 
     // Brings the rings to the camera and reads the far heights back at once (startup and snapshots).
-    private func refreshFar(wait: Bool) {
+    private func refreshFar(only: Int? = nil) {
         guard let cb = queue.makeCommandBuffer() else { return }
-        clipmap.encode(into: cb, center: SIMD2(camera.position.x, camera.position.z), drain: true, active: activeLevels)
-        encodeFar(into: cb, wait: true)
+        clipmap.encode(into: cb, center: SIMD2(camera.position.x, camera.position.z), drain: true, active: activeLevels, only: only)
+        let buf = encodeFar(into: cb)
         cb.commit()
         cb.waitUntilCompleted()
-        guard clipmap.ready(3) else { return }
-        let n = Renderer.farN
-        var raw = [Float16](repeating: 0, count: n * n)
-        farTex.getBytes(&raw, bytesPerRow: n * 2, from: MTLRegionMake2D(0, 0, n, n), mipmapLevel: 0)
-        farHeights = raw
-        farCentre = SIMD2(Int(floor(camera.position.x / Renderer.farCell)), Int(floor(camera.position.z / Renderer.farCell)))
+        guard let buf else { return }
+        far.heights = Renderer.readFar(buf)
+        farRequested = clipmap.generation(3)
+        farHeld = farRequested
+        far.centre = farCameraCell
     }
 
     // The key light as the shader's makeLight picks it, and whether it casts shadows.
@@ -1356,7 +1393,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             if frameIndex == 30 { dlog("EDR headroom now \(headroom), potential \(view.window?.screen?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 0), format \(view.colorPixelFormat.rawValue)") }
         }
         guard let drawable = view.currentDrawable, let cb = queue.makeCommandBuffer() else { return }
-        encode(into: cb, output: drawable.texture, outputSize: view.drawableSize)
+        encode(into: cb, output: drawable.texture, outputSize: screenPixels)
         if Renderer.logTiming {
             cb.addCompletedHandler { [weak self] cb in
                 guard let self else { return }

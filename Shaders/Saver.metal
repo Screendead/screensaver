@@ -2685,6 +2685,11 @@ static inline float3 autumnLeaf(float2 w, float birch, uint seed) {
 // Sedimentary bedding by world height: broad formations, beds of uneven tone and fine laminae. Beds dip gently
 // with a slow horizontal warp, so a layer runs continuously across neighbouring columns and around canyon walls.
 // Bed edges widen and fine terms fade with the pixel footprint fp (voxels per pixel).
+// The bands' phase also wanders over ~55 voxels (tilting beds ~10 degrees typically, ~14 at the 90th percentile), so
+// rock bodies more than ~55 voxels apart carry different bands: with one phase for all, the bands on a near tower meet
+// those on the rock behind at the same screen rows near eye level and it reads as see-through. Bodies closer than that
+// still share bands; parting them needs a steeper tilt. Pure world space: a phase that moved with fp would slide the
+// bands as the camera approaches.
 // `wall` (0..1) marks the great walls of mega relief, whose rock reads as formations from foot to rim.
 // Formation tones (cap rock, wall rock, shale, buff) by index. Selects, not a local array: indexing one per pixel puts
 // it in scratch memory, which costs more than all the noise around it.
@@ -2701,7 +2706,8 @@ static inline float3 strataTone(float y, float2 w, uint seed, float desertAmt, f
     // Beds of uneven thickness (the phase runs faster and slower up the face) with soft contacts: an even, hard-edged
     // 16-voxel zebra reads as posterised banding on a tall face.
     float k = 0.5 + 0.5 * sin(yd * 0.38 + 5.0 * perlin2(float2(yd / 41.0, 0.27), seed + 39u)
-                             + 2.2 * perlin2(w * 0.01, seed + 22u) + 1.3 * perlin2(w * 0.003, seed + 23u));
+                             + 2.2 * perlin2(w * 0.01, seed + 22u) + 1.3 * perlin2(w * 0.003, seed + 23u)
+                             + 3.0 * perlin2(w / 55.0, seed + 45u));
     k = smoothstep(0.1, 0.9, k);
     // On the great walls the regular 16-voxel bands would read as a zebra stripe; the formations carry the tone there.
     float fz = max(smoothstep(120.0, 300.0, y), wall);
@@ -2792,15 +2798,28 @@ static inline float3 sandRipples(int2 v, float2 uv, float2 w, float fp, float ti
     return float3(0.045 * amp * r + 0.035 * swell + 0.05 * streak, 0.018 * amp * dr * wind);
 }
 
-// 0..1 where world xz w lies among mega relief: the coarsest ring's max over ~256-voxel cells, bilinear, so it is
-// smooth across a wall (lowland rarely rises past ~190).
+// 0..1 where world xz w lies among mega relief, from the coarsest ring's max over ~128-voxel cells (lowland rarely rises
+// past ~190). Interpolated between cell corners, each the max of the four cells meeting there, so every column rates at
+// least its own cell's relief and the field stays continuous: interpolated between cell centres, a wall's foot columns
+// past a cell edge rated partly as lowland, and a jogging face crossfaded column by column between the formations and the
+// lowland's 16-voxel beds, which near eye level line up with the beds on every rock behind and read as see-through rock.
+// Wider cells would carry the walls' rock a whole cell out over the lowland at their feet.
 static inline float megaWall(thread const Terrain& tr, float2 w) {
-    constexpr sampler blr(filter::linear, address::repeat);
     int kc = tr.levels - 1;
     if (kc < 1) return 0.0;
-    float cw = float(1 << kc);
-    float M = tr.ch.sample(blr, w / (cw * float(COARSE_N)), uint(kc - 1), level(max(8 - kc, 0))).r;
-    return smoothstep(190.0, 270.0, M);
+    int m = max(7 - kc, 0), mask = (COARSE_N >> m) - 1;
+    float2 q = w / float(1 << (kc + m));
+    int2 c = int2(floor(q));
+    float2 f = q - float2(c);
+    uint sl = uint(kc - 1), mp = uint(m);
+    #define MW(i, j) tr.ch.read(uint2((c + int2(i, j)) & mask), sl, mp).r
+    float a0 = MW(-1, -1), a1 = MW(0, -1), a2 = MW(1, -1);
+    float b0 = MW(-1, 0), b1 = MW(0, 0), b2 = MW(1, 0);
+    float c0 = MW(-1, 1), c1 = MW(0, 1), c2 = MW(1, 1);
+    #undef MW
+    float v00 = max(max(a0, a1), max(b0, b1)), v10 = max(max(a1, a2), max(b1, b2));
+    float v01 = max(max(b0, b1), max(c0, c1)), v11 = max(max(b1, b2), max(c1, c2));
+    return smoothstep(190.0, 270.0, mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y));
 }
 
 // Surface of level k's column v (xz in level cells) on face n; uv is the face position in [0, 1) of the column.

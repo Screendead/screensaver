@@ -29,10 +29,10 @@ final class FlightCamera {
         frozen = true
     }
 
-    // Height lookup in world coords; returns nil outside the loaded map.
-    var heightAt: (Double, Double) -> Double? = { _, _ in nil }
-    // Coarse (32-voxel max) heights out to about 7.7k; nil beyond or before the first readback.
-    var farHeightAt: (Double, Double) -> Double? = { _, _ in nil }
+    // Heights in world coords: the loaded map's (nil outside it), and the coarse 32-voxel max heights out to about 7.7k
+    // (nil beyond, or before the first readback). The Renderer owns both and the camera, and drops them together.
+    private unowned(unsafe) let world: World
+    private unowned(unsafe) let far: FarHeights
     // Flight stays this far under the cloud base (CLOUD_Y0 in Shaders/Saver.metal, 1065).
     static let ceiling = 1065.0 - 80.0
     private var avoidRate: Double = 0
@@ -41,8 +41,6 @@ final class FlightCamera {
     private var blockedAhead: Double = 0
     // 0...1, eased: how much a slope close by fills the frame (looked down onto, or rising beside the flight).
     private var hug: Double = 0
-    // Structure sites on the loaded map.
-    var sitesAt: () -> [SiteInfo] = { [] }
     // Ruined towers round the camera (Sources/Towers.swift).
     var towersAt: () -> [TowerInfo] = { [] }
     // Index of the current night, as the lamps read it (beacons and rites burn only on some nights).
@@ -51,7 +49,9 @@ final class FlightCamera {
     private var framedAt: [UInt32: Double] = [:]
     private var focus: SIMD2<Double>?
 
-    init(seed: UInt32) {
+    init(seed: UInt32, world: World, far: FarHeights) {
+        self.world = world
+        self.far = far
         let s = Double(seed % 100_000)
         position = SIMD3(s * 7.31, 70, s * 3.17)
         yaw = s.truncatingRemainder(dividingBy: 6.283)
@@ -73,7 +73,7 @@ final class FlightCamera {
         return (f, r, u)
     }
 
-    private func h(_ x: Double, _ z: Double) -> Double { heightAt(x, z) ?? farHeightAt(x, z) ?? 20 }
+    private func h(_ x: Double, _ z: Double) -> Double { world.height(x: x, z: z) ?? far.height(x: x, z: z) ?? 20 }
 
     // Starts the flight here (tests: VR_START).
     func start(at p: SIMD2<Double>, yaw y: Double) {
@@ -91,7 +91,7 @@ final class FlightCamera {
     }
     private func hSteer(_ x: Double, _ z: Double) -> Double { max(h(x, z), towerTop(x, z)) }
     // Far terrain: the 32-voxel max grid, else the fine map.
-    private func hFar(_ x: Double, _ z: Double) -> Double { farHeightAt(x, z) ?? heightAt(x, z) ?? 20 }
+    private func hFar(_ x: Double, _ z: Double) -> Double { far.height(x: x, z: z) ?? world.height(x: x, z: z) ?? 20 }
 
     // How much terrain along a heading rises above what the flight could clear: the slope it may climb (capped at
     // the ceiling), weighted toward near walls. Gorges and passes are the open headings.
@@ -121,7 +121,7 @@ final class FlightCamera {
             for off in [-0.2, 0.0, 0.2] {
                 let d2 = SIMD2(sin(heading + off), cos(heading + off))
                 let q = SIMD2(position.x, position.z) + (off == 0 ? dir : d2) * dist
-                guard let g = dist < 300 ? heightAt(q.x, q.y) : farHeightAt(q.x, q.y) else { continue }
+                guard let g = dist < 300 ? world.height(x: q.x, z: q.y) : far.height(x: q.x, z: q.y) else { continue }
                 let e = atan2(g - position.y, dist)
                 if dist >= 1000 { best = max(best, e) } else { near = max(near, e) }
             }
@@ -174,7 +174,7 @@ final class FlightCamera {
         let p = SIMD2(position.x, position.z)
         var sum = 0.0, best = 0.0
         var top: SiteInfo?
-        for site in sitesAt() {
+        for site in world.sites {
             if let t = framedAt[site.id], time - t < 240 { continue }
             let v = site.pos - p
             let d = simd_length(v)
@@ -277,17 +277,17 @@ final class FlightCamera {
 
     func placeAtStart() {
         // A start among or beside the massifs moves to the nearest open low ground, so the flight begins under the ceiling.
-        if (0..<12).contains(where: { (farHeightAt(position.x + sin(Double($0) * .pi / 6) * 500, position.z + cos(Double($0) * .pi / 6) * 500) ?? 0) > 260 })
+        if (0..<12).contains(where: { (far.height(x: position.x + sin(Double($0) * .pi / 6) * 500, z: position.z + cos(Double($0) * .pi / 6) * 500) ?? 0) > 260 })
             || hFar(position.x, position.z) > 200 {
             search: for r in stride(from: 200.0, through: 6000.0, by: 200.0) {
                 for k in 0..<24 {
                     let a = Double(k) * .pi / 12
                     let x = position.x + sin(a) * r, z = position.z + cos(a) * r
-                    guard let g = farHeightAt(x, z), g < 120 else { continue }
+                    guard let g = far.height(x: x, z: z), g < 120 else { continue }
                     // Clear of the massifs on every side, so the first seconds are not a climb up a wall.
                     var clear = true
                     for rr in [250.0, 500.0, 800.0] {
-                        for j in 0..<12 where (farHeightAt(x + sin(Double(j) * .pi / 6) * rr, z + cos(Double(j) * .pi / 6) * rr) ?? 0) > 260 { clear = false }
+                        for j in 0..<12 where (far.height(x: x + sin(Double(j) * .pi / 6) * rr, z: z + cos(Double(j) * .pi / 6) * rr) ?? 0) > 260 { clear = false }
                     }
                     if clear { position.x = x; position.z = z; break search }
                 }
@@ -340,7 +340,7 @@ final class FlightCamera {
             // moon still frames it.
             if nightW > 0.5 {
                 let p = SIMD2(position.x, position.z)
-                for site in sitesAt() where litInterest(site) > 0 {
+                for site in world.sites where litInterest(site) > 0 {
                     let v = site.pos - p
                     let b = atan2(v.x, v.y)
                     if simd_length(v) < 450, abs(FlightCamera.angleDiff(b, moonYaw)) < 1.0 { headings.append(b) }
