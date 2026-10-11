@@ -973,12 +973,13 @@ static inline void houseAt(Part P, int2 q, int2 c, thread HouseAt& h) {
 // the wall top: straight, or rounded (steep at the eaves, a full crown); hipped roofs slope toward the gables too.
 static inline float2 roofProfile(thread const HouseAt& h) {
     int ridge = (h.Dw - 1) / 2;
-    int d = h.f.hip ? min(h.dA, h.dG) : h.dA;
+    float d = float(h.f.hip ? min(h.dA, h.dG) : h.dA);
+    if (h.f.round && h.f.hip && h.dA < 2 && h.dG < 2) d = 2.0 - length(float2(2 - h.dA, 2 - h.dG));
     float tMax = float(ridge + 1);
-    float t = max(float(d + 1), 0.0);
+    float t = max(d + 1.0, 0.0);
     float x = t / tMax;
     float r = h.f.round ? h.f.pitch * tMax * (1.0 - (1.0 - x) * (1.0 - x)) : h.f.pitch * t;
-    float sl = d >= ridge ? 0.0 : h.f.round ? h.f.pitch * 2.0 * (1.0 - x + 0.5 / tMax) : h.f.pitch;
+    float sl = d >= float(ridge) ? 0.0 : h.f.round ? h.f.pitch * 2.0 * (1.0 - x + 0.5 / tMax) : h.f.pitch;
     return float2(h.f.wall + 0.5 + r, sl);
 }
 
@@ -995,10 +996,7 @@ static inline float ridgeTop(thread const HouseAt& h) {
 // A pitched house's top over the floor at a column, in quarter voxels.
 static inline float houseTop(thread const HouseAt& h) {
     if (h.dA < -1) return h.f.wall;
-    float rel = roofProfile(h).x;
-    // A croft's corners are rounded down.
-    if (h.f.ovG == 0 && h.dA == 0 && h.dG == 0) rel -= 0.5;
-    return round(rel * 4.0) * 0.25;
+    return round(roofProfile(h).x * 4.0) * 0.25;
 }
 
 // The along-ridge column of a house's chimney: in the gable wall, outside it (a cabin's stack) or through the hip.
@@ -1293,7 +1291,7 @@ static inline PropKind propFor(int style, uint pick) {
 
 // Each dwelling's yard: up to two props by its gables, back or front corners (never before the door), then seats by
 // the hearth. Added after every other part, so nothing the hamlet had before moves.
-static void hamletProps(texture2d<float, access::read> hm, thread SiteGen& G, int2 c, float g, int style, uint hb) {
+static void hamletProps(texture2d<float, access::read> hm, thread SiteGen& G, int2 c, float g, int style, uint hb, bool hearth) {
     int nh = G.np;
     for (int k = 0; k < nh; k++) {
         Part H = unpackPart(G.s.parts[k]);
@@ -1301,6 +1299,9 @@ static void hamletProps(texture2d<float, access::read> hm, thread SiteGen& G, in
         if (!(H.kind == P_HOUSE && (H.flags & F_TENT) == 0) && !round) continue;
         uint hh = pcg(hb + uint(k) * 101u);
         int fl = H.y0;
+        float3 door = houseDoor(H, uint(G.s.head.w), k, true);
+        int2 dc = int2(floor(door.xy));
+        float da = hashf(pcg(uint(G.s.head.w) + uint(k))) * 6.2831853;
         for (int pi = 0; pi < 2; pi++) {
             PropKind pk = propFor(style, hh >> (pi * 5));
             if (pi == 1 && pk.type == propFor(style, hh).type) continue;
@@ -1312,6 +1313,7 @@ static void hamletProps(texture2d<float, access::read> hm, thread SiteGen& G, in
                 if (round) {
                     int rad = (H.sz.x + 1) / 2;
                     int2 d = pos == 0 ? int2(1, 0) : pos == 1 ? int2(-1, 0) : pos == 2 ? int2(0, 1) : int2(0, -1);
+                    if (dot(float2(d), float2(cos(da), sin(da))) > 0.7) continue;
                     sz = d.x != 0 ? int2(pk.Dp, pk.Lp) : int2(pk.Lp, pk.Dp);
                     int2 cc = H.o + d * (rad + 2 + (d.x != 0 ? sz.x : sz.y) / 2);
                     o = cc - sz / 2;
@@ -1330,11 +1332,13 @@ static void hamletProps(texture2d<float, access::read> hm, thread SiteGen& G, in
                     o = H.o + (axisZ ? int2(j0, i0) : int2(i0, j0));
                     sz = axisZ ? int2(lj, li) : int2(li, lj);
                 }
+                // Nothing stands at or beside the spot outside the door.
+                if (door.z > 0.0 && all(dc >= o - 1) && all(dc <= o + sz)) continue;
                 if (tryProp(hm, G, c, o, sz, pk.type, pk.mat, style, ref, pk.wet, pk.wet ? 1 : gap, pcg(hh + uint(t) * 3u + uint(pi)))) break;
             }
         }
     }
-    if (style != ST_STILT && style != ST_ADOBE && style != ST_PUEBLO) fireSeats(hm, G, c, g, style, hb >> 3, 2);
+    if (hearth && style != ST_STILT && style != ST_ADOBE && style != ST_PUEBLO) fireSeats(hm, G, c, g, style, hb >> 3, 2);
 }
 
 // A camp's seats round its fire, a woodpile, and its style's gear.
@@ -1513,7 +1517,7 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
     bool flat5 = L.flat5;
 
     uint hb = pcg(h + 7u);
-    bool ok = false;
+    bool ok = false, hearth = false;
     float age = 0.5;
     if (type == T_HENGE) {
         int R = 5 + int(hb % 4u);
@@ -1567,7 +1571,8 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
     } else if (type == T_HAMLET) {
         int style = hamletStyle(L);
         ok = buildHamlet(hm, G, c, hb, style);
-        if (ok && float(flat5) > 0.0 && g < snowline) {
+        hearth = ok && float(flat5) > 0.0 && g < snowline;
+        if (hearth) {
             int lamp = addLamp(G, float3(0.5, g + 1.5, 0.5), L_HEARTH, 1.0);
             addPart(G, makePart(P_FIRE, M_FIRE, int2(-1), int2(3), 0, 0, 0, F_REL | ((lamp + 1) << 8)), 3.0);
         }
@@ -1630,7 +1635,6 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
             int wet;
             if (!rectGround(hm, r0, sz, lo, hi, wet) || hi - lo > 1.0 || lo < SEA + 2.0) continue;
             float reach = length(float2(tc - c)) + 5.0;
-            // The first closed tent is lit from inside at night.
             int lt = -1;
             if (!lit && ks != ST_PALM && ks != ST_LEANTO) {
                 lt = addLamp(G, float3(float(tc.x - c.x) + 0.5, hi + 1.0, float(tc.y - c.y) + 0.5), L_TENT, 0.0);
@@ -1646,7 +1650,7 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
             }
             rects[nr++] = int4(r0, r0 + sz);
         }
-        addPart(G, makePart(P_CLEAR, 0, int2(0), int2(10, 0), 0, 0, 0, 0), 11.0);
+        addPart(G, makePart(P_CLEAR, 0, int2(0), int2(13, 0), 0, 0, 0, 0), 14.0);
         age = 0.1;
         ok = true;
     }
@@ -1670,8 +1674,8 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
         sites[idx] = G.s;
         return;
     }
-    // Props come last: nothing placed before them moves, and the carved-rock test above is unchanged.
-    if (type == T_HAMLET) hamletProps(hm, G, c, g, hamletStyle(L), hb);
+    // Props come last, so nothing placed before them moves; tryProp keeps them off every arch column.
+    if (type == T_HAMLET) hamletProps(hm, G, c, g, hamletStyle(L), hb, hearth);
     else if (type == T_CAMP) campProps(hm, G, c, g, campStyle(L), hb);
     G.s.head.z = type;
     G.s.info = float4(min(G.r, 125.0), age, float(G.np), float(G.nl));
@@ -1715,8 +1719,9 @@ static Claim stampPart(Part P, int2 q, int2 c, float g, texture2d<float, access:
     if (P.kind == P_BOX || P.kind == P_FIRE) {
         if (all(q >= r0 - 2) && all(q < r1 + 2)) near = true;
         if (!inRect || (!wetOK && g < SEA + 1.0)) return noClaim();
-        // A hearth's ring of stones round its flame.
-        if (P.kind == P_FIRE && P.sz.x == 3 && any(q != r0 + 1)) return solidClaim(g + 0.5, g, uint(M_STONE) | S_FLAT);
+        // A hearth's ring of stones round its flame, lower at the corners so it reads round.
+        if (P.kind == P_FIRE && P.sz.x == 3 && any(q != r0 + 1))
+            return solidClaim(g + ((q.x == r0.x + 1) != (q.y == r0.y + 1) ? 0.5 : 0.25), g, uint(M_STONE) | S_FLAT);
         float top = P.kind == P_FIRE ? g + 1.0 + float(P.y0) : (P.flags & F_REL) != 0 ? g + float(P.y0) : float(P.y0);
         if (top <= g) return noClaim();
         return solidClaim(top, g, mat | S_FLAT);
@@ -1770,8 +1775,11 @@ static Claim stampPart(Part P, int2 q, int2 c, float g, texture2d<float, access:
         bool stilt = style == ST_STILT;
         bool inWall = h.iw >= 0 && h.jw >= 0 && h.iw < h.Lw && h.jw < h.Dw;
         int ridge = (h.Dw - 1) / 2;
-        if ((P.flags & F_CHIMNEY) != 0 && h.jw == ridge && h.iw == chimneyAt(style, h.Lw, hh))
-            return solidClaim(fl + ridgeTop(h) + 1.0, g, uint(M_STONE) | S_FLAT | S_CHIMNEY);
+        if ((P.flags & F_CHIMNEY) != 0 && h.iw == chimneyAt(style, h.Lw, hh)) {
+            if (h.jw == ridge) return solidClaim(fl + ridgeTop(h) + 1.0, g, uint(M_STONE) | S_FLAT | S_CHIMNEY);
+            // The breast stops under the verge, so the roof edge runs across it rather than a pale post.
+            if (style == ST_CABIN && abs(h.jw - ridge) == 1) return solidClaim(fl + houseTop(h), g, uint(M_STONE) | S_CHIMNEY);
+        }
         if (h.dA < -1) {
             bool endPost = h.iw == 0 || h.iw == h.Lw - 1;
             if (stilt) {
@@ -1839,10 +1847,10 @@ static Claim stampPart(Part P, int2 q, int2 c, float g, texture2d<float, access:
             else if (endI || endJ) { top = fl + 1.0; bits = uint(M_PLANK) | (uint(FT_FENCE) << S_FEAT); }
             else { top = fl + ((i & 1) != 0 ? 0.5 : qs); bits = mat | (uint(FT_CROP) << S_FEAT); }
         } else if (type == PR_WASH || type == PR_RACK) {
-            if (endI) { top = fl + (type == PR_WASH ? 2.5 : 1.5); bits = post; }
+            if (endI) { top = fl + (type == PR_WASH ? 2.5 : 2.0); bits = post; }
             else {
-                float line = fl + (type == PR_WASH ? 2.0 : 1.5);
-                float hang = type == PR_WASH ? ((ph & 3u) == 0u ? 1.0 : 0.5) + 0.5 : 0.5;
+                float line = fl + (type == PR_WASH ? 2.0 : 1.75);
+                float hang = type == PR_WASH ? ((ph & 3u) == 0u ? 1.0 : 0.5) + 0.5 : 1.0;
                 if (line - hang <= g + 0.5) return line > g ? solidClaim(line, g, mat) : noClaim();
                 return gapClaim(g, line - hang, line, mat);
             }
@@ -2117,8 +2125,11 @@ kernel void updateLamps(device const Site* sites [[buffer(0)]],
     // Past the 1-voxel map's morph band the land is coarse and carries no structures: lamps fade out with them.
     float2 ringCam = f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w;
     float far = 1.0 - smoothstep(f.lod[0].x, f.lod[0].y, length(p.xz - ringCam));
+    // A plaza's cooking fire among pale walls a few voxels off: a full hearth floods them.
+    int st0 = (unpackPart(s.parts[0]).flags >> 12) & 15;
+    float dim = kind == L_HEARTH && (st0 == ST_ADOBE || st0 == ST_PUEBLO) ? 0.6 : 1.0;
     pos[id] = float4(p, float(kind));
-    state[id] = float4(LAMP_COL[kind] * lvl * k * day * far, LAMP_R[kind]);
+    state[id] = float4(LAMP_COL[kind] * lvl * k * day * far * dim, LAMP_R[kind] * mix(1.0, dim, 0.8));
 }
 
 // Light from every lamp on a 4-voxel grid over the map: rgb irradiance, and the lamp position weighted by it
@@ -2949,15 +2960,10 @@ static inline float megaWall(thread const Terrain& tr, float2 w) {
     return smoothstep(190.0, 270.0, mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y));
 }
 
-// Surface of level k's column v (xz in level cells) on face n; uv is the face position in [0, 1) of the column.
-// Coarse columns are s voxels wide but still unit voxels tall, and carry no structures.
-// lite: seen in rippled water, so detail finer than the ripples' blur is shaded at its mean.
-// Cloth for washing, bedrolls and rugs: linen, madder, indigo, ochre, green.
-constant float3 PROP_DYES[5] = { float3(0.36, 0.35, 0.32), float3(0.30, 0.07, 0.05), float3(0.07, 0.09, 0.20),
-                                 float3(0.36, 0.24, 0.07), float3(0.10, 0.17, 0.09) };
+constant float3 PROP_DYES[5] = { float3(0.36, 0.35, 0.32), float3(0.235, 0.097, 0.085), float3(0.08, 0.092, 0.158),
+                                 float3(0.319, 0.247, 0.145), float3(0.116, 0.158, 0.11) };
+constant float3 WOOL[3] = { float3(0.22, 0.18, 0.13), float3(0.17, 0.17, 0.11), float3(0.28, 0.21, 0.11) };
 
-// A prop's surface: sawn log ends, cloth, a rug's pattern, a canoe's hull, a barrel's hoops, garden rows, an oven's
-// mouth.
 static float3 propShade(Part P, float3 a, int feat, int3 v, int3 n, float2 uv, float2 wq, float wy, float hs, float Ht,
                         float fade, int2 sc, int2 mapOrigin, uint sh, uint seed, float autumn) {
     float floorY = float(P.y0), fy = wy - floorY;
@@ -2977,8 +2983,8 @@ static float3 propShade(Part P, float3 a, int feat, int3 v, int3 n, float2 uv, f
                 float2 e = type == PR_WOODPILE ? float2(fract(hs * 2.0 + 0.5 * fmod(floor(wy * 2.0), 2.0)) - 0.5, fract(wy * 2.0) - 0.5) * 2.0
                          : type == PR_LOGSEAT ? float2(fract(hs) - 0.5, wy - floorY - 0.35) * 2.4 : (fract(wq) - 0.5) * 2.2;
                 float r = length(e);
-                float3 wood = float3(0.31, 0.22, 0.12) * (0.92 + 0.08 * sin(r * 22.0));
-                float3 endc = r < 0.72 ? wood : r < 0.92 ? float3(0.09, 0.06, 0.04) : float3(0.03, 0.025, 0.02);
+                float3 wood = float3(0.31, 0.25, 0.17) * (0.92 + 0.08 * sin(r * 22.0));
+                float3 endc = r < 0.62 ? wood : r < 0.8 ? float3(0.15, 0.11, 0.07) : float3(0.05, 0.04, 0.03);
                 a = mix(type == PR_WOODPILE ? float3(0.19, 0.13, 0.08) : float3(0.24, 0.17, 0.10), endc, fade);
             }
         } else if (type == PR_BALES) {
@@ -2986,13 +2992,14 @@ static float3 propShade(Part P, float3 a, int feat, int3 v, int3 n, float2 uv, f
         } else if (type == PR_WASH) {
             a = PROP_DYES[ch % 5u] * (1.0 - 0.12 * fade * step(0.5, fract(hs * 3.0)));
         } else if (type == PR_RACK) {
-            float3 item = style == ST_ADOBE || style == ST_PUEBLO ? float3(0.32, 0.05, 0.03)
+            float3 item = style == ST_ADOBE || style == ST_PUEBLO ? float3(0.26, 0.08, 0.05)
                         : style == ST_TIPI ? float3(0.32, 0.24, 0.15) : float3(0.24, 0.24, 0.23);
             float strand = step(fract(hs * 3.0), 0.6) * (n.y == 0 ? 1.0 : 0.5);
             a = mix(mix(float3(0.04, 0.035, 0.03), item, 0.6), mix(float3(0.04, 0.035, 0.03), item, strand), fade);
         } else if (type == PR_BEDROLL) {
-            a = pi == 0 ? float3(0.34, 0.32, 0.27) : PROP_DYES[1u + uint(P.y2) % 4u];
-            if (pi != 0 && n.y > 0) a = mix(a, float3(0.34, 0.32, 0.27), 0.6 * fade * step(abs(fract(az ? wq.y : wq.x) - 0.3), 0.08));
+            float3 wool = WOOL[uint(P.y2) % 3u];
+            a = pi == 0 ? wool * 1.2 : wool;
+            if (pi != 0 && n.y > 0) a = mix(a, wool * 0.7, 0.6 * fade * step(abs(fract(az ? wq.y : wq.x) - 0.3), 0.08));
         } else if (type == PR_RUG) {
             float2 lq = wq - float2(mapOrigin) - float2(pr0);
             float2 hsz = float2(P.sz) * 0.5;
@@ -3037,6 +3044,9 @@ static float3 propShade(Part P, float3 a, int feat, int3 v, int3 n, float2 uv, f
     return a;
 }
 
+// Surface of level k's column v (xz in level cells) on face n; uv is the face position in [0, 1) of the column.
+// Coarse columns are s voxels wide but still unit voxels tall, and carry no structures.
+// lite: seen in rippled water, so detail finer than the ripples' blur is shaded at its mean.
 static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device const Site* sites, device const float4* lampState,
                          int k, int3 v, int3 n, float2 uv, float fp, float fpA, float3 p, uint seed, float time, bool lite = false) {
     if (lite) { fp = max(fp, 4.0); fpA = max(fpA, 4.0); }
@@ -3297,7 +3307,8 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         s.tread = s.albedo;
         s.canopy = 1.0;
     }
-    if (built && float(v.y) >= base) {
+    // Over a gap the structure starts part way up its lowest voxel.
+    if (built && float(v.y) >= (col.z > col.y ? floor(base) : base)) {
         uint sb = st.read(uint2(clamp(v.xz, int2(0), int2(tr.size - 1)))).r;
         int mat = int(sb & 15u);
         uint pk = (sb >> S_PART) & 31u;
@@ -3325,7 +3336,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         HouseAt ha;
         if (house) {
             houseAt(P, v.xz, sc, ha);
-            if (chim) vm = M_STONE;
+            if (chim && (ha.jw == (ha.Dw - 1) / 2 || wy < Ht - ha.f.lip)) vm = M_STONE;
             else if (feat == FT_VIGA || feat == FT_POST) vm = M_TIMBER;
             else if (feat == FT_DECK) vm = M_PLANK;
             else if (float(v.y) < floorY) vm = style == ST_STILT ? M_TIMBER : M_STONE;
@@ -3398,11 +3409,12 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
                 float joint = max(smoothstep(0.42, 0.48, jy), n.y == 0 ? smoothstep(0.44, 0.49, jx) : 0.0);
                 a *= 1.0 - 0.25 * joint * (1.0 - smoothstep(0.03, 0.08, fp));
             }
-            a *= P.kind == P_HENGE || P.kind == P_BOX ? 1.0 : 0.85;
+            if (chim || P.kind == P_FIRE) a = mix(a, float3(dot(a, float3(0.3, 0.59, 0.11))), 0.5) * (chim && wy > Ht - 0.4 ? 0.3 : 0.6);
+            else if (P.kind != P_HENGE && P.kind != P_BOX) a *= 0.85;
         } else if (vm == M_TIMBER) {
             a = (P.kind == P_PROP ? float3(0.17, 0.125, 0.08) : float3(0.10, 0.075, 0.055)) * (1.0 + 0.15 * sin(wy * 9.0 + perlin2(wq * 3.0, seed + 311u) * 3.0) * (1.0 - smoothstep(0.02, 0.06, fp)));
         } else if (vm == M_THATCH) {
-            if (P.kind == P_PROP) a = float3(0.25, 0.20, 0.11) * (0.9 + 0.2 * k);
+            if (P.kind == P_PROP) a = float3(0.232, 0.202, 0.148) * (0.9 + 0.2 * k);
             else if (style == ST_STILT || style == ST_PALM) a = mix(float3(0.27, 0.23, 0.14), float3(0.19, 0.18, 0.15), 0.5 * age + 0.4 * k);
             else if (style == ST_CROFT) a = mix(float3(0.12, 0.15, 0.08), float3(0.14, 0.12, 0.08), saturate(0.4 * k + 0.25 * cold));
             else a = mix(mix(float3(0.24, 0.18, 0.09), float3(0.16, 0.15, 0.11), 0.7 * k + 0.4 * age), float3(0.15, 0.12, 0.07), 0.4 * autumn);
@@ -3410,7 +3422,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
             float course = hashf(hash2i(int2(int(floor((n.y != 0 ? ra.x : wy) * 2.0)), int(floor(ra.y * 0.8))), seed + 330u));
             a *= 1.0 + fade * (0.14 * (course - 0.5) + 0.10 * perlin2(float2(ra.y * 4.0, wy * 0.7), seed + 312u));
         } else if (vm == M_SHINGLE) {
-            a = (style == ST_CABIN ? float3(0.16, 0.145, 0.13) : float3(0.20, 0.12, 0.075)) * (0.9 + 0.2 * k);
+            a = (style == ST_CABIN ? float3(0.20, 0.165, 0.13) : float3(0.20, 0.12, 0.075)) * (0.9 + 0.2 * k);
             float moss = saturate(perlin2(wq / 2.5, seed + 331u) + 0.5) * age;
             a = mix(a, float3(0.09, 0.11, 0.05), 0.5 * mix(moss, 0.5 * age, 1.0 - fade));
             // Rows of shingles, each row's joints offset half a shingle.
@@ -3422,7 +3434,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
             float along = n.x != 0 ? wq.y : wq.x;
             if (style == ST_STILT) {
                 // Bamboo: pale canes standing side by side.
-                a = float3(0.20, 0.16, 0.10) * (0.9 + 0.15 * k);
+                a = float3(0.26, 0.21, 0.13) * (0.9 + 0.15 * k);
                 a *= 1.0 - 0.18 * fade * smoothstep(0.36, 0.48, abs(fract(along * 3.0) - 0.5));
             } else {
                 // Log courses with dark chinking between them.
@@ -3458,9 +3470,9 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
                 banded = n.y == 0 && fy > float(P.y1) * 0.25 - 0.5 && fy < float(P.y1) * 0.25;
                 if (feat == FT_CROWN && wy >= Ht - 0.5) a *= 0.5;
             } else if (style == ST_CARAVAN) {
-                a = k < 0.5 ? float3(0.24, 0.06, 0.04) : float3(0.07, 0.08, 0.18);
+                a = k < 0.5 ? float3(0.22, 0.09, 0.06) : float3(0.09, 0.09, 0.15);
             } else {
-                a = k < 0.4 ? float3(0.30, 0.27, 0.21) : k < 0.75 ? float3(0.15, 0.18, 0.12) : float3(0.26, 0.17, 0.08);
+                a = k < 0.4 ? float3(0.30, 0.27, 0.21) : k < 0.75 ? float3(0.20, 0.19, 0.13) : float3(0.26, 0.18, 0.10);
             }
             if (banded) a = mix(a, band, fade * 0.85 + 0.15);
             // A painted door in a yurt's wall.
@@ -3485,7 +3497,8 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
             a = float3(0.05, 0.04, 0.03);
         }
         if (P.kind == P_PROP) a = propShade(P, a, feat, v, n, uv, wq, wy, hs, Ht, fade, sc, mapOrigin, sh, seed, autumn);
-        if (roof && (vm == M_THATCH || vm == M_SHINGLE || vm == M_FELT) && float(v.y + 1) > snowline) a = float3(0.29, 0.30, 0.33);
+        // Roofs snow where the ground they stand on does: a few voxels up they would wear a white lid over green land.
+        if (roof && (vm == M_THATCH || vm == M_SHINGLE || vm == M_FELT) && snowy) a = float3(0.29, 0.30, 0.33);
         if (P.kind == P_BOAT && n.y > 0) a *= 0.55;
         // Windows and doors on the wall faces of houses.
         float winM = 0.0;
@@ -3510,12 +3523,10 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
                 doorM = mix(m, 0.4, smoothstep(0.05, 0.3, fpA)) * 0.6;
             }
         }
-        if (house && ha.f.flat && n.y == 0 && float(v.y) >= floorY) {
-            // A ladder against the wall: two rails and their rungs, a little shadow beside them.
-            int3 ld = flatLadder(style, uint(P.y2), ha.Lw, ha.Dw);
-            uint side = n.x < 0 ? 0u : n.x > 0 ? 1u : n.z < 0 ? 2u : 3u;
-            uint want = style == ST_PUEBLO ? (ha.axisZ ? 1u : 3u) : (ha.axisZ ? 3u : 1u);
-            if (ha.iw == ld.x && ha.jw == ld.y && side == want && fy >= float(ld.z) && fy < flatTop(style, uint(P.y2), ha.iw, ha.jw, ha.Lw, ha.Dw)) {
+        int3 ld = house && ha.f.flat && n.y == 0 ? flatLadder(style, uint(P.y2), ha.Lw, ha.Dw) : int3(-1);
+        if (ld.x >= 0 && ha.iw == ld.x && ha.jw == ld.y && fy >= float(ld.z)) {
+            bool want = style == ST_PUEBLO ? (ha.axisZ ? n.x > 0 : n.z > 0) : (ha.axisZ ? n.z > 0 : n.x > 0);
+            if (want) {
                 float rail = step(abs(abs(uv.x - 0.5) - 0.28), 0.07);
                 float rung = step(abs(uv.x - 0.5), 0.28) * step(fract(fy * 2.5), 0.2);
                 float shadow = step(abs(abs(uv.x - 0.5) - 0.38), 0.05);
@@ -3527,7 +3538,8 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         // Lamps: flame on a fire's top course, a lantern atop its post, light in the windows.
         int li = ((P.flags >> 8) & 15) - 1;
         if (li >= 0) {
-            float3 E = lampState[((sb >> S_SITE) & 511u) * uint(MAX_LAMPS) + uint(li)].rgb * LAMP_EMIT[int(site.lamps[li].w) % 16];
+            int lk = int(site.lamps[li].w) % 16;
+            float3 E = lampState[((sb >> S_SITE) & 511u) * uint(MAX_LAMPS) + uint(li)].rgb * LAMP_EMIT[lk];
             bool topCourse = float(v.y) >= Ht - 1.0;
             if (P.kind == P_FIRE && topCourse && mat == M_FIRE) {
                 float flame = perlin3(float3(wq * 2.5, wy * 1.6 - time * 1.4), seed + 320u) * 0.5 + 0.5;
@@ -3538,8 +3550,6 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
             } else if (P.kind == P_BOX && topCourse) {
                 s.emit = E * float3(1.0, 0.8, 0.6) * (n.y > 0 ? 0.16 : 0.3 * smoothstep(0.3, 0.8, fract(wy)));
             } else if (house || P.kind == P_ROUND || tent) {
-                // Windows, a door ajar; a tent's canvas glows from the lamp inside it.
-                int lk = int(site.lamps[li].w) % 16;
                 float canvas = lk == L_TENT && (vm == M_FELT || vm == M_THATCH) ? 0.12 : 0.0;
                 s.emit = E * (winM + canvas) + E * doorM * float3(1.0, 0.72, 0.45);
             }
@@ -4059,12 +4069,12 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     skyFill *= mix(1.0 - mix(0.55, 0.85, hiSun) * (1.0 - sv), ROOF_SKY, roofW);
     // A wall sees half the dome, and the half it sees is the dimmer horizon side; without this a riser in shade
     // outshines the sunlit tread above it under a low sun.
-    skyFill *= 0.5 + 0.5 * saturate(nl.y);
+    skyFill *= built ? 0.7 + 0.3 * saturate(nl.y) : 0.5 + 0.5 * saturate(nl.y);
     // Light bounced into a hollow comes in through its mouth, off the lit ground outside, which a low sun still lights
     // face on where it reaches the shelter's own floor: dim, never black; an underside stays well under the lit top of
     // its slab.
     float keyUp = mix(max(L.key.y, 0.0), max(L.key.y, 0.3) * saturate(L.key.y * 10.0), ov);
-    float3 bounce = (1.0 - saturate(nl.y)) * 0.35 * alb * L.keyCol * keyUp;
+    float3 bounce = (1.0 - saturate(nl.y)) * (built ? 0.6 : 0.35) * alb * L.keyCol * keyUp;
     // High sun: risers sit in cooler shade so terraces keep their modelling at noon.
     float3 riserShade = mix(float3(1.0), float3(0.82, 0.86, 0.95),
                             (h.normal.y == 0 ? 1.0 - saturate(nl.y) : 0.0) * smoothstep(0.3, 0.6, L.key.y) * smoothstep(1.5, 4.0, drop) * (1.0 - ov));
