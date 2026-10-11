@@ -6776,37 +6776,42 @@ constant float3 SEAGLOW_PINK = float3(1.0, 0.115, 0.578);
 
 // Bioluminescence from dusk to night: bacteria blooming in some seas, lit along the swell's crests and brightest where
 // they break over the shallows, and below the surface sparse jellies, plankton swirls and rare rays. wp: the surface
-// point (frame-local), ww: its world xz, k: its level.
-static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k, float tw, float e0, float fres, float amt) {
+// point (frame-local), ww: its world xz, k: its level; depth: the depth of the bed the view ray met (large if none).
+static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k, float tw, float depth, float e0, float fres, float amt) {
     float t = x.time;
-    // The bed's depth, smooth across its voxel steps and through the morph band; and the same on the 4-voxel level, a
-    // broad ramp off the shore that a lake's one-step shelf lacks. Surf on the fine depth alone would be a line tracing
-    // the shore's stairs.
-    float depth = SEA - groundSmoothL(x.tr, k, wp.xz);
-    float mw = k < x.tr.levels - 1 ? morphAt(x.tr, k, wp.xz) : 0.0;
-    if (mw > 0.0) depth = mix(depth, SEA - groundSmoothL(x.tr, k + 1, wp.xz), mw);
-    int kc = max(k, 2);
-    float broad = SEA - groundSmoothL(x.tr, kc, wp.xz);
-    float mc = kc < x.tr.levels - 1 ? morphAt(x.tr, kc, wp.xz) : 0.0;
-    if (mc > 0.0) broad = mix(broad, SEA - groundSmoothL(x.tr, kc + 1, wp.xz), mc);
     // Voxels per pixel along the foreshortened view: detail hands over to its mean before it shrinks to a pixel.
     float fpv = tw * x.pixelAngle / max(-d.y, 0.1);
     float3 c = 0;
-    float bloom = smoothstep(0.04, 0.22, perlin2(ww * (1.0 / 900.0), x.seed + 70u) + 0.45 * perlin2(ww * (1.0 / 230.0), x.seed + 71u));
-    if (bloom > 0.0 && depth > 0.0) {
+    float b2 = perlin2(ww * (1.0 / 230.0), x.seed + 71u);
+    float bloom = smoothstep(0.04, 0.22, perlin2(ww * (1.0 / 900.0), x.seed + 70u) + 0.45 * b2);
+    if (bloom > 0.0) {
+        // The bed's depth on the 4-voxel level: a broad ramp off the shore, which a lake's one-step shelf lacks. Surf on
+        // the fine depth alone would be a line tracing the shore's stairs. The fine depth, smooth across its voxel steps
+        // and through the morph band, only fades the glow out at the waterline.
+        int kc = max(k, 2);
+        float broad = SEA - groundSmoothL(x.tr, kc, wp.xz);
+        float mc = kc < x.tr.levels - 1 ? morphAt(x.tr, kc, wp.xz) : 0.0;
+        if (mc > 0.0) broad = mix(broad, SEA - groundSmoothL(x.tr, kc + 1, wp.xz), mc);
+        float fine = 3.0;
+        if (broad < 2.5) {
+            fine = SEA - groundSmoothL(x.tr, k, wp.xz);
+            float mw = k < x.tr.levels - 1 ? morphAt(x.tr, k, wp.xz) : 0.0;
+            if (mw > 0.0) fine = mix(fine, SEA - groundSmoothL(x.tr, k + 1, wp.xz), mw);
+        }
         float2 wd = float2(0.8, 0.6);
         float along = dot(ww, wd), across = ww.x * wd.y - ww.y * wd.x;
         // Wave fronts across the wind, bent by a slow warp and lit in broken runs where they break.
-        float ph = along * 0.33 + 4.0 * perlin2(ww * 0.012, x.seed + 72u) - t * 0.9;
+        float warp = perlin2(ww * 0.012, x.seed + 72u);
+        float ph = along * 0.33 + 4.0 * warp - t * 0.9;
         float crest = pow(0.5 + 0.5 * sin(ph), 14.0);
-        crest *= smoothstep(0.0, 0.3, perlin3(float3(along * 0.05, across * 0.02, t * 0.06), x.seed + 79u));
+        crest *= smoothstep(0.0, 0.3, perlin2(float2(along * 0.05 + t * 0.04, across * 0.02), x.seed + 79u));
         float spark = mix(smoothstep(0.02, 0.3, e0), 0.3, saturate(fpv * 2.0));
         crest = mix(crest * (0.55 + 0.6 * spark), 0.04, saturate(fpv * 0.6));
         // Surf: crests break and brighten over the shallows, and a faint wash laps in to the waterline.
-        float sh = smoothstep(0.0, 0.4, depth) * smoothstep(0.0, 1.0, broad) * (1.0 - smoothstep(1.2, 2.7, broad)) * exp(-max(depth - 1.5, 0.0) * 0.5);
-        float lap = 0.5 + 0.5 * sin(broad * 2.6 - t * 1.3 + 5.0 * perlin2(ww * 0.03, x.seed + 73u));
-        float glow = (crest * (0.25 + 1.1 * sh) + 0.06 * sh * lap * lap * (0.3 + spark)) * smoothstep(0.0, 0.9, depth);
-        float3 hue = mix(SEAGLOW_TURQ, SEAGLOW_BLUE, smoothstep(-0.2, 0.25, perlin2(ww * (1.0 / 140.0), x.seed + 74u)));
+        float sh = smoothstep(0.0, 1.0, broad) * (1.0 - smoothstep(1.2, 2.7, broad));
+        float lap = 0.5 + 0.5 * sin(broad * 2.6 - t * 1.3 + 8.0 * warp);
+        float glow = (crest * (0.25 + 1.1 * sh) + 0.06 * sh * lap * lap * (0.3 + spark)) * smoothstep(0.0, 0.9, fine);
+        float3 hue = mix(SEAGLOW_TURQ, SEAGLOW_BLUE, smoothstep(-0.25, 0.2, b2));
         hue = mix(hue, SEAGLOW_TURQ * 1.2, saturate(glow * 1.5));
         c += hue * bloom * glow;
     }
@@ -7137,7 +7142,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         }
         float glowAmt = smoothstep(0.03, -0.14, x.L.sun.y);
         if (glowAmt > 0.0 && !(x.prof & 128))
-            col += seaGlow(x, d, wp, ww, wl, tw, e0, fres, glowAmt);
+            col += seaGlow(x, d, wp, ww, wl, tw, h.hit ? SEA - (o.y + d.y * h.t) : 1e3, e0, fres, glowAmt * (1.0 - salt));
         tSurf = tw;
     } else if (h.hit) {
         col = lit;
