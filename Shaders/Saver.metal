@@ -383,14 +383,24 @@ static inline Mega megaLift(float2 p, float lagoon, uint seed) {
         float2 c = (float2(cell) + 0.25 + 0.5 * float2(hashf(pcg(hc)), hashf(pcg(hc + 1u)))) * CELL;
         float R = 900.0 + 600.0 * hashf(pcg(hc + 2u));
         float dd = length(p - c);
-        if (dd < R + 1300.0) {
+        if (dd < R + 1600.0) {
             // Lobes and buttresses, so the rim reads as eroded rock, not a drum.
             float d = dd + 520.0 * fbm2(p / 1100.0, 3, seed + 241u) + 140.0 * perlin2(p / 330.0, seed + 244u)
-                    + 50.0 * perlin2(p / 140.0, seed + 242u);
-            float Hl = 1500.0 + 350.0 * hashf(pcg(hc + 3u));
-            float t = 0.22 * smoothstep(R + 420.0, R + 10.0, d) + 0.78 * smoothstep(R + 10.0, R - 6.0, d);
-            float top = 30.0 * fbm2(p / 350.0, 2, seed + 243u) * smoothstep(R, R - 80.0, d);
-            float T = Hl * t + top;
+                    + 50.0 * perlin2(p / 140.0, seed + 242u)
+                    + 110.0 * smoothstep(0.16, 0.0, abs(perlin2(p / 280.0, seed + 245u)));
+            float Hl = 1450.0 + 300.0 * hashf(pcg(hc + 3u));
+            // Seen from far off a sheer drum is a rectangle: the wall steps back at two ledges whose heights and depths
+            // wander round the rim, and canyons notch the crown, so the outline is never two verticals under a flat top.
+            float a1 = 0.46 + 0.12 * perlin2(p / 900.0, seed + 246u);
+            float a2 = 0.70 + 0.12 * perlin2(p / 700.0 + 9.3, seed + 246u);
+            float r1 = R - 6.0 - R * (0.04 + 0.22 * saturate(perlin2(p / 600.0, seed + 247u) + 0.5));
+            float r2 = r1 - 16.0 - R * (0.04 + 0.22 * saturate(perlin2(p / 520.0 + 4.7, seed + 248u) + 0.5));
+            float crown = 240.0 * fbm2(p / 800.0, 3, seed + 243u) - 380.0 * smoothstep(0.09, 0.0, abs(perlin2(p / 520.0, seed + 249u)));
+            crown = floor(crown / 70.0) * 70.0 + 70.0 * smoothstep(0.7, 1.0, fract(crown / 70.0));
+            float t = 0.32 * pow(smoothstep(R + 900.0, R + 10.0, d), 1.6) + (a1 - 0.32) * smoothstep(R + 10.0, R - 6.0, d)
+                    + 0.02 * smoothstep(R - 6.0, r1, d) + (a2 - a1 - 0.02) * smoothstep(r1 + 16.0, r1, d)
+                    + 0.02 * smoothstep(r1, r2, d);
+            float T = Hl * t + (Hl * (0.96 - a2) + crown) * smoothstep(r2 + 16.0, r2, d);
             if (T > g.U) { g.U = T; g.wK = 0.0; g.lipU = 0.0; g.notchH = 0.0; }
         }
     }
@@ -657,7 +667,7 @@ static inline bool towerNearTepui(float2 p, float d, uint seed) {
             uint hc = hash2i(cell, seed + 240u);
             if (hashf(hc) >= 0.35) continue;
             float2 c = (float2(cell) + 0.25 + 0.5 * float2(hashf(pcg(hc)), hashf(pcg(hc + 1u)))) * CELL;
-            if (length(p - c) < 1500.0 + 1300.0 + 520.0 + d) return true;
+            if (length(p - c) < 1500.0 + 1600.0 + 520.0 + d) return true;
         }
     return false;
 }
