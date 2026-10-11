@@ -1099,7 +1099,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentBytes(&tileMasks, length: tileMasks.count * 4, index: 7)
             let tb = camera.basis, tanV = tan(25.0 * .pi / 180) * 1.05
             towers.frameTable(eye: camera.position, fwd: tb.fwd, right: tb.right, up: tb.up, tanH: tanV * Double(aspect), tanV: tanV)
-            enc.setFragmentBytes(towers.table, length: Towers.tableBytes, index: 8)
+            enc.setFragmentBytes(towers.table, length: Towers.tableBytes, index: 9)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
         }
