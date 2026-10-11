@@ -54,6 +54,8 @@ final class FlightCamera {
     // Giants already passed (by axis, rounded), and the one the flight is slowly heading for.
     private var visitedGiants = Set<SIMD2<Int>>()
     private var pilgrim: SIMD2<Double>?
+    // The pilgrim is a big island, flown beneath rather than beside.
+    private var pilgrimIsle = false
 
     init(seed: UInt32, world: World, far: FarHeights) {
         self.world = world
@@ -149,7 +151,9 @@ final class FlightCamera {
             for off in [-0.2, 0.0, 0.2] {
                 let d2 = SIMD2(sin(heading + off), cos(heading + off))
                 let q = SIMD2(position.x, position.z) + (off == 0 ? dir : d2) * dist
-                guard let g = dist < 300 ? world.height(x: q.x, z: q.y) : far.height(x: q.x, z: q.y) else { continue }
+                // An island the flight will pass beneath is no wall; far off it is a vista like any relief.
+                guard let g = dist < 1000 ? (dist < 300 ? (world.height(x: q.x, z: q.y) != nil ? h(q.x, q.y) : nil) : hFar(q.x, q.y))
+                                          : far.height(x: q.x, z: q.y) else { continue }
                 let e = atan2(g - position.y, dist)
                 if dist >= 1000 { best = max(best, e) } else { near = max(near, e) }
             }
@@ -301,7 +305,20 @@ final class FlightCamera {
         let light = lightW * max(0, cos(heading - lightYaw)) * 0.8
         let turn = -0.25 * abs(FlightCamera.angleDiff(heading, yaw))
         return relief + water + light + turn + wall + fill + open + siteInterest(heading, night: night).0 + towerInterest(heading, night: night) + { let v = vista(heading); return v.0 * (1 - night) - v.1 }()
-            + giantInterest(heading)
+            + giantInterest(heading) + isleInterest(heading)
+    }
+
+    // A big island 0.3-3 km ahead is a subject, framed head on: the flight goes on to pass beneath it.
+    private func isleInterest(_ heading: Double) -> Double {
+        let p = SIMD2(position.x, position.z)
+        var best = 0.0
+        for s in islesAt() where s.radius > 60 {
+            let v = s.pos - p, d = simd_length(v)
+            guard d > 300, d < 3000 else { continue }
+            let off = abs(FlightCamera.angleDiff(atan2(v.x, v.y), heading))
+            best = max(best, 0.8 * max(0, 1 - off / 0.35) * min(1, (3000 - d) / 1000) * (s.passable ? 1 : 0.4))
+        }
+        return best
     }
 
     // A giant tree is a landmark: a heading that frames one 0.4-3 km ahead scores, and one far off draws the flight
@@ -473,7 +490,8 @@ final class FlightCamera {
             let w = (1 - max(along, 0) / 1000) * (1 - abs(across) / clear)
             steerGiant += (across >= 0 ? -1 : 1) * 0.09 * min(1, 2.5 * w)
         }
-        // The nearest giant not yet reached, up to 12k off, draws the heading gently toward a point beside it.
+        // The nearest giant not yet reached, up to 12k off, draws the heading gently toward a point beside it; so does a
+        // big island, toward its middle, to pass beneath it.
         var steerPilgrim = 0.0
         if time >= nextPilgrim {
             nextPilgrim = time + 2
@@ -485,20 +503,27 @@ final class FlightCamera {
                 let v = g.pos - p, d = simd_length(v)
                 // Within 1500 it is reached: framing it and passing beside it are the shots' and the steering's.
                 if d < 1500 { visitedGiants.insert(key); continue }
-                if d < best { best = d; pilgrim = g.pos }
+                if d < best { best = d; pilgrim = g.pos; pilgrimIsle = false }
+            }
+            for s in islesAt() where s.radius > 120 && s.passable {
+                let key = SIMD2(Int(s.pos.x.rounded()), Int(s.pos.y.rounded()))
+                if visitedGiants.contains(key) { continue }
+                let d = simd_length(s.pos - p)
+                if d < 0.4 * s.reach { visitedGiants.insert(key); continue }
+                if d < best { best = d; pilgrim = s.pos; pilgrimIsle = true }
             }
         }
         if let g = pilgrim {
             let v = g - p
             let side = (v.x * fwdFlat.y - v.y * fwdFlat.x) >= 0 ? 1.0 : -1.0
             let n = simd_normalize(SIMD2(-v.y, v.x)) * side
-            let aim = g + n * (GiantInfo.reach + 260)
+            let aim = pilgrimIsle ? g : g + n * (GiantInfo.reach + 260)
             let bearing = atan2(aim.x - p.x, aim.y - p.y)
             // Not over a massif: where the land toward it rises well above the flight, the way round is the routing's.
             var rise = 0.0
             for d in [300.0, 600.0, 900.0] { rise = max(rise, hFar(p.x + sin(bearing) * d, p.y + cos(bearing) * d) - position.y) }
             // Nor while a slope fills the frame: getting clear of it comes first.
-            steerPilgrim = sin(FlightCamera.angleDiff(bearing, yaw)) * 0.06 * min(max((60 - rise) / 40, 0), 1) * (1 - hug)
+            steerPilgrim = sin(FlightCamera.angleDiff(bearing, yaw)) * (pilgrimIsle ? 0.09 : 0.06) * min(max((60 - rise) / 40, 0), 1) * (1 - hug)
         }
         let urgency = max(min(blockedAhead / 20, 1), 0.7 * crowd)
         avoidRate = routeYaw.map { sin(FlightCamera.angleDiff($0, yaw)) * 0.15 * urgency } ?? 0

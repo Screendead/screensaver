@@ -383,10 +383,11 @@ final class World {
         return buffers[i] != nil && scratch != nil
     }
 
-    private static let passes = 6
+    private static let passes = 7
     // Pieces per pass: the tables (giants in two halves, then the islands, which keep clear of them), then bands of rows;
-    // planting (giants, the jungle) runs in half bands, the costliest columns of any pass.
-    private static let passBands = [3, size / bandRows, size / bandRows, size / bandRows, 2 * size / bandRows, size / bandRows]
+    // planting (giants, the jungle) runs in half bands, the costliest columns of any pass; the band mips' first level
+    // (under islands it works out the level-1 columns) a band of rows at a time too.
+    private static let passBands = [3, size / bandRows, size / bandRows, size / bandRows, 2 * size / bandRows, size / bandRows, size / bandRows]
     private static var pieceCount: Int { passBands.reduce(0, +) + 1 }
     // Piece k's pass, band and rows per band (the max mips' piece is pass `passes`).
     static func piece(_ k: Int) -> (pass: Int, band: Int, rows: Int) {
@@ -477,6 +478,21 @@ final class World {
                     j.next += 1
                     n -= 1
                     continue
+                case 6:
+                    var brow = UInt32(band * rows / 2)
+                    enc.setComputePipelineState(bandTopPipeline)
+                    enc.setTexture(buf.levels[0], index: 0)
+                    enc.setTexture(buf.gx, index: 1)
+                    enc.setTexture(buf.bandViews[0], index: 2)
+                    enc.setTexture(buf.levels[1], index: 3)
+                    enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
+                    enc.setBuffer(buf.giants, offset: 0, index: 1)
+                    enc.setBuffer(buf.isles, offset: 0, index: 2)
+                    enc.setBytes(&brow, length: MemoryLayout<UInt32>.stride, index: 3)
+                    enc.dispatchThreads(MTLSize(width: World.size / 2, height: rows / 2, depth: 1), threadsPerThreadgroup: tg)
+                    j.next += 1
+                    n -= 1
+                    continue
                 case 4:
                     enc.setComputePipelineState(plantPipeline)
                     enc.setTexture(buf.climate, index: 0)
@@ -517,15 +533,6 @@ final class World {
                 enc.setTexture(buf.hmax0, index: 1)
                 enc.setTexture(buf.gx, index: 2)
                 enc.dispatchThreads(MTLSize(width: World.size, height: World.size, depth: 1), threadsPerThreadgroup: tg)
-                                enc.setComputePipelineState(bandTopPipeline)
-                enc.setTexture(buf.levels[0], index: 0)
-                enc.setTexture(buf.gx, index: 1)
-                enc.setTexture(buf.bandViews[0], index: 2)
-                enc.setTexture(buf.levels[1], index: 3)
-                enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
-                enc.setBuffer(buf.giants, offset: 0, index: 1)
-                enc.setBuffer(buf.isles, offset: 0, index: 2)
-                enc.dispatchThreads(MTLSize(width: World.size / 2, height: World.size / 2, depth: 1), threadsPerThreadgroup: tg)
                 enc.setComputePipelineState(bandReducePipeline)
                 for l in 1..<buf.bandViews.count {
                     enc.setTexture(buf.bandViews[l - 1], index: 0)
@@ -1940,8 +1947,9 @@ enum Snapshot {
                 if i % 12 == 0 {
                     fflush(stdout)
                     let nearG = r.world.giants.map { simd_length(SIMD2(p.x, p.z) - $0.pos) }.min() ?? -1
-                    print(String(format: "flight t=%d pos=(%.0f,%.0f) y=%.0f ground=%.0f wall=%.2f far=%.0f yaw=%.0f giant=%.0f", i, p.x, p.z, p.y, g, wall,
-                                 r.farHeight(x: p.x + sin(r.camera.yaw) * 600, z: p.z + cos(r.camera.yaw) * 600) ?? -1, r.camera.yaw * 180 / .pi, nearG))
+                    let nearI = r.world.isles.map { simd_length(SIMD2(p.x, p.z) - $0.pos) - $0.reach }.min() ?? -1
+                    print(String(format: "flight t=%d pos=(%.0f,%.0f) y=%.0f ground=%.0f wall=%.2f far=%.0f yaw=%.0f giant=%.0f isle=%.0f", i, p.x, p.z, p.y, g, wall,
+                                 r.farHeight(x: p.x + sin(r.camera.yaw) * 600, z: p.z + cos(r.camera.yaw) * 600) ?? -1, r.camera.yaw * 180 / .pi, nearG, nearI))
                 }
                 if i % 60 == 0 {
                     for _ in 0..<4 {

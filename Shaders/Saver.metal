@@ -1155,8 +1155,8 @@ static inline float isleStretch(float R, uint h) { return (R > 40.0 && (R <= 210
 // Nothing of an island lies further than this from its centre.
 static inline float isleReach(float R, uint h) { return isleStretch(R, h) * (1.45 * R + 8.0); }
 
-// (underside, top) of island r over world column centre p; empty outside it. s: the column's width (roots hang only
-// from the 1-voxel map's).
+// (underside, top) of island r over world column centre p; empty outside it. s: the sample spacing (roots hang on the
+// 1-voxel map and level 1, whose columns their clumps match, so they go only at level 1's far handoff).
 static inline float2 isleSpan(IsleRec r, float2 p, uint seed, int s) {
     float R = r.R;
     uint h = r.h;
@@ -1201,11 +1201,11 @@ static inline float2 isleSpan(IsleRec r, float2 p, uint seed, int s) {
     float hb = th / 7.0;
     th = (floor(hb) + smoothstep(0.6, 1.0, fract(hb))) * 7.0;
     float bot = floor(top - max(th, 4.0));
-    if (s == 1) {
+    if (s <= 2) {
         // Roots and vines hang in clumps under the outer keel, two columns wide.
         uint rh = hash2i(int2(floor(p / 2.0)), seed + 707u);
         float clump = smoothstep(0.05, 0.35, perlin2(p / 19.0, seed + 711u)) * smoothstep(0.45, 0.9, d);
-        if (hashf(rh) < 0.12 * clump) bot -= floor(4.0 + 26.0 * pow(hashf(pcg(rh)), 2.0));
+        if (hashf(rh) < 0.07 * clump) bot -= floor(4.0 + 26.0 * pow(hashf(pcg(rh)), 2.0));
     }
     return float2(bot, top);
 }
@@ -2508,7 +2508,9 @@ kernel void bandTop(texture2d<float, access::read> src [[texture(0)]],
                     constant int4& info [[buffer(0)]],
                     device const GiantRec* giants [[buffer(1)]],
                     device const IsleRec* isles [[buffer(2)]],
-                    uint2 gid [[thread_position_in_grid]]) {
+                    constant uint& row0 [[buffer(3)]],
+                    uint2 g [[thread_position_in_grid]]) {
+    uint2 gid = g + uint2(0, row0);
     if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
     uint2 s = gid * 2;
     uint2 cs[4] = { s, s + uint2(1, 0), s + uint2(0, 1), s + uint2(1, 1) };
@@ -4446,6 +4448,7 @@ struct Terrain {
     constant TowerTable* towers; // the ruined towers nearest the camera (towerN of them; none outside the scene pass)
     int towerN;
     texture2d_array<float> cb;   // coarse band mips (reduceMaxParent): slice k - 1, mip m - 1 holds the air of max mip m's cells
+    bool isles;                  // an island stands in view
 };
 
 static inline int2 levelOrigin(thread const Terrain& tr, int k) { return k == 0 ? int2(0) : tr.origin >> k; }
@@ -4483,11 +4486,12 @@ static inline float groundL(thread const Terrain& tr, int k, int2 c, float y) {
         return col.a > 0.0 ? col.g : col.r;
     }
     uint2 t = uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1));
-    if (k <= GAP_LEVELS) {
+    float H = tr.ch.read(t, uint(k - 1), 0).r;
+    if (tr.isles && k <= GAP_LEVELS && y < H - 3.0) {
         float2 g = tr.cg.read(t, uint(k - 1)).rg;
         if (g.x < 0.0 && y < g.y) return -g.x;
     }
-    return tr.ch.read(t, uint(k - 1), 0).r;
+    return H;
 }
 
 // Ground bilinearly interpolated between column centres: the continuous slope under the stairs.
@@ -4787,7 +4791,7 @@ kernel void bakeHorizon(device float* out [[buffer(0)]],
     uint gid = tid.y;
     int levels = int(f.fade.z);
     Terrain tr { hm, coarse, coarse, coarse, hm, f.lod, f.mapInfo.xy, f.mapInfo.z, levels,
-                 f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, 0.0, hx, gx, cg, cg2, hx, uint(f.mapInfo.w), giants, hx, nullptr, 0, cg };
+                 f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, 0.0, hx, gx, cg, cg2, hx, uint(f.mapInfo.w), giants, hx, nullptr, 0, cg, false };
     float a = (float(gid) + 0.5) * 6.2831853 / float(HORIZON_BINS);
     float2 dir = float2(sin(a), cos(a));
     float3 o = f.camPos.xyz;
@@ -5002,6 +5006,8 @@ struct Surface {
     float wall;     // megaWall: among the great walls
     float3 nrm;     // the plane a structure's roof voxel or a tower's wall shades as (zero: the face normal)
     float3 emit;    // fire, lanterns and lit windows
+    bool isleUnder; // under an island: the sky it hides is isleSkyOcc's
+    float gy;       // the height the ground round it is judged from (groundL): above any island for an island's own rock
 };
 
 // Autumn foliage: a slow Perlin hue field runs lingering green, gold, orange, scarlet to crimson;
@@ -5329,6 +5335,8 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     s.face = 0;
     s.nrm = 0;
     s.emit = 0;
+    s.isleUnder = false;
+    s.gy = p.y;
     int2 mapOrigin = tr.origin;
     float cs = tr.lod[k].w;
     float4 col4 = columnL(tr, k, v.xz);
@@ -5369,6 +5377,9 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     bool isleCol = !tree && !built && !giant && col.z > col.y && isleGapL(tr, k, v.xz);
     float Hc = isleCol && float(v.y) >= col.z ? col.y + 4.0 : H;
     bool isleRoot = false;
+    s.isleUnder = isleCol && float(v.y) < col.z;
+    // An island's own rock sees its neighbours whole: the ground under them is the ground's business.
+    if (isleCol && float(v.y) >= col.z) s.gy = 1e9;
     float hx0, hx1, hz0, hz1;
     float4 frontCol = 0.0;
     if (k == 0) {
@@ -5378,7 +5389,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         hx0 = a0.a > 0.0 ? a0.g : a0.r; hx1 = a1.a > 0.0 ? a1.g : a1.r;
         hz0 = a2.a > 0.0 ? a2.g : a2.r; hz1 = a3.a > 0.0 ? a3.g : a3.r;
         // Under an island's edge the ground sees the island's own ground beside it, not a cliff to its top.
-        float vy = float(v.y);
+        float vy = min(float(v.y), s.gy);
         if (a0.a == 0.0 && a0.b > a0.g && vy < a0.b && isleGapL(tr, 0, v.xz + int2(-1, 0))) hx0 = a0.g;
         if (a1.a == 0.0 && a1.b > a1.g && vy < a1.b && isleGapL(tr, 0, v.xz + int2(1, 0))) hx1 = a1.g;
         if (a2.a == 0.0 && a2.b > a2.g && vy < a2.b && isleGapL(tr, 0, v.xz + int2(0, -1))) hz0 = a2.g;
@@ -5397,21 +5408,24 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
             if (a2.a == GIANT_A) hz0 = H;
             if (a3.a == GIANT_A) hz1 = H;
         }
-        // Rock gaps only: canopies and buildings hold theirs with a non-zero alpha.
+        // Rock gaps only: canopies and buildings hold theirs with a non-zero alpha, and an island's air is no roof.
         s.gapSpan = float2(1e9, -1e9);
         float4 cs5[5] = { col4, a0, a1, a2, a3 };
+        int2 o5[5] = { int2(0), int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1) };
         for (int i = 0; i < 5; i++)
-            if (cs5[i].b > cs5[i].g && cs5[i].a == 0.0) s.gapSpan = float2(min(s.gapSpan.x, cs5[i].g), max(s.gapSpan.y, cs5[i].b));
+            if (cs5[i].b > cs5[i].g && cs5[i].a == 0.0 && (i == 0 ? !isleCol : !isleGapL(tr, 0, v.xz + o5[i])))
+                s.gapSpan = float2(min(s.gapSpan.x, cs5[i].g), max(s.gapSpan.y, cs5[i].b));
         s.gapNear = s.gapSpan.y > s.gapSpan.x;
         frontCol = n.x < 0 ? a0 : n.x > 0 ? a1 : n.z < 0 ? a2 : a3;
     } else {
-        float vy = float(v.y);
+        float vy = min(float(v.y), s.gy);
         hx0 = groundL(tr, k, v.xz + int2(-1, 0), vy); hx1 = groundL(tr, k, v.xz + int2(1, 0), vy);
         hz0 = groundL(tr, k, v.xz + int2(0, -1), vy); hz1 = groundL(tr, k, v.xz + int2(0, 1), vy);
         float4 fr = n.y == 0 ? columnL(tr, k, v.xz + n.xz) : float4(0);
         frontCol = fr;
-        s.gapNear = col.z > col.y || fr.z > fr.y;
-        s.gapSpan = float2(min(col.z > col.y ? col.y : 1e9, fr.z > fr.y ? fr.y : 1e9), max(col.z > col.y ? col.z : -1e9, fr.z > fr.y ? fr.z : -1e9));
+        bool cg0 = col.z > col.y && !isleCol, fg = fr.z > fr.y && !isleGapL(tr, k, v.xz + n.xz);
+        s.gapNear = cg0 || fg;
+        s.gapSpan = float2(min(cg0 ? col.y : 1e9, fg ? fr.y : 1e9), max(cg0 ? col.z : -1e9, fg ? fr.z : -1e9));
     }
     s.nh = float4(hx0, hx1, hz0, hz1);
     float slope = max(max(H - hx0, H - hx1), max(H - hz0, H - hz1));
@@ -6687,8 +6701,8 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         // Side faces take the wall's direction over several columns: a single column's jog in a wall would otherwise
         // turn a narrow face to the light and draw a pale dash down the wall.
         float R = max(max(h.normal.y != 0 ? 2.0 : 6.0, 1.5 * fp), cs);
-        float2 grad = float2(groundSmoothL(x.tr, k, p.xz + float2(R, 0), p.y) - groundSmoothL(x.tr, k, p.xz - float2(R, 0), p.y),
-                             groundSmoothL(x.tr, k, p.xz + float2(0, R), p.y) - groundSmoothL(x.tr, k, p.xz - float2(0, R), p.y)) / (2.0 * R);
+        float2 grad = float2(groundSmoothL(x.tr, k, p.xz + float2(R, 0), s.gy) - groundSmoothL(x.tr, k, p.xz - float2(R, 0), s.gy),
+                             groundSmoothL(x.tr, k, p.xz + float2(0, R), s.gy) - groundSmoothL(x.tr, k, p.xz - float2(0, R), s.gy)) / (2.0 * R);
         float3 g = normalize(float3(-grad.x, 1.0, -grad.y));
         nS = h.normal.y != 0 ? g : normalize(mix(nS, g, wt));
     }
@@ -6726,8 +6740,8 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // turn each face of a jogging wall its own way.
     if (s.mat == 0 && wf > 0.0 && s.H > SEA + 20.0 && shadows != 2 && !planar) {
         float R2 = max(16.0, 2.0 * cs);
-        float2 g2 = float2(groundSmoothL(x.tr, k, p.xz + float2(R2, 0), p.y) - groundSmoothL(x.tr, k, p.xz - float2(R2, 0), p.y),
-                           groundSmoothL(x.tr, k, p.xz + float2(0, R2), p.y) - groundSmoothL(x.tr, k, p.xz - float2(0, R2), p.y)) / (2.0 * R2);
+        float2 g2 = float2(groundSmoothL(x.tr, k, p.xz + float2(R2, 0), s.gy) - groundSmoothL(x.tr, k, p.xz - float2(R2, 0), s.gy),
+                           groundSmoothL(x.tr, k, p.xz + float2(0, R2), s.gy) - groundSmoothL(x.tr, k, p.xz - float2(0, R2), s.gy)) / (2.0 * R2);
         sus = smoothstep(0.6, 1.1, length(g2)) * (1.0 - ov);
         if (h.normal.y == 0) keep = max(keep, sus);
         // Treads and risers alike light as the face they make up, or every tread is a lit line across it.
@@ -6739,7 +6753,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // A planar wall's jogs are its plane's.
     if (h.normal.y == 0 && s.mat == 0 && wn < 1.0 && shadows != 2 && !planar) {
         int2 t = h.normal.x != 0 ? int2(0, 1) : int2(1, 0), o = h.normal.xz;
-        float vy = float(h.voxel.y);
+        float vy = min(float(h.voxel.y), s.gy);
         float run = float(groundL(x.tr, k, h.voxel.xz + t, vy) > groundL(x.tr, k, h.voxel.xz + t + o, vy) + 0.5)
                   + float(groundL(x.tr, k, h.voxel.xz - t, vy) > groundL(x.tr, k, h.voxel.xz - t + o, vy) + 0.5);
         lone = (1.0 - 0.5 * run) * smoothstep(0.01, 0.05, fp) * (1.0 - wn) * (1.0 - keep) * (1.0 - ov);
@@ -6798,7 +6812,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         if (maps) sh = min(sh, shadowMapLit(x, so, mapOnly));
         // Under a roof the roof stands in for the ray: the maps see an overhang only from two texels out, and a traced ray
         // that slips out under the edge on one row and not the next stripes the back wall with sun.
-        if (wf2 > 0.0 && !planar) sh = mix(sh, min(sh, stairShadow(x.tr, k, p.xz, p.y, L.key, d, contact, 0.35, fp > 3.0 || shadows == 2)), wf2);
+        if (wf2 > 0.0 && !planar) sh = mix(sh, min(sh, stairShadow(x.tr, k, p.xz, s.gy, L.key, d, contact, 0.35, fp > 3.0 || shadows == 2)), wf2);
         float floorSh = mix(mix(0.5, 0.25, hiSun), 0.32, L.gold);
         sh = mix(sh, floorSh + (1.0 - floorSh) * sh, wf);
         sh = mix(sh, 1.0, 0.3 * L.night);
@@ -6816,8 +6830,8 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // Under a roof the visibility is taken where the point is, not at its column's centre: column by column it would
     // jump between reaching past the roof's edge and not, striping the wall.
     float2 svAt = planar ? p.xz + s.nrm.xz * 1.5 : mix((float2(h.voxel.xz + h.normal.xz) + 0.5) * cs, p.xz, max(wf2, ov));
-    float svY = wf2 > 0.0 ? mix(p.y, groundSmoothL(x.tr, k, p.xz, p.y), wf2) : p.y;
-    float sv = x.prof & 16 || roofW >= 1.0 ? 1.0 : skyVisibility(x.tr, k, svAt, svY, lite || fp > 5.0 ? 2 : fp > 2.0 ? 1 : 0);
+    float svY = wf2 > 0.0 ? mix(p.y, groundSmoothL(x.tr, k, p.xz, s.gy), wf2) : p.y;
+    float sv = x.prof & 16 || roofW >= 1.0 || s.isleUnder ? 1.0 : skyVisibility(x.tr, k, svAt, svY, lite || fp > 5.0 ? 2 : fp > 2.0 ? 1 : 0);
     // Under a roof the sky comes only through the mouth, an even share well under open shade's: the visibility samples
     // only six voxels out, so in a shelter it reads the roof all round and varies column by column with the back wall's
     // jogs, striping it.
@@ -7354,7 +7368,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     float gmax = f.misc.y;
     for (int k = 1; k < levels; k++) gmax = max(gmax, abs(coarse.read(uint2(0), uint(k - 1), coarse.get_num_mip_levels() - 1).r) + 1.0);
     if (int(f.shadow.y) & 2) gmax = min(gmax, 260.0);
-    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, cg2, hb, uint(f.mapInfo.w), giants, pvTex, towers, sceneTowers ? towers->n.x : 0, cbTex };
+    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, cg2, hb, uint(f.mapInfo.w), giants, pvTex, towers, sceneTowers ? towers->n.x : 0, cbTex, f.shadow.w > 0.0 };
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
             2.0 * tanH * f.resolution.w, f.misc.w, makeLight(f.sunDir.xyz),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
