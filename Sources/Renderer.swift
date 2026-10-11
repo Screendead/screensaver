@@ -325,8 +325,11 @@ final class World {
         if cur.origin.x == Int32.min || drift > 340 || (synchronous && drift > World.recentre) {
             if job != nil { advance(pieces: Int.max, wait: true); return }
             if pending { return } // the in-flight job will land momentarily
-            guard begin(active) else { return }
-            job = (active, o, 0, CACurrentMediaTime())
+            // Built beside the map shown, which frames in flight may still read; only the first is built in place.
+            let target = cur.origin.x == Int32.min ? active : 1 - active
+            guard begin(target), let next = buffers[target] else { return }
+            if target != active { memcpy(next.giants.contents(), cur.giants.contents(), cur.giants.length) }
+            job = (target, o, 0, CACurrentMediaTime())
             // VR_PIECES: one command buffer per piece, each timed (the regeneration budget is per piece).
             if World.timePieces {
                 while let j = job {
