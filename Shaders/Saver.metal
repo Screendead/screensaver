@@ -196,7 +196,9 @@ constant float TERRAIN_CEIL = 2000.0;
 // on its own. U is 0 outside them, so the lowland there is exactly as before. p is seed-offset world position.
 // lipU: the lift the column would have on the cap rock behind an escarpment's edge (0: no lip here); lipR: how far the
 // cap reaches out over the soft beds, lipU01: the column's place under it (0 at the wall line, 1 at the lip's edge).
-struct Mega { float U; float wK; float lipU; float lipR; float lipU01; };
+// notchFoot, notchH: a notch cut round a karst tower's foot, its floor that far above the lowland ground (-1: at the
+// water line) and its height at this column (0: none).
+struct Mega { float U; float wK; float lipU; float lipR; float lipU01; float notchFoot; float notchH; };
 
 // The tableland field, also tapped beside a column to measure its distance to an escarpment in voxels.
 static inline float tableField(float2 p, float M, uint seed) {
@@ -209,7 +211,7 @@ static inline Mega megaLift(float2 p, float lagoon, uint seed) {
     Mega g;
     g.U = 0.0;
     g.wK = 0.0;
-    g.lipU = 0.0; g.lipR = 0.0; g.lipU01 = 0.0;
+    g.lipU = 0.0; g.lipR = 0.0; g.lipU01 = 0.0; g.notchFoot = 0.0; g.notchH = 0.0;
     float lipU = 0.0, uT = 0.0;
     float2 cw = float2(fbm2(p / 7000.0, 2, seed + 200u), fbm2(p / 7000.0 + 71.3, 2, seed + 201u)) * 3000.0;
     float2 q = p + cw;
@@ -290,6 +292,28 @@ static inline Mega megaLift(float2 p, float lagoon, uint seed) {
             float kh = max(max(shaft, shaftB) + 9.0 * crag * max(big, bigB), P * M * hv * 0.8 * thin);
             kh = max(kh, ped + 0.5 * kh);
             U += wK * max(kh, 0.0);
+            // Notches: the rock just inside a big tower's foot is undercut, a rounded nip at the water line or above the
+            // talus, its depth a distance in voxels inside the tower's edge (the field over its gradient), so a needle
+            // thinner than two notches is pierced right through.
+            bool useB = shaftB > shaft;
+            float baseT = P * M * (useB ? hB : hv);
+            float F = useB ? cB : c1, tF = (useB ? thrB : thr) + 0.01;
+            if (wK > 0.5 && baseT > 110.0 && F > tF && F < tF + 0.2 && thin < 0.5) {
+                float2 e1 = float2(1, 0), e2 = float2(0, 1);
+                float2 k1 = float2(perlin2((p + e1) / 60.0, seed + 231u), perlin2((p + e1) / 60.0 + 7.7, seed + 232u)) * 14.0;
+                float2 k2 = float2(perlin2((p + e2) / 60.0, seed + 231u), perlin2((p + e2) / 60.0 + 7.7, seed + 232u)) * 14.0;
+                float Fx = useB ? perlin2((p + e1 + k1 * 2.5) / 130.0, seed + 245u) : perlin2((p + e1 + k1) / 52.0, seed + 233u);
+                float Fz = useB ? perlin2((p + e2 + k2 * 2.5) / 130.0, seed + 245u) : perlin2((p + e2 + k2) / 52.0, seed + 233u);
+                float grad = max(length(float2(Fx - F, Fz - F)), 1e-6);
+                float delta = (F - tF) / grad;
+                float D = 2.0 + 5.0 * saturate(perlin2(p / 150.0, seed + 265u) + 0.5);
+                if (delta < D) {
+                    float v = delta / D;
+                    float hn = 5.0 + 7.0 * saturate(perlin2(p / 120.0, seed + 266u) + 0.5);
+                    g.notchH = hn * sqrt(1.0 - v * v);
+                    g.notchFoot = wK * max(baseT * (useB ? 0.12 : 0.05), ped + baseT * (useB ? 0.06 : 0.025));
+                }
+            }
         }
         // Lagoon country keeps only its pillars standing in the water.
         float keepU = mix(1.0, wK, lagoon);
@@ -299,6 +323,8 @@ static inline Mega megaLift(float2 p, float lagoon, uint seed) {
         // No lips over a gorge's slot, where the cap would roof the river.
         if (lipU > 0.0) lipU = keepU > 0.98 ? (U - uT + lipU) * keepU : 0.0;
         U *= keepU;
+        g.notchFoot *= keepU;
+        if (keepU < 0.98) g.notchH = 0.0;
         g.U = U;
         g.wK = wK;
         g.lipU = lipU;
@@ -319,7 +345,7 @@ static inline Mega megaLift(float2 p, float lagoon, uint seed) {
             float t = 0.22 * smoothstep(R + 420.0, R + 10.0, d) + 0.78 * smoothstep(R + 10.0, R - 6.0, d);
             float top = 30.0 * fbm2(p / 350.0, 2, seed + 243u) * smoothstep(R, R - 80.0, d);
             float T = Hl * t + top;
-            if (T > g.U) { g.U = T; g.wK = 0.0; g.lipU = 0.0; }
+            if (T > g.U) { g.U = T; g.wK = 0.0; g.lipU = 0.0; g.notchH = 0.0; }
         }
     }
     return g;
@@ -462,6 +488,12 @@ static inline Col terrainColumn(int2 w, uint seed) {
         float floor0 = max(h, ceil0 - V);
         if (ceil0 - floor0 >= 3.0) { gl = floor0; gh = ceil0; col.carved = true; }
         h = hCap;
+    }
+    // A notch round a karst tower's foot: at the water line for a tower standing in water, else on its talus.
+    if (mg.notchH >= 3.0 && gh <= gl) {
+        float lo = h0 < SEA ? floor(SEA) - 1.0 : floor(h0 + mg.notchFoot) + 1.0;
+        float hi = lo + floor(mg.notchH);
+        if (hi < h - 8.0 && hi - lo >= 3.0) { gl = lo; gh = hi; col.carved = true; }
     }
     col.h = h; col.gl = gl; col.gh = gh;
     return col;
@@ -1541,8 +1573,9 @@ constant int COARSE_N = 2048;
 // Seen at a grazing angle, trees standing several voxels tall hide far more ground than their footprint covers.
 constant float COVER_GAIN = 2.5;
 
-// Levels 1 to GAP_LEVELS carry one gap per column, the carved principal gaps of their four samples: their rounded
-// means where at least two overlap, under at least two voxels of roof. Their outline (H) ignores gaps.
+// Levels 1 to GAP_LEVELS carry one gap per column, the carved principal gaps of their four samples: the rounded means of
+// those there are, where they overlap, under at least two voxels of roof (a coarse column hollow wherever any sample is,
+// or a recess's ragged back wall stands in it as a row of pillars). Their outline (H) ignores gaps.
 constant int GAP_LEVELS = 3;
 
 static inline float3 coarseColumn(int2 cw, int k, uint seed) {
@@ -1557,7 +1590,7 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed) {
     if (c1.carved && c1.gh > c1.gl) { n += 1; lo += c1.gl; hi += c1.gh; maxLo = max(maxLo, c1.gl); minHi = min(minHi, c1.gh); }
     if (c2.carved && c2.gh > c2.gl) { n += 1; lo += c2.gl; hi += c2.gh; maxLo = max(maxLo, c2.gl); minHi = min(minHi, c2.gh); }
     if (c3.carved && c3.gh > c3.gl) { n += 1; lo += c3.gl; hi += c3.gh; maxLo = max(maxLo, c3.gl); minHi = min(minHi, c3.gh); }
-    if (n < 2.0 || maxLo >= minHi) return float3(H, 0, 0);
+    if (n < 1.0 || maxLo >= minHi) return float3(H, 0, 0);
     lo = floor(lo / n + 0.5);
     hi = floor(hi / n + 0.5);
     if (hi - lo < 2.0 || H - hi < 2.0) return float3(H, 0, 0);
