@@ -3058,7 +3058,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
             if (P.kind == P_ROUND && style != ST_TIPI && n.y == 0) {
                 float2 dq = wq - float2(mapOrigin) - float2(sc + P.o) - 0.5;
                 float da = hashf(pcg(sh + pk)) * 6.2831853;
-                if (dot(normalize(dq), float2(cos(da), sin(da))) > 0.93 && fy < 1.6) a = float3(0.30, 0.12, 0.03);
+                if (dot(normalize(dq), float2(cos(da), sin(da))) > 0.96 && fy < 1.6) a = float3(0.30, 0.12, 0.03);
             }
             // An A-frame's gable flap stands open.
             if (style == ST_AFRAME && n.y == 0) {
@@ -3512,6 +3512,9 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     bool lite = shadows != 1;
     // A wall under a roof skips corner AO too: every jog of a back wall is a concave corner, a dark line per column.
     float ao = (s.level < 1.0 ? mix(k == 0 && !lite && !(h.normal.y == 0 && roofW > 0.0) ? mix(cornerAO(x.tr.hm, x.tr.size, h.voxel, h.normal, uv), 0.85, wf) : 0.85, 1.0, s.level) : 1.0) * s.canopy;
+    // A pitched roof's treads and risers are one plane: no corner AO lines along its steps, and (below) one shadow.
+    bool roofPlane = built && s.nrm.y > 0.1;
+    if (roofPlane) ao = 0.9;
     float drop = s.H - min(min(s.nh.x, s.nh.y), min(s.nh.z, s.nh.w));
     // Cliffs several pixels tall keep their strata; only sub-pixel stairs take the tread colour. Keyed to the
     // column's deepest drop, not this face's: the faces of a wall running diagonal to the grid alternate
@@ -3577,6 +3580,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         // Keep the origin inside the hit voxel's footprint so boundary columns can't self-shadow.
         float3 so = p + n * 0.02;
         so.xz = clamp(so.xz, float2(h.voxel.xz) * cs + 0.002, float2(h.voxel.xz) * cs + (cs - 0.002));
+        if (roofPlane && h.normal.y == 0) so.y = max(so.y, s.H + 0.02);
         // Prefiltered, the ray starts a step above the column, and single steps shade by their expected cover.
         so.y = mix(so.y, max(so.y, s.H) + 1.0, wf2);
         // With the shadow-height maps the ray only reaches SHADOW_NEAR (contact and cliff shadows); the maps hold every
