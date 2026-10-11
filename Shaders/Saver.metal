@@ -112,10 +112,21 @@ static inline float ridged2(float2 p, int oct, uint s) {
 
 // MARK: - World
 
-struct Climate { float temp; float moist; float fall; float basin; };
+// jungle, old: the province fields (provinces), 0 outside them.
+struct Climate { float temp; float moist; float fall; float basin; float jungle; float old; };
 
 static inline float2 seedOffset(uint seed) {
     return float2(hashf(pcg(seed)), hashf(pcg(seed ^ 0x9e3779b9u))) * 50000.0;
+}
+
+// Jungle (x) and old-growth (y) provinces: the climate fields swing across a few hundred voxels, too fast for a forest
+// that holds giants hundreds of voxels across, so these regions come from their own fields, 2 km and more across
+// (jungle about a tenth of the land, old growth about a twentieth). p is seed-offset world position. The textures
+// bake only the climate they push; the fields are evaluated wherever they are read.
+static inline float2 provinces(float2 p, uint seed) {
+    float J = smoothstep(0.24, 0.32, fbm2(p / 6000.0 + 300.7, 2, seed + 300u));
+    float O = smoothstep(0.30, 0.38, fbm2(p / 6000.0 + 411.3, 2, seed + 301u)) * (1.0 - J);
+    return float2(J, O);
 }
 
 static inline Climate climate(float2 w, uint seed) {
@@ -125,6 +136,14 @@ static inline Climate climate(float2 w, uint seed) {
     c.moist = saturate(fbm2(p / 800.0 + 91.0, 2, seed + 12) * 1.6 + 0.5);
     c.fall = saturate(perlin2(p / 1000.0 + 213.0, seed + 15) * 2.0 + 0.5);
     c.basin = saturate(fbm2(p / 1100.0 + 53.0, 2, seed + 15) * 1.6 + 0.5);
+    float2 pv = provinces(p, seed);
+    c.jungle = pv.x;
+    c.old = pv.y;
+    // Jungle is warm and wet, old growth cool and wet; the biomes those climates would otherwise make there (lagoon,
+    // desert, painted hills, salt, autumn) are gated off by the province, so no ring of them forms at its edge.
+    c.temp = mix(c.temp, max(c.temp, 0.68), pv.x);
+    c.temp = mix(c.temp, clamp(c.temp, 0.26, 0.40), pv.y);
+    c.moist = mix(c.moist, max(c.moist, 0.75), max(pv.x, pv.y));
     return c;
 }
 
@@ -140,21 +159,26 @@ kernel void bakeClimate(texture2d<float, access::write> out [[texture(0)]],
     out.write(float4(c.temp, c.moist, c.fall, c.basin), gid);
 }
 
-// Baked climate at map-local position p (column centres at integer + 0.5).
-static inline Climate climateAt(texture2d<float> t, float2 p) {
+// Baked climate at map-local position p (column centres at integer + 0.5); origin, seed: the map's.
+static inline Climate climateAt(texture2d<float> t, float2 p, int2 origin, uint seed) {
     constexpr sampler bl(filter::linear, address::clamp_to_edge);
     float4 v = t.sample(bl, p / float2(t.get_width(), t.get_height()), level(0));
     Climate c;
     c.temp = v.x; c.moist = v.y; c.fall = v.z; c.basin = v.w;
+    float2 pv = provinces(p + float2(origin) + seedOffset(seed), seed);
+    c.jungle = pv.x; c.old = pv.y;
     return c;
 }
 
+// The share of a column in either forest province, where the other biomes give way.
+static inline float provinceAmount(Climate c) { return max(c.jungle, c.old); }
+
 static inline float paintedAmount(Climate c) {
-    return smoothstep(0.45, 0.6, c.temp) * smoothstep(0.30, 0.42, c.moist) * smoothstep(0.66, 0.54, c.moist);
+    return smoothstep(0.45, 0.6, c.temp) * smoothstep(0.30, 0.42, c.moist) * smoothstep(0.66, 0.54, c.moist) * (1.0 - provinceAmount(c));
 }
 
 static inline float desertAmount(Climate c) {
-    return smoothstep(0.45, 0.68, c.temp) * smoothstep(0.7, 0.4, c.moist) * (1.0 - paintedAmount(c));
+    return smoothstep(0.45, 0.68, c.temp) * smoothstep(0.7, 0.4, c.moist) * (1.0 - paintedAmount(c)) * (1.0 - provinceAmount(c));
 }
 
 // Level of the flat alluvial floors between painted hills.
@@ -165,16 +189,16 @@ static inline float paintedFloor(float2 p, uint seed) {
 // Autumn hardwoods: a third climate field picks temperate, moist country out of the grassland.
 static inline float autumnAmount(Climate c) {
     return smoothstep(0.38, 0.60, c.fall) * smoothstep(0.25, 0.50, c.moist) * smoothstep(0.20, 0.36, c.temp)
-         * (1.0 - smoothstep(0.1, 0.4, desertAmount(c)));
+         * (1.0 - smoothstep(0.1, 0.4, desertAmount(c))) * (1.0 - provinceAmount(c));
 }
 
 static inline float lagoonAmount(Climate c) {
-    return smoothstep(0.47, 0.65, c.temp) * smoothstep(0.47, 0.65, c.moist);
+    return smoothstep(0.47, 0.65, c.temp) * smoothstep(0.47, 0.65, c.moist) * (1.0 - provinceAmount(c));
 }
 
 // Salt pans: dry basins of any temperature. 1 on the open pan, falling through the terraced rims.
 static inline float saltAmount(Climate c) {
-    return smoothstep(0.6, 0.75, c.basin) * smoothstep(0.62, 0.42, c.moist);
+    return smoothstep(0.6, 0.75, c.basin) * smoothstep(0.62, 0.42, c.moist) * (1.0 - provinceAmount(c));
 }
 
 // Dry crust stands just above the water plane; pools are one voxel lower, so they hold a skin of water.
@@ -600,34 +624,92 @@ static inline float birchAmount(float2 w, uint seed) {
     return smoothstep(0.22, 0.38, perlin2((w + seedOffset(seed)) / 110.0, seed + 95u));
 }
 
-// MARK: - Giant trees (PROTOTYPE: one hard-coded Hometree; see scratchpad trees_design.md)
+// MARK: - Giant trees
 
-constant float2 PROTO_GIANT = float2(-330.0, 250.0);
-constant uint PROTO_SEED = 606u;
-// Ground at the axis (the giant's parts are placed from it; roots and flanges meet each column's own ground).
-constant float PROTO_G = 28.0;
+// Hometree-scale giants rising out of the jungle: at most one per GIANT_CELL world cell, at a hashed point in the
+// cell's middle 0.4 (so two stand at least 0.6 of a cell apart), only on flat, dry lowland deep in a jungle province
+// (placeGiants). Nothing of a giant lies further than GIANT_REACH from its axis.
+constant float GIANT_CELL = 1536.0;
 constant float GIANT_REACH = 210.0;
+// The table: a toroidal window of GIANT_WIN cells a side (+-18k) around the map centre, wider than the rings' disc and
+// the coarsest ring's window, so the entries a recentring rewrites are never read.
+// Must match World.giantWin in Sources/Renderer.swift.
+constant int GIANT_WIN = 24;
 constant float GIANT_A = -4000.0;
 constant uint ST_GIANT = 1u << 31;
 constant uint GAP_GIANT = 2u;
-constant bool BAND_SKIP = true;
+// The band test in the DDA: compiled in only while a canopy band is on the map (Renderer picks the pipeline); off in
+// every pipeline built without the constant.
+constant bool BAND_FC [[function_constant(0)]];
+constant bool BAND_SKIP = is_function_constant_defined(BAND_FC) && BAND_FC;
 constant int GIANT_LIMBS = 12;
 constant int GIANT_FLANGES = 9;
 constant int GM_WOOD = 0, GM_LEAF = 1, GM_VINE = 2;
 
-struct Giant { float2 c; float G; uint h; float yT; };
+// One table entry; G <= 0: no giant in the cell. Must match GiantRec in Sources/Renderer.swift.
+struct GiantRec { int2 cell; float2 c; float G; float yT; uint h; uint kind; };
 
-static inline bool giantNear(float2 w, uint seed, float pad) {
-    return seed == PROTO_SEED && length_squared(w - PROTO_GIANT) < (GIANT_REACH + pad) * (GIANT_REACH + pad);
+// c: axis (world xz); G: the ground there, which places its parts (roots and flanges meet each column's own ground).
+struct Giant { float2 c; float G; uint h; float yT; int kind; };
+
+static inline int giantSlot(int2 cell) {
+    int2 m = ((cell % GIANT_WIN) + GIANT_WIN) % GIANT_WIN;
+    return m.y * GIANT_WIN + m.x;
 }
 
-static inline Giant protoGiant(uint seed) {
-    Giant g;
-    g.c = PROTO_GIANT;
-    g.h = pcg(seed + 777u);
-    g.G = PROTO_G;
-    g.yT = 235.0;
-    return g;
+// The giant whose reach, grown by pad, covers world xz w. Reach and pad stay under half a cell, so at most the 2x2
+// cells round w can hold it.
+static inline bool giantAt(device const GiantRec* T, float2 w, float pad, thread Giant& g) {
+    float R = GIANT_REACH + pad;
+    int2 c0 = int2(floor((w - R) / GIANT_CELL)), c1 = int2(floor((w + R) / GIANT_CELL));
+    for (int j = c0.y; j <= c1.y; j++)
+        for (int i = c0.x; i <= c1.x; i++) {
+            GiantRec r = T[giantSlot(int2(i, j))];
+            if (r.G <= 0.0 || any(r.cell != int2(i, j)) || length_squared(w - r.c) >= R * R) continue;
+            g.c = r.c; g.G = r.G; g.h = r.h; g.yT = r.yT; g.kind = int(r.kind);
+            return true;
+        }
+    return false;
+}
+
+// Fills the table's cells info.xy + gid. A cell may hold a giant in three of five, tried at up to six points, each
+// deep in jungle, outside the mega relief, dry and flat for 70 round (a slope or a wall there would have its buttresses
+// hang in the air) with no water within 100.
+kernel void placeGiants(device GiantRec* out [[buffer(0)]],
+                        constant int4& info [[buffer(1)]],
+                        uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= uint(GIANT_WIN) || gid.y >= uint(GIANT_WIN)) return;
+    uint seed = uint(info.w);
+    int2 cell = info.xy + int2(gid);
+    GiantRec r;
+    r.cell = cell; r.c = 0; r.G = -1.0; r.yT = 0; r.h = 0; r.kind = 0;
+    uint hc = hash2i(cell, seed + 700u);
+    if (hashf(hc) < 0.6) {
+        for (int a = 0; a < 6; a++) {
+            uint h = pcg(hc + uint(a) * 977u);
+            float2 P = floor((float2(cell) + 0.3 + 0.4 * float2(hashf(pcg(h + 1u)), hashf(pcg(h + 2u)))) * GIANT_CELL) + 0.5;
+            Climate c = climate(P, seed);
+            if (c.jungle < 0.7) continue;
+            Col col = terrainColumn(int2(floor(P)), seed);
+            float G = col.h;
+            if (G < SEA + 3.0 || G > 600.0 || col.gh > col.gl) continue;
+            if (megaLift(P + seedOffset(seed), lagoonAmount(c), seed).U > 0.5) continue;
+            bool ok = true;
+            for (int i = 0; i < 36 && ok; i++) {
+                float rr = i < 12 ? 30.0 : i < 24 ? 70.0 : 100.0;
+                float an = float(i) * 0.5236 + (i < 12 ? 0.0 : i < 24 ? 0.26 : 0.13);
+                Col q = terrainColumn(int2(floor(P + float2(cos(an), sin(an)) * rr)), seed);
+                if (q.h < SEA + 2.0 || q.gh > q.gl) ok = false;
+                if (rr < 80.0 && abs(q.h - G) > 9.0) ok = false;
+            }
+            if (!ok) continue;
+            r.c = P; r.G = G; r.h = h;
+            r.yT = mix(205.0, 250.0, hashf(pcg(h + 3u)));
+            r.kind = 0u;
+            break;
+        }
+    }
+    out[giantSlot(cell)] = r;
 }
 
 struct GLimb { float3 p0, p1, p2; float r0, r1; float L; };
@@ -703,6 +785,8 @@ static void giantIntervals(thread const Giant& g, float2 wq, float gl, int lod, 
     float d = length(q);
     float G = g.G;
     r.n = 0;
+    // Everything that reads the table relies on this bound.
+    if (d > GIANT_REACH - 1.0) return;
     // Trunk: marched up from the ground (its radius is not monotone in height once fluted).
     if (d < 80.0) {
         float lo = -1.0;
@@ -902,8 +986,8 @@ static inline float groveDensity(float2 w, float g, uint seed) {
                 * smoothstep(0.2, 0.45, perlin2(p / 60.0, seed + 113u));
     // Lone trees dot even dry grassland; groves need moisture.
     float dens = (0.02 * open + mix(0.32, 0.45, autumn) * dense * wet + 0.35 * scrub) * band;
-    // PROTOTYPE: a jungle round the giant.
-    if (seed == PROTO_SEED) dens = max(dens, 0.62 * smoothstep(650.0, 260.0, length(w - PROTO_GIANT)) * smoothstep(SEA + 2.0, SEA + 6.0, g));
+    // The forest provinces are dense throughout.
+    dens = max(dens, 0.62 * provinceAmount(c) * band);
     return dens;
 }
 
@@ -983,6 +1067,7 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
                        texture2d<uint, access::write> st [[texture(3)]],
                        constant int4& info [[buffer(0)]],
                        constant uint& row0 [[buffer(1)]],
+                       device const GiantRec* giants [[buffer(2)]],
                        uint2 g [[thread_position_in_grid]]) {
     uint2 gid = g + uint2(0, row0);
     uint n = src.get_width();
@@ -991,12 +1076,17 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
     // Structures pass through; a clearing keeps its mark unless a canopy spreads over it.
     col.a = min(col.a, 0.0);
     bool built = col.a < 0.0 && -col.a < col.r;
-    if (built || col.b > col.g || col.r < SEA + 2.0) { dst.write(col, gid); return; }
+    if (built || col.b > col.g) { dst.write(col, gid); return; }
     int2 p = int2(gid);
     int2 wc = p + info.xy;
+    Giant gi;
+    bool isGiant = giantAt(giants, float2(wc) + 0.5, 0.0, gi);
+    // A crown reaches out over water.
+    if (col.r < SEA + 2.0 && !isGiant) { dst.write(col, gid); return; }
     int2 home = int2(floor(float2(wc) / float(TREE_CELL)));
     int lo = 100000, hi = 0;
     bool trunk = false;
+    if (col.r >= SEA + 2.0)
     for (int j = -1; j <= 1; j++)
         for (int i = -1; i <= 1; i++) {
             Tree t = treeInCell(src, gx, home + int2(i, j), info.xy, uint(info.w));
@@ -1012,8 +1102,7 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
             if (all(o == 0) && t.kind != 0) trunk = true;
         }
     float G = col.r;
-    if (giantNear(float2(wc) + 0.5, uint(info.w), 0.0)) {
-        Giant gi = protoGiant(uint(info.w));
+    if (isGiant) {
         GCol gc;
         float tlo = trunk ? G : float(lo), thi = float(hi) > G ? float(hi) : 0.0;
         if (giantColumn(gi, float2(wc) + 0.5, G, tlo, thi, gc)) {
@@ -1048,7 +1137,7 @@ kernel void copyTop(texture2d<float, access::read> src [[texture(0)]],
     dst.write(float4(src.read(gid).r, 0, 0, 0), gid);
 }
 
-// PROTOTYPE band mips: per cell the height band [x, y) every column in it leaves open, so a ray under a giant's crown
+// Band mips: per cell the height band [x, y) every column in it leaves open, so a ray under a giant's crown
 // skips cells as one over the tops does. A giant column offers its tallest gap, any other column the air above it.
 kernel void bandTop(texture2d<float, access::read> src [[texture(0)]],
                     texture2d<uint, access::read> gx [[texture(1)]],
@@ -1384,6 +1473,7 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
                        texture2d<uint, access::read> gx [[texture(1)]],
                        device Site* sites [[buffer(0)]],
                        constant int4& info [[buffer(1)]],
+                       device const GiantRec* giants [[buffer(2)]],
                        uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= uint(SITE_GRID) || gid.y >= uint(SITE_GRID)) return;
     int n = info.z;
@@ -1412,6 +1502,9 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
         int2 ck = cell * SITE_CELL + 16 + int2(k % 3, k / 3) * 32 + int2(int(hk % 32u), int((hk >> 5) % 32u));
         int2 lc = ck - info.xy;
         if (colArch(hm, lc)) continue;
+        // Giants are placed first: a site keeps clear of a giant's reach by more than its own.
+        Giant gk;
+        if (giantAt(giants, float2(ck) + 0.5, 60.0, gk)) continue;
         Lie L = survey(hm, lc, ck, seed);
         for (int t = 1; t <= 6; t++)
             if (L.score[t] >= thresh[t] && L.score[t] > best[t]) { best[t] = L.score[t]; at[t] = ck; }
@@ -1909,20 +2002,22 @@ static inline float coarseCombine(float a, float b, float c, float d, float s) {
 
 // Mip 1 of the 1-voxel map also bounds the level-1 column over it, which the morph band slides toward: the
 // four raw columns combined as coarseHeight combines them.
-static inline float3 coarseColumn(int2 cw, int k, uint seed, thread float2& g2);
-static inline float3 coarseColumn(int2 cw, int k, uint seed) { float2 g2; return coarseColumn(cw, k, seed, g2); }
+static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantRec* giants, thread float2& g2);
+static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantRec* giants) { float2 g2; return coarseColumn(cw, k, seed, giants, g2); }
 
 kernel void reduceMaxBase(texture2d<float, access::read> src [[texture(0)]],
                           texture2d<float, access::read> raw [[texture(1)]],
                           texture2d<float, access::write> dst [[texture(2)]],
                           constant int4& info [[buffer(0)]],
+                          device const GiantRec* giants [[buffer(1)]],
                           uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
     uint2 s = gid * 2;
     float m = max(max(src.read(s).r, src.read(s + uint2(1, 0)).r), max(src.read(s + uint2(0, 1)).r, src.read(s + uint2(1, 1)).r));
     float parent = coarseCombine(raw.read(s).r, raw.read(s + uint2(1, 0)).r, raw.read(s + uint2(0, 1)).r, raw.read(s + uint2(1, 1)).r, 2.0);
     int2 cw = (int2(s) + info.xy) >> 1;
-    if (giantNear(float2(cw * 2) + 1.0, uint(info.w), 2.0)) parent = max(parent, coarseColumn(cw, 1, uint(info.w)).x);
+    Giant gi;
+    if (giantAt(giants, float2(cw * 2) + 1.0, 2.0, gi)) parent = max(parent, coarseColumn(cw, 1, uint(info.w), giants).x);
     dst.write(float4(max(m, parent), 0, 0, 0), gid);
 }
 
@@ -1939,18 +2034,18 @@ constant float COVER_GAIN = 2.5;
 // or a recess's ragged back wall stands in it as a row of pillars). Their outline (H) ignores gaps.
 constant int GAP_LEVELS = 4;
 
-static inline float3 coarseColumn(int2 cw, int k, uint seed, thread float2& g2) {
+static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantRec* giants, thread float2& g2) {
     g2 = 0.0;
     int s = 1 << k, off = s >> 2, hs = s >> 1;
     int2 b = cw * s + off;
     Col c0 = terrainColumn(b, seed), c1 = terrainColumn(b + int2(hs, 0), seed);
     Col c2 = terrainColumn(b + int2(0, hs), seed), c3 = terrainColumn(b + int2(hs, hs), seed);
     float H = coarseCombine(c0.h, c1.h, c2.h, c3.h, float(s));
-    // PROTOTYPE giant: where at least two samples stand in it, the mean of their tops, of their lowest gaps (the air
-    // under the crown, the second gap) and of the tallest gap above that (between tiers, the principal one); solid
-    // where two are trunk.
-    if (giantNear(float2(b + hs / 2) + 0.5, seed, float(s))) {
-        Giant gi = protoGiant(seed);
+    // A giant: where at least two samples stand in it, the mean of their tops, of their lowest gaps (the air under the
+    // crown, the second gap) and of the tallest gap above that (between tiers, the principal one); solid where two are
+    // trunk.
+    Giant gi;
+    if (giantAt(giants, float2(b + hs / 2) + 0.5, float(s), gi)) {
         float hs4[4] = { c0.h, c1.h, c2.h, c3.h };
         int2 o4[4] = { int2(0), int2(hs, 0), int2(0, hs), int2(hs, hs) };
         float nT = 0.0, sH = 0.0, nS = 0.0;
@@ -1994,7 +2089,7 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, thread float2& g2) 
     return float3(H, lo, hi);
 }
 
-static inline float coarseHeight(int2 cw, int k, uint seed) { float2 g2; return coarseColumn(cw, k, seed, g2).x; }
+static inline float coarseHeight(int2 cw, int k, uint seed, device const GiantRec* giants) { float2 g2; return coarseColumn(cw, k, seed, giants, g2).x; }
 
 // Writes the world cells region.xy + [0, region.zw) of level info.x into its toroidal slice (texel = cell & 2047):
 // height and canopy cover, and every second cell also the half-resolution climate texel it starts.
@@ -2004,13 +2099,14 @@ kernel void generateCoarse(texture2d<float, access::write> hOut [[texture(0)]],
                            texture2d<float, access::write> gOut [[texture(3)]],
                            constant int4& region [[buffer(0)]],
                            constant int4& info [[buffer(1)]],
+                           device const GiantRec* giants [[buffer(2)]],
                            uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= uint(region.z) || gid.y >= uint(region.w)) return;
     int k = info.x, s = 1 << k;
     uint seed = uint(info.y);
     int2 cw = region.xy + int2(gid);
     float2 cc2;
-    float3 cc = coarseColumn(cw, k, seed, cc2);
+    float3 cc = coarseColumn(cw, k, seed, giants, cc2);
     float H = cc.x;
     if (k <= GAP_LEVELS) gOut.write(float4(cc.y, cc.z, cc2), uint2(cw & (COARSE_N - 1)));
     float2 centre = float2(cw * s) + 0.5 * float(s);
@@ -2031,13 +2127,14 @@ kernel void reduceMaxParent(texture2d<float, access::read> src [[texture(0)]],
                             texture2d<float, access::write> dst [[texture(1)]],
                             constant int4& region [[buffer(0)]],
                             constant int4& info [[buffer(1)]],
+                            device const GiantRec* giants [[buffer(2)]],
                             uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= uint(region.z) || gid.y >= uint(region.w)) return;
     int2 c = region.xy + int2(gid);
     int2 s = c * 2;
     float m = max(max(src.read(uint2(s & (COARSE_N - 1))).r, src.read(uint2((s + int2(1, 0)) & (COARSE_N - 1))).r),
                   max(src.read(uint2((s + int2(0, 1)) & (COARSE_N - 1))).r, src.read(uint2((s + int2(1, 1)) & (COARSE_N - 1))).r));
-    dst.write(float4(max(m, coarseHeight(c, info.x + 1, uint(info.y)))), uint2(c & (COARSE_N / 2 - 1)));
+    dst.write(float4(max(m, coarseHeight(c, info.x + 1, uint(info.y), giants))), uint2(c & (COARSE_N / 2 - 1)));
 }
 
 kernel void reduceMaxRegion(texture2d<float, access::read> src [[texture(0)]],
@@ -2110,7 +2207,9 @@ struct Terrain {
     texture2d<float> hx;         // r16Float: mip 0 the column tops, mips from 1 their maxima (the DDA's skips)
     texture2d<uint> gx;          // the 1-voxel map's extra gaps (packGaps)
     texture2d_array<float> cg;   // levels 1...GAP_LEVELS: each column's gap (lo, hi)
-    texture2d<float> hb;         // PROTOTYPE band mips (bandTop)
+    texture2d<float> hb;         // band mips (bandTop): the air a cell leaves open under canopies
+    uint seed;
+    device const GiantRec* giants; // the giant table (placeGiants)
 };
 
 static inline int2 levelOrigin(thread const Terrain& tr, int k) { return k == 0 ? int2(0) : tr.origin >> k; }
@@ -2210,12 +2309,14 @@ static inline float4 extraGapsMorph(thread const Terrain& tr, int2 c) {
 }
 
 static inline Climate climateL(thread const Terrain& tr, int k, float2 p) {
-    if (k == 0) return climateAt(tr.clim, p);
+    if (k == 0) return climateAt(tr.clim, p, tr.origin, tr.seed);
     constexpr sampler bl(filter::linear, address::repeat);
     float2 u = (p / (2.0 * tr.lod[k].w) + float2((tr.origin >> (k + 1)) & (COARSE_N / 2 - 1))) / float(COARSE_N / 2);
     float4 v = tr.cc.sample(bl, u, uint(k - 1), level(0));
     Climate c;
     c.temp = v.x; c.moist = v.y; c.fall = v.z; c.basin = v.w;
+    float2 pv = provinces(p + float2(tr.origin) + seedOffset(tr.seed), tr.seed);
+    c.jungle = pv.x; c.old = pv.y;
     return c;
 }
 
@@ -2313,7 +2414,7 @@ static Hit trace(thread const Terrain& tr, float3 o, float3 d, float tMax, int m
         float3 col = columnMorphWE(tr, k, lc, wm, e2);
         float H = col.x, gl = col.y, gh = col.z;
         bool inGap = yA >= gl && yA < gh;
-        // PROTOTYPE: coarse giant columns carry a second gap below the principal one (cg .ba).
+        // Coarse giant columns carry a second gap below the principal one (cg .ba).
         if (yA >= e2.x && yA < e2.y) { inGap = true; gl = e2.x; gh = e2.y; }
         if (!inGap && k == 0 && gh > gl && yA < gl) {
             float4 e = extraGaps(tr.gx.read(uint2(lc)));
@@ -2371,13 +2472,14 @@ kernel void bakeHorizon(device float* out [[buffer(0)]],
                         texture2d<float> hx [[texture(2)]],
                         texture2d<uint> gx [[texture(3)]],
                         texture2d_array<float> cg [[texture(4)]],
+                        device const GiantRec* giants [[buffer(2)]],
                         uint2 tid [[thread_position_in_grid]], uint lane [[thread_index_in_threadgroup]]) {
     // HORIZON_SEGS threads per bin walk geometric slices of the distance and reduce, so the bake is not one long chain.
     threadgroup float part[HORIZON_SEGS];
     uint gid = tid.y;
     int levels = int(f.fade.z);
     Terrain tr { hm, coarse, coarse, coarse, hm, f.lod, f.mapInfo.xy, f.mapInfo.z, levels,
-                 f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, 0.0, hx, gx, cg, hx };
+                 f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, 0.0, hx, gx, cg, hx, uint(f.mapInfo.w), giants };
     float a = (float(gid) + 0.5) * 6.2831853 / float(HORIZON_BINS);
     float2 dir = float2(sin(a), cos(a));
     float3 o = f.camPos.xyz;
@@ -2751,16 +2853,13 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     // A structure stands on this column from voxel `base` up; below it (or below its gap) is the terrain.
     float base = -col4.a;
     bool built = col4.a < 0.0 && base < col.x;
-    // PROTOTYPE giant: on the 1-voxel map its columns carry GIANT_A, with the ground and materials in st; further out
-    // its columns are known by distance.
-    bool giant = k == 0 ? col4.a == GIANT_A : giantNear(float2(v.xz * int(cs) + mapOrigin) + 0.5 * cs, seed, cs);
+    // A giant: on the 1-voxel map its columns carry GIANT_A, with the ground and materials in st; further out its
+    // columns are those within its reach, wood and leaf from a little above the ground at its axis.
+    Giant gi;
+    bool giant = k == 0 ? col4.a == GIANT_A : giantAt(tr.giants, float2(v.xz * int(cs) + mapOrigin) + 0.5 * cs, cs, gi);
     uint gsb = giant && k == 0 ? st.read(uint2(clamp(v.xz, int2(0), int2(tr.size - 1)))).r : 0u;
     float gLoc = k == 0 ? float(gsb & 2047u) : 0.0;
-    Giant gi;
-    if (giant && k > 0) {
-        gi = protoGiant(seed);
-        gLoc = gi.G;
-    }
+    if (giant && k > 0) gLoc = gi.G + 6.0;
     bool gWood = giant && float(v.y) >= gLoc;
     float H = giant ? (gWood ? col.x : gLoc) : tree ? col.y : built ? (col.z > col.y ? col.y : base) : col.x;
     // Just under a rock gap the voxel belongs to the floor below it: its height is the gap's floor. Further down it is
@@ -4186,7 +4285,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
                               device const Site* sites [[buffer(1)]], device const float4* lampPos [[buffer(2)]],
                               device const float4* lampState [[buffer(3)]], constant int4* refs [[buffer(4)]],
                               device const float4* birds [[buffer(5)]], device const float* horizon [[buffer(6)]],
-                              constant uint* tiles [[buffer(7)]]) {
+                              constant uint* tiles [[buffer(7)]], device const GiantRec* giants [[buffer(8)]]) {
     float2 ndc = in.uv * 2.0 - 1.0;
     ndc.y = -ndc.y;
     ndc += f.jitter.xy;
@@ -4198,7 +4297,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     float gmax = f.misc.y;
     for (int k = 1; k < levels; k++) gmax = max(gmax, coarse.read(uint2(0), uint(k - 1), coarse.get_num_mip_levels() - 1).r + 1.0);
     if (int(f.shadow.y) & 2) gmax = min(gmax, 260.0);
-    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, hb };
+    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, hb, uint(f.mapInfo.w), giants };
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
             2.0 * tanH * f.resolution.w, f.misc.w, makeLight(f.sunDir.xyz),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
