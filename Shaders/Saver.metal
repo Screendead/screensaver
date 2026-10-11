@@ -801,10 +801,10 @@ static inline float2 towerTalus(Tower T, TowerPlan P, float2 wf, int s, uint see
     float e = P.reff - T.R0;
     if (e < 0.0) return 0.0;
     float fall = 0.5 + 0.5 * cos(P.a - T.th0);
-    float L = T.R0 * (0.2 + 0.15 * fall) * (0.85 + 0.3 * saturate(0.5 + perlin2(P.dir * 4.1, seed + 518u)));
+    float L = T.R0 * (0.24 + 0.14 * fall) * (0.85 + 0.3 * saturate(0.5 + perlin2(P.dir * 4.1, seed + 518u)));
     float f = saturate(1.0 - e / L);
     if (f <= 0.0) return 0.0;
-    float amp = T.R0 * (0.08 + 0.14 * fall) * saturate(0.55 + 0.9 * perlin2(P.dir * 2.3, seed + 517u));
+    float amp = T.R0 * (0.15 + 0.15 * fall) * (0.6 + 0.4 * saturate(0.5 + 0.9 * perlin2(P.dir * 2.3, seed + 517u)));
     // Octaves finer than a coarse ring's columns would alias there, and its talus differ from the finer ring's.
     float lump = (s < 8 ? 4.0 * perlin2(wf / 8.0, seed + 519u) : 0.0) + (s < 4 ? 1.5 * perlin2(wf / 3.5, seed + 524u) : 0.0);
     return float2(max(amp * f * sqrt(f) + lump * saturate(f * 3.0), 0.0), f);
@@ -3937,7 +3937,7 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
     }
     if (fp < 0.3) {
         uint bh = hash3i(v, seed + 533u);
-        m *= 1.0 + (off ? 0.3 : 0.12) * (hashf(bh) - 0.5) * (1.0 - smoothstep(0.05, 0.3, fp));
+        m *= 1.0 + (off ? 0.3 : 0.16) * (hashf(bh) - 0.5) * (1.0 - smoothstep(0.05, 0.3, fp));
     }
     // Ashlar on the walls: courses a third of a storey high, blocks of 6 to 13 laid in bond, each its own tone; and the
     // weathered crust spalled off in broad patches of paler, fresher stone. No joints are drawn (a grid of lines reads as
@@ -3950,7 +3950,7 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
             float rh = hashf(hash2i(int2(int(row), int(th & 1023u)), seed + 554u));
             float len = 6.0 + floor(8.0 * rh);
             float blk = floor((along + row * 3.7) / len);
-            m *= (1.0 + 0.1 * (rh - 0.5) * fade) * (1.0 + 0.2 * (hashf(hash3i(int3(int(blk), int(row), int(th & 1023u)), seed + 555u)) - 0.5) * fade);
+            m *= (1.0 + 0.12 * (rh - 0.5) * fade) * (1.0 + 0.26 * (hashf(hash3i(int3(int(blk), int(row), int(th & 1023u)), seed + 555u)) - 0.5) * fade);
         }
         float sp = perlin2(float2(along, wy) / 23.0, seed + 556u) + 0.45 * perlin2(float2(along, wy) / 8.0, seed + 557u);
         float spall = mix(smoothstep(0.15, 0.5, sp), 0.15, smoothstep(0.6, 4.0, fpA));
