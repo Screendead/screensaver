@@ -1795,8 +1795,11 @@ enum Snapshot {
             r.camera.pitchOverride = nil
         }
         // VR_FLIGHT=minutes: flies the autopilot that long, logging altitude, clearance and climb every 12 s and
-        // writing a frame each minute next to the screenshot path.
+        // writing a frame each minute next to the screenshot path. VR_FTRACE=1 also prints every 0.25 s: time, x, z, y, ground,
+        // yaw, the altitude terms (target, climb rate, need (-1: floor clamp), rim lift, regional floor, ahead, planned climb)
+        // and the routing (blocked ahead, route offset).
         if let mins = Double(env["VR_FLIGHT"] ?? "") {
+            r.camera.tracing = env["VR_FTRACE"] != nil
             var maxClimb = 0.0, minClear = Double.infinity, maxY = 0.0, lows = 0
             var walled = 0, walledRun = 0, maxWalledRun = 0, fastClimb = 0, prevY = r.camera.position.y
             var lastY = r.camera.position.y
@@ -1806,7 +1809,14 @@ enum Snapshot {
             var towerEdge = Double.infinity, towerSeen = 0, towerClose = 0
             var towersMet = Set<SIMD2<Int>>()
             for i in 1...Int(mins * 60) {
-                for _ in 0..<4 { r.simulate(0.25) }
+                for q in 0..<4 {
+                    r.simulate(0.25)
+                    if env["VR_FTRACE"] != nil {
+                        let c = r.camera.position
+                        print(String(format: "ft %.2f %.1f %.1f %.2f %.2f %.3f", Double(i - 1) + Double(q + 1) * 0.25, c.x, c.z, c.y, r.world.height(x: c.x, z: c.z) ?? -1, r.camera.yaw)
+                              + " " + r.camera.terms.map { String(format: "%.1f", $0) }.joined(separator: " "))
+                    }
+                }
                 let p = r.camera.position
                 let g = r.world.height(x: p.x, z: p.z) ?? 0
                 if p.y - lastY > 6 { print(String(format: "flight jump t=%d pos=(%.0f,%.0f) %.0f -> %.0f", i, p.x, p.z, lastY, p.y)) }
