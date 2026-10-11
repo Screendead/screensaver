@@ -369,7 +369,19 @@ final class World {
                 var counts = [Int](repeating: 0, count: 7)
                 for site in buf.siteList { counts[site.kind.rawValue] += 1 }
                 if ProcessInfo.processInfo.environment["VR_SITES"] == "3" {
-                    for site in buf.siteList { print("  site \(site.kind) \(Int(site.pos.x)),\(Int(site.pos.y)) r\(Int(site.radius)) lamps \(site.lamps.count)") }
+                    // Parts as kind (2 house, 10 round) and dwelling style.
+                    let raw = buf.sites.contents()
+                    for site in buf.siteList {
+                        let base = raw + site.index * World.siteStride
+                        let np = Int((base + 16).load(as: SIMD4<Float>.self).z)
+                        var desc = ""
+                        for k in 0..<np {
+                            let v = (base + 32 + 16 * World.maxLamps + 16 * k).load(as: SIMD4<Int32>.self)
+                            let kind = (v.y >> 16) & 0xff, style = (v.w >> 28) & 15
+                            desc += kind == 2 || kind == 10 ? " p\(kind)s\(style)" : " p\(kind)"
+                        }
+                        print("  site \(site.kind) \(Int(site.pos.x)),\(Int(site.pos.y)) r\(Int(site.radius)) lamps \(site.lamps.count)\(desc)")
+                    }
                 }
                 print("sites at (\(o.x),\(o.y)): henge \(counts[1]) cairn \(counts[2]) ruins \(counts[3]) hamlet \(counts[4]) jetty \(counts[5]) camp \(counts[6]) total \(buf.siteList.count)")
             }

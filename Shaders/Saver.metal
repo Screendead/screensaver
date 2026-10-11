@@ -797,9 +797,12 @@ struct Site {
 
 constant int T_HENGE = 1, T_CAIRN = 2, T_RUINS = 3, T_HAMLET = 4, T_JETTY = 5, T_CAMP = 6;
 constant int P_BOX = 1, P_HOUSE = 2, P_DECK = 3, P_BOAT = 4, P_HENGE = 5, P_WALL = 6, P_RING = 7, P_FIRE = 8, P_CLEAR = 9;
-// Part flags; bits 8-11 hold a lamp index + 1, bits 12-13 the house variant (0 thatch, 1 adobe, 2 slate, 3 stilt).
+// Part flags; bits 8-11 hold a lamp index + 1, bits 12-15 the dwelling style.
 constant int F_REL = 1, F_AXISZ = 2, F_FLAT = 4, F_STILT = 8, F_TENT = 16, F_CHIMNEY = 32, F_WATER = 64;
 constant int M_STONE = 4, M_TIMBER = 5, M_ROOF = 6, M_PLASTER = 7, M_PLANK = 8, M_CLOTH = 9, M_FIRE = 10;
+// Dwelling styles by biome: hamlets 0-7, camps 8-12.
+constant int ST_MEADOW = 0, ST_TIMBER = 1, ST_CABIN = 2, ST_CROFT = 3, ST_ADOBE = 4, ST_PUEBLO = 5, ST_STILT = 6, ST_YURT = 7;
+constant int ST_AFRAME = 8, ST_LEANTO = 9, ST_TIPI = 10, ST_CARAVAN = 11, ST_PALM = 12;
 constant int L_FIRE = 1, L_HEARTH = 2, L_WINDOW = 3, L_LANTERN = 4, L_BEACON = 5, L_RITUAL = 6;
 
 struct Part { int2 o; int2 sz; int kind; int mat; int y0; int y1; int y2; int flags; };
@@ -914,7 +917,8 @@ static bool buildJetty(texture2d<float, access::read> hm, thread SiteGen& G, int
 }
 
 // Low houses on flat treads around a central hearth, in the local style.
-static bool buildHamlet(texture2d<float, access::read> hm, thread SiteGen& G, int2 c, uint h, int variant) {
+static bool buildHamlet(texture2d<float, access::read> hm, thread SiteGen& G, int2 c, uint h, int style) {
+    int variant = style == ST_STILT ? 3 : style == ST_ADOBE || style == ST_PUEBLO ? 1 : style == ST_CROFT ? 2 : 0;
     int n = int(hm.get_width());
     int4 rects[8];
     int nr = 0;
@@ -957,7 +961,7 @@ static bool buildHamlet(texture2d<float, access::read> hm, thread SiteGen& G, in
         int lamp = addLamp(G, float3(float(pos.x - c.x) + 0.5, float(floorY) + 1.2, float(pos.y - c.y) + 0.5), L_WINDOW,
                            chim ? float(ridge) + 1.0 - (float(floorY) + 1.2) : 0.0);
         int flags = (axisZ ? F_AXISZ : 0) | (flat ? F_FLAT : 0) | (stilt ? F_STILT | F_WATER : 0) | (chim ? F_CHIMNEY : 0)
-                  | ((lamp + 1) << 8) | (variant << 12);
+                  | ((lamp + 1) << 8) | (style << 12);
         int wall = variant == 2 ? M_STONE : flat ? M_PLASTER : ((hh >> 4) & 3u) == 0u ? M_TIMBER : M_PLASTER;
         if (stilt) wall = M_TIMBER;
         Part hp = makePart(P_HOUSE, wall, r0 - c, sz, floorY, flat ? ridge : eave, int(hh & 0x7fffu), flags);
@@ -970,7 +974,7 @@ static bool buildHamlet(texture2d<float, access::read> hm, thread SiteGen& G, in
 
 // The lie of the land at a candidate site centre, and how well each type suits it.
 struct Lie {
-    float g, desert, painted, lagoon, salt, cold, snowline, waterR, prom;
+    float g, desert, painted, lagoon, salt, cold, snowline, waterR, prom, autumn, conifer, moist, grove;
     int2 waterDir;
     bool flat5;
     float score[7];
@@ -979,6 +983,7 @@ struct Lie {
 static Lie survey(texture2d<float, access::read> hm, int2 c, int2 cw, uint seed) {
     Lie L;
     for (int t = 0; t < 7; t++) L.score[t] = 0;
+    L.grove = 0;
     L.g = colH(hm, c);
     float g = L.g;
     float2 w = float2(cw);
@@ -986,6 +991,7 @@ static Lie survey(texture2d<float, access::read> hm, int2 c, int2 cw, uint seed)
     Climate cl = climate(w, seed);
     L.desert = desertAmount(cl); L.painted = paintedAmount(cl); L.lagoon = lagoonAmount(cl); L.salt = saltAmount(cl);
     L.cold = smoothstep(0.42, 0.18, cl.temp);
+    L.autumn = autumnAmount(cl); L.conifer = coniferAmount(cl); L.moist = cl.moist;
     L.snowline = snowlineAt(cl.temp);
     float settled = fbm2(p / 1500.0, 2, seed + 140u) + 0.5;
     float ancient = fbm2(p / 1800.0 + 77.0, 2, seed + 141u) + 0.5;
@@ -1039,10 +1045,35 @@ static Lie survey(texture2d<float, access::read> hm, int2 c, int2 cw, uint seed)
     L.score[T_JETTY] = set * step(L.waterR, 16.0) * smoothstep(0.1, 0.25, wet16) * smoothstep(0.75, 0.55, wet16)
                      * step(g, SEA + 6.0) * (1.0 - smoothstep(0.2, 0.4, salt)) * 0.9;
     float grove = groveDensity(w, g, seed);
+    L.grove = grove;
     L.score[T_CAMP] = (0.4 + 0.6 * set) * float(L.flat5) * land * step(g, L.snowline - 5.0)
                     * max(max(smoothstep(0.08, 0.2, grove), smoothstep(0.15, 0.3, salt) * smoothstep(0.7, 0.45, salt)),
                           smoothstep(0.3, 0.6, L.painted)) * 0.8;
     return L;
+}
+
+// Open dry grass: no trees, not desert, painted hills or salt.
+static inline bool steppe(thread const Lie& L) {
+    return L.moist < 0.45 && L.grove < 0.1 && L.desert < 0.2 && L.painted < 0.2 && L.salt < 0.15 && L.lagoon < 0.2;
+}
+
+static inline int hamletStyle(thread const Lie& L) {
+    if (L.lagoon > 0.4) return ST_STILT;
+    if (L.desert > 0.3) return ST_ADOBE;
+    if (L.painted > 0.35) return ST_PUEBLO;
+    if (L.cold > 0.5 || L.g > L.snowline - 30.0) return L.grove > 0.15 ? ST_CABIN : ST_CROFT;
+    if (L.conifer > 0.5) return ST_CABIN;
+    if (L.autumn > 0.3) return ST_TIMBER;
+    if (steppe(L)) return ST_YURT;
+    return ST_MEADOW;
+}
+
+static inline int campStyle(thread const Lie& L) {
+    if (L.lagoon > 0.3) return ST_PALM;
+    if (L.painted > 0.35) return ST_TIPI;
+    if ((L.salt > 0.15 && L.salt < 0.7) || steppe(L) || L.desert > 0.3) return ST_CARAVAN;
+    if (L.conifer > 0.5) return ST_LEANTO;
+    return ST_AFRAME;
 }
 
 // Site at one world cell: a type chosen by two broad Perlin fields (where people live now, and where an older
@@ -1154,13 +1185,13 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
         age = 0.6 + 0.3 * hashf(hb >> 3);
         ok = true;
     } else if (type == T_HAMLET) {
-        int variant = lagoon > 0.4 ? 3 : (desert > 0.3 || painted > 0.35) ? 1 : (cold > 0.5 || g > snowline - 30.0) ? 2 : 0;
-        ok = buildHamlet(hm, G, c, hb, variant);
+        int style = hamletStyle(L);
+        ok = buildHamlet(hm, G, c, hb, style);
         if (ok && float(flat5) > 0.0 && g < snowline) {
             int lamp = addLamp(G, float3(0.5, g + 1.5, 0.5), L_HEARTH, 1.0);
             addPart(G, makePart(P_FIRE, M_FIRE, int2(0), int2(1), 0, 0, 0, F_REL | ((lamp + 1) << 8)), 2.0);
         }
-        if (ok && waterR <= 40.0 && variant != 3) buildJetty(hm, G, c, pcg(hb + 5u), waterDir, 48);
+        if (ok && waterR <= 40.0 && style != ST_STILT) buildJetty(hm, G, c, pcg(hb + 5u), waterDir, 48);
         if (ok && ((hb >> 20) & 3u) == 0u && G.nl < MAX_LAMPS) {
             // A beacon on the highest flat ground nearby.
             float bestH = g + 8.0;
@@ -1194,7 +1225,7 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
             float tl, th;
             if (!flatPatch(hm, c + tc, 1, 1.0, tl, th) || tl < SEA + 2.0) continue;
             int axis = ((hb >> (8 + i)) & 1u) != 0u ? F_AXISZ : 0;
-            addPart(G, makePart(P_HOUSE, M_CLOTH, tc - 1, int2(3), int(tl), int(tl), int(pcg(hb + uint(i)) & 0x7fffu), F_TENT | axis),
+            addPart(G, makePart(P_HOUSE, M_CLOTH, tc - 1, int2(3), int(tl), int(tl), int(pcg(hb + uint(i)) & 0x7fffu), F_TENT | axis | (campStyle(L) << 12)),
                     length(float2(tc)) + 3.0);
         }
         addPart(G, makePart(P_CLEAR, 0, int2(0), int2(8, 0), 0, 0, 0, 0), 9.0);
@@ -2628,7 +2659,8 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         uint sh = uint(site.head.w);
         float age = site.info.y;
         float Ht = col.x;
-        int variant = (P.flags >> 12) & 3;
+        int style = (P.flags >> 12) & 15;
+        int variant = style == ST_STILT ? 3 : style == ST_ADOBE || style == ST_PUEBLO ? 1 : style == ST_CROFT ? 2 : 0;
         bool chim = (sb & S_CHIMNEY) != 0u;
         bool house = P.kind == P_HOUSE && (P.flags & F_TENT) == 0;
         // This voxel's material: a house column is wall below its top roof course, plinth (or stilts) below the floor.
