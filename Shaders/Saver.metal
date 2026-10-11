@@ -515,6 +515,9 @@ constant int TOWER_MEMBERS = 4;
 constant float TOWER_R_MAX = 150.0;
 // Records in the shading table (fragment buffer 9); must match Towers.tableSize in Sources/Towers.swift.
 constant int TOWER_TABLE = 16;
+// Function constant 0: false compiles the towers out of sceneFragment, for frames with none in view. Compiled in, even
+// unused, they slow every pixel's shading.
+constant bool sceneTowers [[function_constant(0)]];
 
 struct Tower {
     float2 c;              // world xz of the base's axis
@@ -2894,9 +2897,8 @@ struct Surface {
     float2 gapSpan; // the lowest floor and highest roof of those gaps (extra gaps lie lower still: floor 0 then)
     float pale;     // sand, salt crust or snow
     float wall;     // megaWall: among the great walls
-    float3 nrm;     // structures: the plane a roof voxel shades as (zero: the face normal)
+    float3 nrm;     // the plane a structure's roof voxel or a tower's wall shades as (zero: the face normal)
     float3 emit;    // fire, lanterns and lit windows
-    bool planar;    // a built wall shading as its plane (s.nrm): no corner AO, which would line every jog of a diagonal face
 };
 
 // Autumn foliage: a slow Perlin hue field runs lingering green, gold, orange, scarlet to crimson;
@@ -3067,7 +3069,6 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     s.face = 0;
     s.nrm = 0;
     s.emit = 0;
-    s.planar = false;
     int2 mapOrigin = tr.origin;
     float cs = tr.lod[k].w;
     float4 col4 = columnL(tr, k, v.xz);
@@ -4072,7 +4073,7 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
     s.pale = n.y > 0 && wy > snowline && !root ? 1.0 : 0.0;
     s.slope = 0.0;
     s.wall = 1.0;
-    if (any(pl != 0.0)) { s.nrm = pl; s.planar = true; }
+    if (any(pl != 0.0)) s.nrm = pl;
     s.level = n.y > 0 ? 1.0 : 0.0;
     // A few rooms lit at night on some towers: the faces of an opening (back wall, reveals, sill and lintel) on the
     // 1-voxel map, faded out across its morph band, where the painted bays take over.
@@ -4095,7 +4096,10 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // Footprint stretched across a grazing face, for detail that must fade before it aliases along the view.
     float fpA = fp / max(abs(dot(n, d)), 0.15);
     Surface s = surfaceAt(x.tr, x.st, x.sites, x.lampState, k, h.voxel, h.normal, uv, fp, fpA, p, x.seed, x.time, inWater);
-    if (x.towers->n.x > 0) towerSurface(x, s, k, h.voxel, h.normal, uv, inWater ? max(fp, 4.0) : fp, inWater ? max(fpA, 4.0) : fpA, d);
+    if (sceneTowers && x.towers->n.x > 0) towerSurface(x, s, k, h.voxel, h.normal, uv, inWater ? max(fp, 4.0) : fp, inWater ? max(fpA, 4.0) : fpA, d);
+    // A tower wall shading as its plane (s.nrm; terrain has none of its own): no corner AO, which would line every jog of
+    // a diagonal face.
+    bool planar = sceneTowers && s.mat == 0 && any(s.nrm != 0.0);
     // Prefilter: from ~1/10 voxel per pixel, relax AO and shadows and give risers their tread colour, so
     // distant stairs read as contour bands, not moire.
     float wf = smoothstep(0.025, 0.20, fp);
@@ -4145,7 +4149,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // Seen in water (reflections, the bed) the surface is rippled out of focus: no corner AO, a coarse sky visibility.
     bool lite = shadows != 1;
     // A wall under a roof skips corner AO too: every jog of a back wall is a concave corner, a dark line per column.
-    float ao = (s.level < 1.0 ? mix(k == 0 && !lite && !(h.normal.y == 0 && roofW > 0.0) && !s.planar ? mix(cornerAO(x.tr.hm, x.tr.size, h.voxel, h.normal, uv), 0.85, wf) : 0.85, 1.0, s.level) : 1.0) * s.canopy;
+    float ao = (s.level < 1.0 ? mix(k == 0 && !lite && !(h.normal.y == 0 && roofW > 0.0) && !planar ? mix(cornerAO(x.tr.hm, x.tr.size, h.voxel, h.normal, uv), 0.85, wf) : 0.85, 1.0, s.level) : 1.0) * s.canopy;
     float drop = s.H - min(min(s.nh.x, s.nh.y), min(s.nh.z, s.nh.w));
     // Cliffs several pixels tall keep their strata; only sub-pixel stairs take the tread colour. Keyed to the
     // column's deepest drop, not this face's: the faces of a wall running diagonal to the grid alternate
@@ -4167,7 +4171,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     float sus = 0.0;
     // A planar wall is its own plane already: the slope under the stairs is the ground's, and column by column it would
     // turn each face of a jogging wall its own way.
-    if (s.mat == 0 && wf > 0.0 && s.H > SEA + 20.0 && shadows != 2 && !s.planar) {
+    if (s.mat == 0 && wf > 0.0 && s.H > SEA + 20.0 && shadows != 2 && !planar) {
         float R2 = max(16.0, 2.0 * cs);
         float2 g2 = float2(groundSmoothL(x.tr, k, p.xz + float2(R2, 0)) - groundSmoothL(x.tr, k, p.xz - float2(R2, 0)),
                            groundSmoothL(x.tr, k, p.xz + float2(0, R2)) - groundSmoothL(x.tr, k, p.xz - float2(0, R2))) / (2.0 * R2);
@@ -4180,7 +4184,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // stone against sand, a dark notch. With the footprint it fades to the tread it stands for, colour and light.
     float lone = 0.0;
     // A planar wall's jogs are its plane's.
-    if (h.normal.y == 0 && s.mat == 0 && wn < 1.0 && shadows != 2 && !s.planar) {
+    if (h.normal.y == 0 && s.mat == 0 && wn < 1.0 && shadows != 2 && !planar) {
         int2 t = h.normal.x != 0 ? int2(0, 1) : int2(1, 0), o = h.normal.xz;
         float run = float(groundL(x.tr, k, h.voxel.xz + t) > groundL(x.tr, k, h.voxel.xz + t + o) + 0.5)
                   + float(groundL(x.tr, k, h.voxel.xz - t) > groundL(x.tr, k, h.voxel.xz - t + o) + 0.5);
@@ -4213,8 +4217,8 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     if (shadows > 0 && ndl > 0.0 && L.shadows && x.shadowMode != 3.0) {
         // Keep the origin inside the hit voxel's footprint so boundary columns can't self-shadow. A planar wall's ray
         // starts out in front of its plane: from a jog's own face it would cross the next column and stripe the wall.
-        float3 so = p + (s.planar ? s.nrm * 1.5 : float3(n) * 0.02);
-        if (!s.planar) so.xz = clamp(so.xz, float2(h.voxel.xz) * cs + 0.002, float2(h.voxel.xz) * cs + (cs - 0.002));
+        float3 so = p + (planar ? s.nrm * 1.5 : float3(n) * 0.02);
+        if (!planar) so.xz = clamp(so.xz, float2(h.voxel.xz) * cs + 0.002, float2(h.voxel.xz) * cs + (cs - 0.002));
         // Prefiltered, the ray starts a step above the column, and single steps shade by their expected cover.
         so.y = mix(so.y, max(so.y, s.H) + 1.0, wf2);
         // With the shadow-height maps the ray only reaches SHADOW_NEAR (contact and cliff shadows); the maps hold every
@@ -4239,7 +4243,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         if (maps) sh = min(sh, shadowMapLit(x, so, mapOnly));
         // Under a roof the roof stands in for the ray: the maps see an overhang only from two texels out, and a traced ray
         // that slips out under the edge on one row and not the next stripes the back wall with sun.
-        if (wf2 > 0.0 && !s.planar) sh = mix(sh, min(sh, stairShadow(x.tr, k, p.xz, L.key, d, contact, 0.35, fp > 3.0 || shadows == 2)), wf2);
+        if (wf2 > 0.0 && !planar) sh = mix(sh, min(sh, stairShadow(x.tr, k, p.xz, L.key, d, contact, 0.35, fp > 3.0 || shadows == 2)), wf2);
         float floorSh = mix(mix(0.5, 0.25, hiSun), 0.32, L.gold);
         sh = mix(sh, floorSh + (1.0 - floorSh) * sh, wf);
         sh = mix(sh, 1.0, 0.3 * L.night);
@@ -4256,7 +4260,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     skyFill *= mix(float3(1.0), float3(0.62, 0.58, 0.85), L.gold * L.sunAmt);
     // Under a roof the visibility is taken where the point is, not at its column's centre: column by column it would
     // jump between reaching past the roof's edge and not, striping the wall.
-    float2 svAt = s.planar ? p.xz + s.nrm.xz * 1.5 : mix((float2(h.voxel.xz + h.normal.xz) + 0.5) * cs, p.xz, max(wf2, ov));
+    float2 svAt = planar ? p.xz + s.nrm.xz * 1.5 : mix((float2(h.voxel.xz + h.normal.xz) + 0.5) * cs, p.xz, max(wf2, ov));
     float svY = wf2 > 0.0 ? mix(p.y, groundSmoothL(x.tr, k, p.xz), wf2) : p.y;
     float sv = x.prof & 16 || roofW >= 1.0 ? 1.0 : skyVisibility(x.tr, k, svAt, svY, lite || fp > 5.0 ? 2 : fp > 2.0 ? 1 : 0);
     // Under a roof the sky comes only through the mouth, an even share well under open shade's: the visibility samples
@@ -4790,7 +4794,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     float gmax = f.misc.y;
     for (int k = 1; k < levels; k++) gmax = max(gmax, coarse.read(uint2(0), uint(k - 1), coarse.get_num_mip_levels() - 1).r + 1.0);
     if (int(f.shadow.y) & 2) gmax = min(gmax, 260.0);
-    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, towers, towers->n.x };
+    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, towers, sceneTowers ? towers->n.x : 0 };
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
             2.0 * tanH * f.resolution.w, f.misc.w, makeLight(f.sunDir.xyz),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),

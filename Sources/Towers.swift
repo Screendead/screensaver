@@ -33,6 +33,7 @@ final class Towers {
     private var cellAt: SIMD2<Int32>?
     private var inFlight = false
     private(set) var table = [UInt8](repeating: 0, count: Towers.tableBytes)
+    private(set) var tableCount = 0
 
     init?(device: MTLDevice, library: MTLLibrary, seed: UInt32) {
         guard let f = library.makeFunction(name: "placeTowers"), let p = try? device.makeComputePipelineState(function: f),
@@ -121,6 +122,7 @@ final class Towers {
         }
         near.sort { simd_length($0.pos - flat) < simd_length($1.pos - flat) }
         let n = min(near.count, Towers.tableSize)
+        tableCount = n
         table.withUnsafeMutableBytes { p in
             p.storeBytes(of: Int32(n), as: Int32.self)
             for i in 0..<n {

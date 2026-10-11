@@ -667,6 +667,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     let device: MTLDevice
     let queue: MTLCommandQueue
     let scenePipeline: MTLRenderPipelineState
+    // The scene pass with the towers compiled out (function constant 0), for frames with none in view.
+    let sceneBarePipeline: MTLRenderPipelineState
     let postPipeline: MTLRenderPipelineState
     let taaPipeline: MTLRenderPipelineState
     private let cloudPipeline: MTLComputePipelineState
@@ -763,7 +765,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard let queue = device.makeCommandQueue(), let lib = GPU.library(device: device) else { return nil }
         let scene = MTLRenderPipelineDescriptor()
         scene.vertexFunction = lib.makeFunction(name: "fullscreenVertex")
-        scene.fragmentFunction = lib.makeFunction(name: "sceneFragment")
+        let withTowers = MTLFunctionConstantValues()
+        var on = true
+        withTowers.setConstantValue(&on, type: .bool, index: 0)
+        scene.fragmentFunction = try? lib.makeFunction(name: "sceneFragment", constantValues: withTowers)
         scene.colorAttachments[0].pixelFormat = .rgba16Float
         let post = MTLRenderPipelineDescriptor()
         post.vertexFunction = lib.makeFunction(name: "fullscreenVertex")
@@ -773,7 +778,13 @@ final class Renderer: NSObject, MTKViewDelegate {
         taa.vertexFunction = lib.makeFunction(name: "fullscreenVertex")
         taa.fragmentFunction = lib.makeFunction(name: "taaFragment")
         taa.colorAttachments[0].pixelFormat = .rgba16Float
+        let bare = scene.copy() as! MTLRenderPipelineDescriptor
+        let noTowers = MTLFunctionConstantValues()
+        var off = false
+        noTowers.setConstantValue(&off, type: .bool, index: 0)
+        bare.fragmentFunction = try? lib.makeFunction(name: "sceneFragment", constantValues: noTowers)
         guard let sp = try? device.makeRenderPipelineState(descriptor: scene),
+              let sbp = try? device.makeRenderPipelineState(descriptor: bare),
               let tp = try? device.makeRenderPipelineState(descriptor: taa),
               let pp = try? device.makeRenderPipelineState(descriptor: post),
               let cf = lib.makeFunction(name: "cloudField").flatMap({ try? device.makeComputePipelineState(function: $0) }),
@@ -791,6 +802,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         self.device = device
         self.queue = queue
         scenePipeline = sp
+        sceneBarePipeline = sbp
         postPipeline = pp
         taaPipeline = tp
         cloudPipeline = cf
@@ -1073,7 +1085,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         sp.colorAttachments[0].loadAction = .dontCare
         sp.colorAttachments[0].storeAction = .store
         if let enc = cb.makeRenderCommandEncoder(descriptor: sp) {
-            enc.setRenderPipelineState(scenePipeline)
+            let tb = camera.basis, tanV = tan(25.0 * .pi / 180) * 1.05
+            towers.frameTable(eye: camera.position, fwd: tb.fwd, right: tb.right, up: tb.up, tanH: tanV * Double(aspect), tanV: tanV)
+            enc.setRenderPipelineState(towers.tableCount > 0 ? scenePipeline : sceneBarePipeline)
             enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
             enc.setFragmentBuffer(birdBuf, offset: 0, index: 5)
             enc.setFragmentBuffer(horizonBuf, offset: 0, index: 6)
@@ -1097,8 +1111,6 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentBuffer(lampState, offset: 0, index: 3)
             enc.setFragmentBytes(&hazeRefs, length: 128, index: 4)
             enc.setFragmentBytes(&tileMasks, length: tileMasks.count * 4, index: 7)
-            let tb = camera.basis, tanV = tan(25.0 * .pi / 180) * 1.05
-            towers.frameTable(eye: camera.position, fwd: tb.fwd, right: tb.right, up: tb.up, tanH: tanV * Double(aspect), tanV: tanV)
             enc.setFragmentBytes(towers.table, length: Towers.tableBytes, index: 9)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
