@@ -1114,6 +1114,8 @@ static inline float groveDensity(float2 w, float g, uint seed) {
 
 struct Tree { bool ok; int2 c; float g; int lo; int top; int kind; };
 
+static Tree treeShape(Tree t, uint h, Climate c, float dense, float2 w, uint seed);
+
 static Tree treeInCell(texture2d<float, access::read> src, texture2d<uint, access::read_write> gx, int2 cell, int2 origin, uint seed) {
     Tree t;
     t.ok = false;
@@ -1142,12 +1144,18 @@ static Tree treeInCell(texture2d<float, access::read> src, texture2d<uint, acces
         if (cq.b > cq.g && (gapFlags(gx.read(uint2(q))) & GAP_CARVED) != 0u) return t;
     }
     float2 w = float2(t.c + origin);
-    if (hashf(pcg(h)) > groveDensity(w, t.g, seed)) return t;
-    uint r = pcg(h + 5u);
+    float dense = groveDensity(w, t.g, seed);
+    if (hashf(pcg(h)) > dense) return t;
     Climate c = climate(w, seed);
     c.temp = altitudeTemp(c.temp, t.g);
+    return treeShape(t, h, c, dense, w, seed);
+}
+
+// A planted tree's kind and leaf span from its hash h, the climate c and grove density at its trunk w (world); t.g is
+// its ground. Also builds the coarse rings' trees (coarseVeg).
+static Tree treeShape(Tree t, uint h, Climate c, float dense, float2 w, uint seed) {
+    uint r = pcg(h + 5u);
     // 0 shrub, 1 small round, 2 round, 3 conifer, 4 birch.
-    float dense = groveDensity(w, t.g, seed);
     if (paintedAmount(c) > 0.3) t.kind = 0;
     else if (autumnAmount(c) > 0.3 && birchAmount(w, seed) > 0.5) t.kind = 4;
     else if (hashf(r) < coniferAmount(c)) t.kind = 3;
@@ -1230,7 +1238,7 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
         // The roof follows the ground smoothed over a few columns, and keeps off cliffs.
         float gs = 0.0, gmin = 1e9, gmax = -1e9;
         for (int k = 0; k < 9; k++) {
-            int2 q = clamp(p + int2(k % 3 - 1, k / 3 - 1) * 3, int2(0), int2(int(n) - 1));
+            int2 q = clamp(p + int2(k % 3 - 1, k / 3 - 1) * 5, int2(0), int2(int(n) - 1));
             float h = src.read(uint2(q)).r;
             gs += h; gmin = min(gmin, h); gmax = max(gmax, h);
         }
@@ -1255,7 +1263,7 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
                 emergentIntervals(w, ec, tc.r, y0, R, pads, eh, seed, 0, rr);
             }
         // A trunk column is bark through the roof (merged with it, its leaves would start at the roof's underside).
-        if (gmax - gmin < 12.0 && !cleared && !eTrunk) {
+        if (gmax - gmin < 10.0 && !cleared && !eTrunk) {
             JCan cn = jungleCanopy(w, gs, J, seed);
             if (cn.hi > cn.lo) {
                 gAdd(rr, cn.lo, cn.hi, GM_LEAF);
@@ -2184,10 +2192,102 @@ static inline float coarseCombine(float a, float b, float c, float d, float s) {
     return floor(mean + 0.5);
 }
 
+// The top of an emergent's crown pads over world column centre w (trunk ground gt), as emergentIntervals builds them;
+// -1e9 off the crown.
+static float emergentTop(float2 w, float2 ctr, float gt, float y0, float R, int pads, uint h, uint seed) {
+    float2 q = w - ctr, p = w + seedOffset(seed);
+    float top = -1e9;
+    for (int j = 0; j < pads; j++) {
+        float T;
+        float4 P = emergentPad(h, j, R, y0, T);
+        float2 dq = q - P.xz;
+        float dd = length(dq);
+        if (dd > P.w * 1.35) continue;
+        float2 u2 = dq / max(dd, 1e-3);
+        float edge = P.w * (1.0 + 0.30 * perlin2(u2 * 1.7 + float(j) * 4.1 + hashf(h) * 50.0, seed + 331u));
+        if (dd >= edge) continue;
+        float u = dd / edge;
+        float lumps = 1.6 * perlin2(p / 3.2, seed + 332u) + 1.2 * perlin2(p / 7.0, seed + 333u);
+        top = max(top, floor(gt + P.y + T * 0.6 * sqrt(1.0 - u * u) + lumps * sqrt(1.0 - u * u)) + 1.0);
+    }
+    return top;
+}
+
+// The forest in the coarse rings, so it runs on to the horizon rather than melting into the ground past the 1-voxel
+// map: per sample (the coarse column's four, at heights hs4) the top of the leaves over it, the jungle's roof and
+// emergents or the planted trees as plantTrees makes them (without the checks that need the map: ledges, carved
+// rock), and the column's top the mean of the samples' (leaves, else ground) rounded, as its ground is. Returns
+// (top, depth of leaves under it); H is the bare column's height. Grove density and climate are taken once per column.
+static float2 coarseVeg(int2 cw, int k, float4 hs4, float H, uint seed) {
+    int s = 1 << k, off = s >> 2, hs = s >> 1;
+    int2 b = cw * s + off;
+    float2 centre = float2(cw * s) + 0.5 * float(s);
+    float2 so = seedOffset(seed);
+    float J = provinces(centre + so, seed).x;
+    float sum = 0.0, leaves = 0.0;
+    int2 o4[4] = { int2(0), int2(hs, 0), int2(0, hs), int2(hs, hs) };
+    // No roof on a cliff (plantTrees keeps it to ground level within 10 over +-5 voxels).
+    float spread = max(max(hs4.x, hs4.y), max(hs4.z, hs4.w)) - min(min(hs4.x, hs4.y), min(hs4.z, hs4.w));
+    if (J >= 0.15 && spread < max(10.0, 0.6 * float(s))) {
+        for (int i = 0; i < 4; i++) {
+            float2 wi = float2(b + o4[i]) + 0.5;
+            float g = hs4[i], t = g;
+            if (g >= SEA + 2.0) {
+                JCan cn = jungleCanopy(wi, g, J, seed);
+                if (cn.hi > cn.lo) t = max(t, cn.hi);
+                int2 e0 = int2(floor(wi / EMERGENT_CELL));
+                for (int j = -1; j <= 1; j++)
+                    for (int ii = -1; ii <= 1; ii++) {
+                        float2 ec;
+                        float y0, R;
+                        int pads;
+                        uint eh;
+                        if (!emergentIn(e0 + int2(ii, j), seed, J, ec, y0, R, pads, eh)) continue;
+                        if (length_squared(wi - ec) > 4.4 * R * R) continue;
+                        t = max(t, emergentTop(wi, ec, g, y0, R, pads, eh, seed));
+                    }
+            }
+            sum += t;
+            leaves += t > g ? 1.0 : 0.0;
+        }
+    } else if (J < 0.15) {
+        float dens = groveDensity(centre, H, seed);
+        if (dens <= 0.0) return float2(H, 0);
+        Climate c = climate(centre, seed);
+        c.temp = altitudeTemp(c.temp, H);
+        for (int i = 0; i < 4; i++) {
+            int2 wi = b + o4[i];
+            float g = hs4[i], t = g;
+            if (g >= SEA + 2.0) {
+                int2 home = int2(floor(float2(wi) / float(TREE_CELL)));
+                for (int j = -1; j <= 1; j++)
+                    for (int ii = -1; ii <= 1; ii++) {
+                        int2 cell = home + int2(ii, j);
+                        uint h = hash2i(cell, seed + 92u);
+                        int2 tc = cell * TREE_CELL + int2(h % uint(TREE_CELL), (h / 7u) % uint(TREE_CELL));
+                        int2 o = wi - tc;
+                        if (abs(o.x) > 2 || abs(o.y) > 2 || hashf(pcg(h)) > dens) continue;
+                        Tree tr;
+                        tr.ok = false; tr.c = tc; tr.g = g; tr.lo = 0; tr.top = 0; tr.kind = 0;
+                        tr = treeShape(tr, h, c, dens, float2(tc), seed);
+                        if (!tr.ok || tr.kind == 0) continue;
+                        int2 sp = canopySpan(tr, o);
+                        if (sp.y > sp.x) t = max(t, float(sp.y));
+                    }
+            }
+            sum += t;
+            leaves += t > g ? 1.0 : 0.0;
+        }
+    }
+    if (leaves == 0.0) return float2(H, 0);
+    float top = max(floor(sum * 0.25 + 0.5), H);
+    return float2(top, top - H);
+}
+
 // Mip 1 of the 1-voxel map also bounds the level-1 column over it, which the morph band slides toward: the
 // four raw columns combined as coarseHeight combines them.
-static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantRec* giants, thread float2& g2);
-static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantRec* giants) { float2 g2; return coarseColumn(cw, k, seed, giants, g2); }
+static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantRec* giants, thread float2& g2, thread float& depth);
+static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantRec* giants) { float2 g2; float dp; return coarseColumn(cw, k, seed, giants, g2, dp); }
 
 kernel void reduceMaxBase(texture2d<float, access::read> src [[texture(0)]],
                           texture2d<float, access::read> raw [[texture(1)]],
@@ -2198,8 +2298,11 @@ kernel void reduceMaxBase(texture2d<float, access::read> src [[texture(0)]],
     if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
     uint2 s = gid * 2;
     float m = max(max(src.read(s).r, src.read(s + uint2(1, 0)).r), max(src.read(s + uint2(0, 1)).r, src.read(s + uint2(1, 1)).r));
-    float parent = coarseCombine(raw.read(s).r, raw.read(s + uint2(1, 0)).r, raw.read(s + uint2(0, 1)).r, raw.read(s + uint2(1, 1)).r, 2.0);
+    float4 r4 = float4(raw.read(s).r, raw.read(s + uint2(1, 0)).r, raw.read(s + uint2(0, 1)).r, raw.read(s + uint2(1, 1)).r);
+    float parent = coarseCombine(r4.x, r4.y, r4.z, r4.w, 2.0);
     int2 cw = (int2(s) + info.xy) >> 1;
+    // The level-1 column's forest (coarseVeg from the same raw heights) as well.
+    parent = max(parent, coarseVeg(cw, 1, r4, parent, uint(info.w)).x);
     Giant gi;
     if (giantAt(giants, float2(cw * 2) + 1.0, 2.0, gi)) parent = max(parent, coarseColumn(cw, 1, uint(info.w), giants).x);
     dst.write(float4(max(m, parent), 0, 0, 0), gid);
@@ -2218,8 +2321,9 @@ constant float COVER_GAIN = 2.5;
 // or a recess's ragged back wall stands in it as a row of pillars). Their outline (H) ignores gaps.
 constant int GAP_LEVELS = 4;
 
-static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantRec* giants, thread float2& g2) {
+static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantRec* giants, thread float2& g2, thread float& depth) {
     g2 = 0.0;
+    depth = 0.0;
     int s = 1 << k, off = s >> 2, hs = s >> 1;
     int2 b = cw * s + off;
     Col c0 = terrainColumn(b, seed), c1 = terrainColumn(b + int2(hs, 0), seed);
@@ -2262,20 +2366,23 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
             return float3(top, lowG);
         }
     }
-    if (k > GAP_LEVELS || k > 3) return float3(H, 0, 0);
+    float2 vg = coarseVeg(cw, k, float4(c0.h, c1.h, c2.h, c3.h), H, seed);
+    depth = vg.y;
+    float Hv = vg.x;
+    if (k > GAP_LEVELS || k > 3) return float3(Hv, 0, 0);
     float n = 0, lo = 0, hi = 0, maxLo = 0, minHi = 1e9;
     if (c0.carved && c0.gh > c0.gl) { n += 1; lo += c0.gl; hi += c0.gh; maxLo = max(maxLo, c0.gl); minHi = min(minHi, c0.gh); }
     if (c1.carved && c1.gh > c1.gl) { n += 1; lo += c1.gl; hi += c1.gh; maxLo = max(maxLo, c1.gl); minHi = min(minHi, c1.gh); }
     if (c2.carved && c2.gh > c2.gl) { n += 1; lo += c2.gl; hi += c2.gh; maxLo = max(maxLo, c2.gl); minHi = min(minHi, c2.gh); }
     if (c3.carved && c3.gh > c3.gl) { n += 1; lo += c3.gl; hi += c3.gh; maxLo = max(maxLo, c3.gl); minHi = min(minHi, c3.gh); }
-    if (n < 1.0 || maxLo >= minHi) return float3(H, 0, 0);
+    if (n < 1.0 || maxLo >= minHi) return float3(Hv, 0, 0);
     lo = floor(lo / n + 0.5);
     hi = floor(hi / n + 0.5);
-    if (hi - lo < 2.0 || H - hi < 2.0) return float3(H, 0, 0);
-    return float3(H, lo, hi);
+    if (hi - lo < 2.0 || H - hi < 2.0) return float3(Hv, 0, 0);
+    return float3(Hv, lo, hi);
 }
 
-static inline float coarseHeight(int2 cw, int k, uint seed, device const GiantRec* giants) { float2 g2; return coarseColumn(cw, k, seed, giants, g2).x; }
+static inline float coarseHeight(int2 cw, int k, uint seed, device const GiantRec* giants) { float2 g2; float dp; return coarseColumn(cw, k, seed, giants, g2, dp).x; }
 
 // Writes the world cells region.xy + [0, region.zw) of level info.x into its toroidal slice (texel = cell & 2047):
 // height and canopy cover, and every second cell also the half-resolution climate texel it starts.
@@ -2292,14 +2399,16 @@ kernel void generateCoarse(texture2d<float, access::write> hOut [[texture(0)]],
     uint seed = uint(info.y);
     int2 cw = region.xy + int2(gid);
     float2 cc2;
-    float3 cc = coarseColumn(cw, k, seed, giants, cc2);
+    float depth;
+    float3 cc = coarseColumn(cw, k, seed, giants, cc2, depth);
     float H = cc.x;
     if (k <= GAP_LEVELS) gOut.write(float4(cc.y, cc.z, cc2), uint2(cw & (COARSE_N - 1)));
     float2 centre = float2(cw * s) + 0.5 * float(s);
     // Expected share of the column under leaves: planting chance per tree cell times a mean canopy of ~13 columns.
     float cover = saturate(groveDensity(centre, H, seed) * 13.0 / float(TREE_CELL * TREE_CELL));
     hOut.write(float4(H), uint2(cw & (COARSE_N - 1)));
-    vOut.write(float4(cover), uint2(cw & (COARSE_N - 1)));
+    // g: the depth of leaves under the top (coarseVeg), in units of 64 voxels.
+    vOut.write(float4(cover, depth / 64.0, 0, 0), uint2(cw & (COARSE_N - 1)));
     if (all((cw & 1) == 0)) {
         int2 cj = cw >> 1;
         Climate c = climate((float2(cj) + 0.5) * float(2 * s), seed);
@@ -2437,6 +2546,13 @@ static inline float groundSmoothL(thread const Terrain& tr, int k, float2 p) {
 static inline float coverL(thread const Terrain& tr, int k, int2 c) {
     if (k == 0) return 0.0;
     return tr.cv.read(uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1)), uint(k - 1), 0).r;
+}
+
+// (cover, depth of the leaves under the column's top in voxels: coarseVeg) of coarse column c.
+static inline float2 coverDepthL(thread const Terrain& tr, int k, int2 c) {
+    if (k == 0) return 0.0;
+    float2 v = tr.cv.read(uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1)), uint(k - 1), 0).rg;
+    return float2(v.x, floor(v.y * 64.0 + 0.5));
 }
 
 // Height of the next level's column over level-k cell c.
@@ -3196,8 +3312,14 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         s.level = crustW;
     }
     // Coarse levels carry no trees: the share of a column under canopy tints its ground with their leaves.
+    bool vegLeaf = false;
+    float vegLo = 0.0;
     if (k > 0) {
-        float cov = saturate(coverL(tr, k, v.xz) * COVER_GAIN);
+        float2 cd = coverDepthL(tr, k, v.xz);
+        // The top of a forested coarse column is its leaves (coarseVeg).
+        vegLo = col.x - cd.y;
+        vegLeaf = !giant && cd.y > 0.0 && float(v.y) >= vegLo;
+        float cov = saturate(cd.x * COVER_GAIN);
         if (cov > 0.0) {
             float conifer = smoothstep(0.50, 0.32, c.temp);
             float3 leaf = mix(float3(0.05, 0.08, 0.0375), float3(0.025, 0.055, 0.045), conifer);
@@ -3242,7 +3364,8 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     } else {
         s.albedo = stone * 0.9;
     }
-    if (tree && float(v.y) >= col4.a) {
+    if ((tree && float(v.y) >= col4.a) || vegLeaf) {
+        float leafLo = vegLeaf ? vegLo : col4.a;
         // Leaves: deep, low-chroma greens that drift slowly across a grove; conifers cooler and darker.
         float conifer = smoothstep(0.50, 0.32, c.temp);
         float k = saturate(perlin2(w / 23.0, seed + 93u) * 0.9 + 0.5);
@@ -3250,6 +3373,13 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         leaf = mix(leaf, float3(0.025, 0.055, 0.045), conifer);
         leaf = mix(leaf, float3(0.11, 0.125, 0.09), painted);
         leaf = mix(leaf, fallLeaf, autumn * (1.0 - conifer * 0.5));
+        if (c.jungle > 0.0) {
+            // The jungle's crowns differ one from the next: deep green, olive, now and then a cool teal.
+            float jk = perlin2(w / 9.0, seed + 340u) + 0.6 * perlin2(w / 31.0, seed + 341u);
+            float3 jl = mix(float3(0.028, 0.062, 0.034), float3(0.072, 0.094, 0.032), smoothstep(-0.3, 0.5, jk));
+            jl = mix(jl, float3(0.024, 0.068, 0.058), smoothstep(0.25, 0.6, perlin2(w / 17.0 + 7.3, seed + 342u)));
+            leaf = mix(leaf, jl, smoothstep(0.1, 0.4, c.jungle));
+        }
         // A 16x16 leaf texture: two-tone texels, faded out once a texel nears a pixel.
         int2 tx = int2(floor(uv * 16.0));
         int3 tk = n.y != 0 ? int3(v.x * 16 + tx.x, v.y * 2 + max(n.y, 0), v.z * 16 + tx.y)
@@ -3259,7 +3389,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         float tex = hashf(th) < 0.35 ? 0.72 : 1.0 + 0.12 * hashf(pcg(th));
         leaf *= mix(tex, 0.92, smoothstep(0.015, 0.04, fp));
         // Upper leaves catch more sky.
-        leaf *= mix(0.85, 1.15, saturate((float(v.y) - col4.a) / max(col.x - col4.a - 1.0, 1.0)));
+        leaf *= mix(0.85, 1.15, saturate((float(v.y) - leafLo) / max(col.x - leafLo - 1.0, 1.0)));
         s.albedo = leaf;
         s.tread = leaf;
             s.H = col.x;

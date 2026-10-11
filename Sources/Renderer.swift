@@ -302,6 +302,15 @@ final class World {
             if job != nil { advance(pieces: Int.max, wait: true); return }
             if pending { return } // the in-flight job will land momentarily
             job = (active, o, 0, CACurrentMediaTime())
+            // VR_PIECES: one command buffer per piece, each timed (the regeneration budget is per piece).
+            if World.timePieces {
+                while let j = job {
+                    let k = j.next
+                    let t = advance(pieces: 1, wait: true, timed: true)
+                    print(String(format: "regen piece %d (pass %d) gpu %.2f ms", k, k / (World.size / World.bandRows), t))
+                }
+                return
+            }
             advance(pieces: Int.max, wait: true)
         } else if job != nil {
             advance(pieces: 1, wait: false)
@@ -318,8 +327,11 @@ final class World {
     // Encodes the next `pieces` pieces of the job: each pass (heights, cleanup, structures, trees, climate) a band of
     // rows at a time, finishing every band of a pass before the next pass reads its neighbours, then the max mips.
     // Sites are placed once, ahead of the first structure band: they read the cleaned map, and every band stamps them.
-    private func advance(pieces: Int, wait: Bool) {
-        guard var j = job, let cb = genQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return }
+    static let timePieces = ProcessInfo.processInfo.environment["VR_PIECES"] != nil
+
+    @discardableResult
+    private func advance(pieces: Int, wait: Bool, timed: Bool = false) -> Double {
+        guard var j = job, let cb = genQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return 0 }
         let buf = buffers[j.index]
         var info = SIMD4<Int32>(j.origin.x, j.origin.y, Int32(World.size), Int32(bitPattern: seed))
         let bands = World.size / World.bandRows, tg = MTLSize(width: 16, height: 16, depth: 1)
@@ -330,8 +342,12 @@ final class World {
                 var row0 = UInt32(band * World.bandRows)
                 switch pass {
                 case 0:
+                    enc.setComputePipelineState(genPipeline)
+                    enc.setTexture(scratch[0], index: 0)
+                    enc.setTexture(buf.rawGaps, index: 1)
+                case 1:
                     if band == 0 {
-                        // The giant table first: sites and trees read it. Centred on the map's middle cell.
+                        // The giant table, with the cheap cleanup pass: sites and trees read it. Centred on the map's middle cell.
                         let mid = SIMD2<Double>(Double(j.origin.x), Double(j.origin.y)) + Double(World.size / 2)
                         var gi = SIMD4<Int32>(Int32(floor(mid.x / World.giantCell)) - Int32(World.giantWin / 2),
                                               Int32(floor(mid.y / World.giantCell)) - Int32(World.giantWin / 2), 0, Int32(bitPattern: seed))
@@ -341,10 +357,6 @@ final class World {
                         enc.dispatchThreads(MTLSize(width: World.giantWin, height: World.giantWin, depth: 1),
                                             threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
                     }
-                    enc.setComputePipelineState(genPipeline)
-                    enc.setTexture(scratch[0], index: 0)
-                    enc.setTexture(buf.rawGaps, index: 1)
-                case 1:
                     enc.setComputePipelineState(cleanupPipeline)
                     enc.setTexture(scratch[0], index: 0)
                     enc.setTexture(scratch[1], index: 1)
@@ -445,7 +457,8 @@ final class World {
         enc.endEncoding()
         let done = j.next == World.pieceCount
         job = done ? nil : j
-        guard done else { cb.commit(); return }
+        if timed && !done { cb.commit(); cb.waitUntilCompleted(); return (cb.gpuEndTime - cb.gpuStartTime) * 1000 }
+        guard done else { cb.commit(); return 0 }
 
         let index = j.index, o = j.origin, t0 = j.t0
         let finish = { [weak self] (heights: [Float], floors: [Float], top: Float) in
@@ -461,7 +474,7 @@ final class World {
                     Provinces.at(Double(Int(o.x) + x), Double(Int(o.y) + z), seed: self.seed).0 > 0.1
                 }
             }
-            if Renderer.logTiming || World.logSites {
+            if World.logSites {
                 for g in buf.giantList { print(String(format: "giant at (%.0f, %.0f) ground %.0f top %.0f", g.pos.x, g.pos.y, g.ground, g.top)) }
             }
             if World.logSites {
@@ -481,6 +494,7 @@ final class World {
             cb.waitUntilCompleted()
             let r = World.readBack(cpuMips.last!)
             finish(r.0, r.1, r.2)
+            return (cb.gpuEndTime - cb.gpuStartTime) * 1000
         } else {
             cb.addCompletedHandler { [weak self] cb in
                 guard cb.status == .completed else { DispatchQueue.main.async { self?.pending = false }; return }
@@ -490,6 +504,7 @@ final class World {
             }
             cb.commit()
         }
+        return 0
     }
 
     static let logSites = ProcessInfo.processInfo.environment["VR_SITES"] != nil
@@ -565,7 +580,7 @@ final class Clipmap {
     static func handoff(_ k: Int) -> Double { 860.0 * Double(1 << k) }
 
     let height: MTLTexture   // r16Float array: height; max mips (from mip 1 also bounding the next level)
-    let cover: MTLTexture    // r8Unorm array: canopy cover
+    let cover: MTLTexture    // rg8Unorm array: canopy cover, depth of leaves under the top / 64 (coarseVeg)
     let climate: MTLTexture  // rgba16Float array at half resolution
     // Must match GAP_LEVELS in Shaders/Saver.metal: levels 1...gapLevels carry one gap per column.
     static let gapLevels = 4
@@ -598,7 +613,7 @@ final class Clipmap {
             d.storageMode = .private
             return device.makeTexture(descriptor: d)
         }
-        guard let h = array(.r16Float, Clipmap.size, mips: true), let v = array(.r8Unorm, Clipmap.size, mips: false),
+        guard let h = array(.r16Float, Clipmap.size, mips: true), let v = array(.rg8Unorm, Clipmap.size, mips: false),
               let g = array(.rgba16Float, Clipmap.size, mips: false, slices: Clipmap.gapLevels),
               let c = array(.rgba16Float, Clipmap.size / 2, mips: false),
               let gen = pipeline("generateCoarse"), let red = pipeline("reduceMaxRegion"), let par = pipeline("reduceMaxParent") else { return nil }
