@@ -878,7 +878,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     let scenePipelines: [[MTLRenderPipelineState]]
     let postPipeline: MTLRenderPipelineState
     let taaPipeline: MTLRenderPipelineState
-    // The glowing bugs (bioFragment), drawn over the scene in its pass from late dusk.
+    // The glowing bugs (bioFragment), drawn over the scene in a pass of their own from late dusk.
     private let bioPipeline: MTLRenderPipelineState
     private let cloudPipeline: MTLComputePipelineState
     // Shadow-height maps (see bakeShadowHeight in Shaders/Saver.metal): near and far cascades, a band rebaked per frame.
@@ -931,6 +931,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     private static let lampReach: [Double] = [1, 20, 16, 7, 10, 24, 22, 6]   // LAMP_R in Shaders/Saver.metal
     private var tileMasks = [UInt32](repeating: 0, count: 16 * 16)
     static let ditherCells = 864.0
+    // Bug sprites: one per cube of the MOTE_N^3 block round the camera (bioVertex in Shaders/Saver.metal).
+    static let moteCount = 18 * 18 * 18
     private var historyIndex = 0
     private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
     let world: World
@@ -991,6 +993,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         taa.fragmentFunction = lib.makeFunction(name: "taaFragment")
         taa.colorAttachments[0].pixelFormat = .rgba16Float
         let bio = scene.copy() as! MTLRenderPipelineDescriptor
+        bio.vertexFunction = lib.makeFunction(name: "bioVertex")
         bio.fragmentFunction = lib.makeFunction(name: "bioFragment")
         func sceneVariant(towers: Bool, bands: Bool) -> MTLRenderPipelineDescriptor {
             let fc = MTLFunctionConstantValues()
@@ -1366,11 +1369,24 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentBuffer(world.giantBuffer, offset: 0, index: 8)
             enc.setFragmentBytes(towers.table, length: Towers.tableBytes, index: 9)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-            if f.sunDir.y < 0.04 {
-                enc.setRenderPipelineState(bioPipeline)
-                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-            }
             enc.endEncoding()
+        }
+        // In its own pass: drawn after the scene in the scene's pass, even a draw doing nothing cost a twilight scene ~0.4 ms.
+        if f.sunDir.y < 0.04 {
+            let bp = MTLRenderPassDescriptor()
+            bp.colorAttachments[0].texture = sceneTex
+            bp.colorAttachments[0].loadAction = .load
+            bp.colorAttachments[0].storeAction = .store
+            if let enc = cb.makeRenderCommandEncoder(descriptor: bp) {
+                enc.setRenderPipelineState(bioPipeline)
+                enc.setVertexBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
+                enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
+                enc.setVertexTexture(world.heightTex, index: 0)
+                enc.setVertexTexture(world.climateTex, index: 2)
+                enc.setVertexTexture(provTex, index: 16)
+                enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: Renderer.moteCount)
+                enc.endEncoding()
+            }
         }
         let tpd = MTLRenderPassDescriptor()
         tpd.colorAttachments[0].texture = histOut

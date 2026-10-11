@@ -6867,100 +6867,77 @@ static float3 hazeAndSmoke(thread const Ctx& x, float3 col, device const Site* s
     return col;
 }
 
-// Glowing bugs drifting in and around the foliage after dusk: at most one in each MOTE_CELL cube, kept far enough inside
-// it that its drift and halo never reach a neighbour, so a ray visits only the cubes it crosses. Whether a bug is there
+// Glowing bugs drifting in and around the foliage after dusk: at most one in each MOTE_CELL cube, drawn as a small
+// sprite over the scene (Renderer: one instance per cube of the MOTE_N^3 block round the camera). Whether a bug is there
 // is decided at its anchor, so drifting over a column edge never switches it.
 constant float MOTE_CELL = 6.0;
-constant float MOTE_REACH = 32.0;
+constant float MOTE_REACH = 50.0;
+constant int MOTE_N = 18; // cubes along each side of the block, which must hold the sphere of MOTE_REACH; Renderer.moteCount
 
-static float3 bioMotes(texture2d<float> hm, texture2d<float> hx, texture2d<float> clim, texture2d<float> pv,
-                       int2 origin, uint seed, float time, float pixelAngle, float3 o, float3 d, float tEnd) {
-    tEnd = min(tEnd, MOTE_REACH);
-    // Bugs keep within 8 of the column tops (plus drift and halo): the ray is clipped to below the highest top round the
-    // camera, which leaves out the sky and the open air a camera flies through.
-    int2 lim = int2(hx.get_width(8), hx.get_height(8)) - 1;
-    uint2 b0 = uint2(clamp(int2(floor(o.xz - MOTE_REACH)) >> 8, int2(0), lim)), b1 = uint2(clamp(int2(floor(o.xz + MOTE_REACH)) >> 8, int2(0), lim));
-    float yLim = max(max(abs(hx.read(b0, 8).r), abs(hx.read(uint2(b1.x, b0.y), 8).r)),
-                     max(abs(hx.read(uint2(b0.x, b1.y), 8).r), abs(hx.read(b1, 8).r))) + 10.0;
-    float t0 = 2.0;
-    if (o.y > yLim) {
-        if (d.y >= 0.0) return 0;
-        t0 = max(t0, (o.y - yLim) / -d.y);
-    }
-    if (d.y > 0.0) tEnd = min(tEnd, (yLim - o.y) / d.y);
-    if (t0 >= tEnd) return 0;
+struct MoteOut { float4 pos [[position]]; float3 m [[flat]]; float re [[flat]]; float3 col [[flat]]; };
+
+vertex MoteOut bioVertex(uint vid [[vertex_id]], uint iid [[instance_id]], constant Frame& f [[buffer(0)]],
+                         texture2d<float> hm [[texture(0)]], texture2d<float> clim [[texture(2)]], texture2d<float> pv [[texture(16)]]) {
+    MoteOut o;
+    o.pos = float4(0, 0, -1, 1);
+    o.m = 0; o.re = 1; o.col = 0;
+    float sky = smoothstep(0.04, -0.12, f.sunDir.y);
+    if (sky <= 0.0) return o;
+    int2 origin = f.mapInfo.xy;
+    uint seed = uint(f.mapInfo.w);
+    float time = f.camRight.w;
     float2 org = float2(origin);
-    float3 wo = o + float3(org.x, 0.0, org.y);
-    float3 pc = (wo + d * t0) / MOTE_CELL;
-    int3 c = int3(floor(pc));
-    int3 stp = int3(d.x >= 0.0 ? 1 : -1, d.y >= 0.0 ? 1 : -1, d.z >= 0.0 ? 1 : -1);
-    float3 ad = max(abs(d), 1e-6);
-    float3 tDelta = MOTE_CELL / ad;
-    float3 tMax = (select(pc - float3(c), float3(c) + 1.0 - pc, d >= 0.0)) * tDelta;
-    tMax += t0;
-    float3 sum = 0;
-    float t = t0;
-    for (int i = 0; i < 13 && t < tEnd; i++) {
-        uint hh = pcg(uint(c.x) * 1597334677u ^ uint(c.y) * 3812015801u ^ uint(c.z) * 2798796415u ^ (seed + 710u));
-        if (hashf(hh) < 0.5) {
-            uint h1 = pcg(hh), h2 = pcg(h1), h3 = pcg(h2);
-            float3 a = float3(c) * MOTE_CELL + 1.3 + (MOTE_CELL - 2.6) * float3(hashf(h1), hashf(h2), hashf(h3));
-            float3 va = a - wo;
-            float ta = dot(va, d);
-            // The drift moves a bug at most 1.2 from its anchor.
-            float ra = 3.0 * max(0.1, 0.8 * (ta + 1.2) * pixelAngle) + 1.2;
-            if (ta > -0.7 && ta < tEnd + 1.2 && dot(va, va) - ta * ta < ra * ra) {
-                uint h4 = pcg(h3), h5 = pcg(h4);
-                float ph = 6.283 * hashf(h4);
-                float3 m = a + 0.8 * float3(sin(time * 0.31 + ph), 0.5 * sin(time * 0.47 + 1.7 * ph), sin(time * 0.23 + 2.3 * ph));
-                float3 v = m - wo;
-                float tm = dot(v, d);
-                float re = max(0.1, 0.8 * tm * pixelAngle);
-                float d2 = dot(v, v) - tm * tm;
-                if (tm > 0.5 && tm < tEnd && d2 < 9.0 * re * re) {
-                    float2 ml = a.xz - org;
-                    float4 col4 = hm.read(uint2(clamp(int2(floor(ml)), int2(0), int2(hm.get_width() - 1))), 0);
-                    bool veg = col4.a > 0.0 || col4.a == GIANT_A;
-                    float above = a.y - col4.r;
-                    if (above < 8.0 && above > (veg ? -25.0 : -1.0)) {
-                        Climate cl = climateAt(clim, ml, pv, origin);
-                        float w = max(smoothstep(0.1, 0.5, provinceAmount(cl)), veg ? 0.2 * smoothstep(0.35, 0.6, cl.moist) : 0.0)
-                                * (1.0 - smoothstep(0.42, 0.18, cl.temp));
-                        if (hashf(h5) < w) {
-                            float e2 = d2 / (re * re);
-                            float g = (3.0 * exp(-e2) + 0.4 * exp(-e2 / 9.0)) * (0.1 * 0.1) / (re * re);
-                            // Each flashes on its own slow rhythm, fading in and out over a second or so.
-                            float blink = 0.15 + 0.85 * smoothstep(0.3, 1.0, sin(time * (0.5 + 0.6 * hashf(pcg(h5))) + ph));
-                            float hp = hashf(pcg(h5 + 1u));
-                            float3 hue = hp < 0.2 ? BIO_LAND[0] : hp < 0.75 ? BIO_LAND[1] : BIO_LAND[2];
-                            sum += hue * g * blink * smoothstep(3.0, 10.0, tm) * (1.0 - smoothstep(0.65 * MOTE_REACH, MOTE_REACH, tm));
-                        }
-                    }
-                }
-            }
-        }
-        if (tMax.x < tMax.y && tMax.x < tMax.z) { t = tMax.x; tMax.x += tDelta.x; c.x += stp.x; }
-        else if (tMax.y < tMax.z) { t = tMax.y; tMax.y += tDelta.y; c.y += stp.y; }
-        else { t = tMax.z; tMax.z += tDelta.z; c.z += stp.z; }
-    }
-    return sum;
+    float3 wo = f.camPos.xyz + float3(org.x, 0.0, org.y);
+    int3 c = int3(floor((wo - MOTE_REACH) / MOTE_CELL)) + int3(int(iid) % MOTE_N, (int(iid) / MOTE_N) % MOTE_N, int(iid) / (MOTE_N * MOTE_N));
+    uint hh = pcg(uint(c.x) * 1597334677u ^ uint(c.y) * 3812015801u ^ uint(c.z) * 2798796415u ^ (seed + 710u));
+    if (hashf(hh) >= 0.5) return o;
+    uint h1 = pcg(hh), h2 = pcg(h1), h3 = pcg(h2), h4 = pcg(h3), h5 = pcg(h4);
+    float3 a = float3(c) * MOTE_CELL + 1.3 + (MOTE_CELL - 2.6) * float3(hashf(h1), hashf(h2), hashf(h3));
+    float ph = 6.283 * hashf(h4);
+    float3 m = a + 0.8 * float3(sin(time * 0.31 + ph), 0.5 * sin(time * 0.47 + 1.7 * ph), sin(time * 0.23 + 2.3 * ph));
+    float3 v = m - wo;
+    float dist = length(v), z = dot(v, f.camFwd.xyz);
+    float fade = smoothstep(3.0, 10.0, dist) * (1.0 - smoothstep(0.65 * MOTE_REACH, MOTE_REACH, dist));
+    if (fade <= 0.0 || z < 0.5) return o;
+    float2 ml = a.xz - org;
+    float4 col4 = hm.read(uint2(clamp(int2(floor(ml)), int2(0), int2(hm.get_width() - 1))), 0);
+    bool veg = col4.a > 0.0 || col4.a == GIANT_A;
+    float above = a.y - col4.r;
+    if (above >= 8.0 || above <= (veg ? -25.0 : -1.0)) return o;
+    Climate cl = climateAt(clim, ml, pv, origin);
+    float w = max(smoothstep(0.1, 0.5, provinceAmount(cl)), veg ? 0.2 * smoothstep(0.35, 0.6, cl.moist) : 0.0)
+            * (1.0 - smoothstep(0.42, 0.18, cl.temp));
+    if (hashf(h5) >= w) return o;
+    float tanH = f.camPos.w;
+    float re = max(0.1, 0.8 * dist * 2.0 * tanH * f.resolution.w);
+    float2 corner = float2(float(vid & 1u), float(vid >> 1)) * 2.0 - 1.0;
+    float3 p = v + (f.camRight.xyz * corner.x + f.camUp.xyz * corner.y) * 4.5 * re;
+    float pz = dot(p, f.camFwd.xyz);
+    float2 ndc = float2(dot(p, f.camRight.xyz) / (tanH * f.camFwd.w), dot(p, f.camUp.xyz) / tanH) / pz;
+    o.pos = float4(ndc - f.jitter.xy, 0.5, 1.0);
+    o.m = m - float3(org.x, 0.0, org.y);
+    o.re = re;
+    // Each flashes on its own slow rhythm, fading in and out over a second or so.
+    float blink = 0.15 + 0.85 * smoothstep(0.3, 1.0, sin(time * (0.5 + 0.6 * hashf(pcg(h5))) + ph));
+    float hp = hashf(pcg(h5 + 1u));
+    float3 hue = hp < 0.2 ? BIO_LAND[0] : hp < 0.75 ? BIO_LAND[1] : BIO_LAND[2];
+    o.col = hue * blink * fade * sky;
+    return o;
 }
 
-// The bugs: a second draw over the scene from late dusk (Renderer), adding their glow along each pixel's ray to the depth
-// the scene left in alpha. In the scene pass itself, even skipped, they cost a busy night scene ~0.5 ms.
-fragment float4 bioFragment(VOut in [[stage_in]], float4 dst [[color(0)]], constant Frame& f [[buffer(0)]],
-                            texture2d<float> hm [[texture(0)]], texture2d<float> clim [[texture(2)]],
-                            texture2d<float> hx [[texture(12)]], texture2d<float> pvTex [[texture(16)]]) {
-    float a = smoothstep(0.04, -0.12, f.sunDir.y);
-    if (a <= 0.0) return dst;
-    float2 ndc = in.uv * 2.0 - 1.0;
+// Adds a bug's glow along the pixel's ray up to the depth the scene left in alpha.
+fragment float4 bioFragment(MoteOut in [[stage_in]], float4 dst [[color(0)]], constant Frame& f [[buffer(0)]]) {
+    float2 ndc = in.pos.xy * f.resolution.zw * 2.0 - 1.0;
     ndc.y = -ndc.y;
     ndc += f.jitter.xy;
     float tanH = f.camPos.w;
     float3 d = normalize(f.camFwd.xyz + f.camRight.xyz * ndc.x * tanH * f.camFwd.w + f.camUp.xyz * ndc.y * tanH);
-    float3 g = bioMotes(hm, hx, clim, pvTex, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, 2.0 * tanH * f.resolution.w,
-                        f.camPos.xyz, d, abs(dst.a));
-    return float4(dst.rgb + g * a, dst.a);
+    float3 v = in.m - f.camPos.xyz;
+    float tm = dot(v, d);
+    if (tm > abs(dst.a)) return dst;
+    float e2 = (dot(v, v) - tm * tm) / (in.re * in.re);
+    float g = (3.0 * exp(-e2) + 0.4 * exp(-e2 / 9.0)) * (0.1 * 0.1) / (in.re * in.re) * (1.0 - smoothstep(9.0, 20.0, e2));
+    return float4(dst.rgb + in.col * g, dst.a);
 }
 
 fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0)]],
