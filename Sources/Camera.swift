@@ -111,6 +111,20 @@ final class FlightCamera {
         return (0.6 * reward, 1.2 * min(max((nearDeg - 15) / 10, 0), 1))
     }
 
+    // Share of the frame's width (11 bearings across the horizontal field) where land within 220 rises above the eye:
+    // a wall filling the frame (tests).
+    func wallInFrame() -> Double {
+        var n = 0.0
+        for i in -5...5 {
+            let a = yaw + Double(i) * 0.12
+            for dist in stride(from: 25.0, through: 220.0, by: 15.0) where h(position.x + sin(a) * dist, position.z + cos(a) * dist) > position.y {
+                n += 1
+                break
+            }
+        }
+        return n / 11
+    }
+
     private func footprintMax(_ x: Double, _ z: Double, radius: Double) -> Double {
         var m = 0.0
         for dx in stride(from: -radius, through: radius, by: radius / 2) {
@@ -316,15 +330,15 @@ final class FlightCamera {
         for k in 0..<12 {
             let a = Double(k) * .pi / 6
             let dv = SIMD2(sin(a), cos(a))
-            for r in [25.0, 50.0, 100.0, 170.0] {
+            for r in [30.0, 60.0, 110.0, 180.0, 260.0] {
                 let q = p + dv * r
                 let over = h(q.x, q.y) - (position.y - 10)
-                if over > 0 { push -= dv * min(over / 60, 1) * (50 / r) }
+                if over > 0 { push -= dv * min(over / 60, 1) * (60 / r) }
             }
         }
         let pushLen = simd_length(push)
         var steerAway = 0.0
-        let crowd = min(max((pushLen - 0.3) / 1.5, 0), 1)
+        let crowd = min(max((pushLen - 0.3) / 1.2, 0), 1)
         if crowd > 0 {
             let awayYaw = atan2(push.x, push.y)
             steerAway = sin(FlightCamera.angleDiff(awayYaw, yaw)) * 0.15 * crowd
@@ -359,6 +373,9 @@ final class FlightCamera {
         }
         let roughClimb = min(max((hi - lo - 6) * 1.5, 0), 30)
         var clearance = roughClimb + 12 + 12 * (wander(time + 500, 0.7) + 0.6) + 10 * surveyAmount + 40 * max(0, min(1, -mode / 0.6)) + 14 * noon
+        // Over the great relief the flight keeps well up: close above, its stepped slopes read as a block lattice.
+        let groundHere = h(position.x, position.z)
+        clearance += 70 * min(max((groundHere - 150) / 200, 0), 1)
         // Passing the site a shot was built around: a little lower, so the windows read.
         if let f = focus, simd_length(f - p) < 150 { clearance = max(clearance - 8, min(clearance, 22)) }
         // Canyon and mesa country: down among the walls they fill the frame, so rise to look across the rims.
@@ -382,8 +399,20 @@ final class FlightCamera {
         let base = max(ahead, 19.85) + clearance
         let lift = rough * max(0, rim + 18 - base)
         rimLift += (lift - rimLift) * min(1, dt * (lift > rimLift ? 0.3 : 0.04))
-        // The lift stops well under the cloud slab, and the flight never targets above the ceiling.
-        let target = min(base + min(rimLift, max(0, 200 - base)), FlightCamera.ceiling)
+        // The lift stops well under the cloud slab (among lowland rims at 200), and the flight never targets above the
+        // ceiling. Among the great walls it rises to look across them rather than fly at their feet.
+        let liftTop = rim > 260 ? FlightCamera.ceiling - 30 : 200
+        var target = min(base + min(rimLift, max(0, liftTop - base)), FlightCamera.ceiling)
+        // Relief rising ahead is met early, at the slow climb, so the flight arrives over a massif's shoulder rather
+        // than having to leap it: land over 280 within 1.5k ahead sets a floor, eased with distance.
+        var regional = -Double.infinity
+        for dist in stride(from: 250.0, through: 1500.0, by: 125.0) {
+            for off in [-0.3, 0.0, 0.3] {
+                let g = hFar(position.x + sin(yaw + off) * dist, position.z + cos(yaw + off) * dist)
+                if g > 280 { regional = max(regional, g + 30 - 0.15 * (dist - 250)) }
+            }
+        }
+        target = max(target, min(regional, FlightCamera.ceiling))
         let kc = 0.35
         climbRate += (kc * kc * (target - position.y) - 2 * kc * climbRate) * dt
         // Climbs are capped (3 voxels/s): mountains are flown around and through, not leapt. A wall the routing

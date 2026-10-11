@@ -25,6 +25,7 @@ struct Frame {
     float4 fade;       // x fog fade start, y world radius, z level count, w ring centre's offset ahead of the camera (tests)
     float4 shadow;     // x 1 when the shadow-height maps hold the current key light (3 no shadows), y profiling flags, z 1 when
                        // the horizon buffer is valid
+    float4 slowCloud;  // xy slow cloud field origin in world xz, z texel size (0: no field), w the time it was baked for
 };
 
 constant float SEA = 19.85;
@@ -229,18 +230,24 @@ static inline Mega megaLift(float2 p, float lagoon, uint seed) {
             U += wT * smoothstep(0.0, 0.3, M) * (430.0 * s1 + 380.0 * s2 + roll * s1);
         }
         if (wK > 0.0) {
-            // Pillars at the maxima of a warped field, isolated at the fringe and merging into a slot-cut plateau in
-            // the core, with thin needles among the fringe pillars. One flat-topped height per pillar.
+            // Pillars at the maxima of a warped field, isolated at the fringe and crowding (never merging into a wall)
+            // in the core, with thin needles among the fringe pillars. Each pillar stands on a talus apron, its sheer
+            // shaft ends in a rounded, craggy crown, and neighbours differ in height, so a field reads as eroded rock
+            // rather than a skyline of flat roofs.
             float P = 280.0 + 260.0 * saturate(fbm2(q / 5000.0, 2, seed + 230u) * 1.5 + 0.5);
             float2 kw = float2(perlin2(p / 60.0, seed + 231u), perlin2(p / 60.0 + 7.7, seed + 232u)) * 14.0;
             float c1 = perlin2((p + kw) / 52.0, seed + 233u);
             float c2 = perlin2((p + kw) / 23.0, seed + 235u);
-            float thr = mix(0.40, -0.05, core * core);
+            float thr = mix(0.40, 0.14, core * core);
+            float skirt = smoothstep(thr - 0.14, thr, c1);
             float big = smoothstep(thr, thr + 0.02, c1);
+            float crown = smoothstep(thr + 0.01, thr + 0.26, c1);
             float thin = smoothstep(0.52, 0.54, c2) * (1.0 - core) * smoothstep(0.1, 0.4, perlin2(p / 900.0, seed + 236u) + 0.3);
-            float hv = 0.45 + 0.55 * saturate(perlin2(p / 170.0, seed + 234u) * 0.9 + 0.5);
-            float kh = P * M * max(big * mix(hv, 1.0, core * core), thin * hv * 0.8);
-            U += wK * floor(kh / 9.0) * 9.0;
+            float hv = 0.35 + 0.65 * saturate(perlin2(p / 95.0, seed + 234u) * 1.1 + 0.5);
+            float crag = perlin2(p / 11.0, seed + 237u) + 0.5 * perlin2(p / 4.7, seed + 238u);
+            float shaft = P * M * hv * (0.10 * skirt + 0.62 * big + 0.28 * crown * crown) + 9.0 * crag * big;
+            float kh = max(shaft, P * M * hv * 0.8 * thin);
+            U += wK * max(kh, 0.0);
         }
         // Lagoon country keeps only its pillars standing in the water.
         U *= mix(1.0, wK, lagoon);
@@ -383,7 +390,7 @@ kernel void generateHeight(texture2d<float, access::write> out [[texture(0)]],
     out.write(float4(terrainColumn(w, uint(info.w)), 0), gid);
 }
 
-// Clamps each column into its 4-neighbour height range: removes single-voxel spikes and pits.
+// Clamps each column into its 4-neighbour height range: removes single-voxel spikes, pits and slots.
 kernel void cleanupColumns(texture2d<float, access::read> src [[texture(0)]],
                            texture2d<float, access::write> dst [[texture(1)]],
                            constant uint& row0 [[buffer(1)]],
@@ -396,6 +403,8 @@ kernel void cleanupColumns(texture2d<float, access::read> src [[texture(0)]],
     uint2 e = uint2(gid.x, max(int(gid.y) - 1, 0)), f = uint2(gid.x, min(gid.y + 1, n - 1));
     float h0 = src.read(a).r, h1 = src.read(b).r, h2 = src.read(e).r, h3 = src.read(f).r;
     c.r = clamp(c.r, min(min(h0, h1), min(h2, h3)), max(max(h0, h1), max(h2, h3)));
+    // A column-wide slot in a wall (both neighbours along an axis higher) shows as a dash down the face: fill it.
+    if (c.r > SEA + 2.0) c.r = max(c.r, max(min(h0, h1), min(h2, h3)));
     if (c.b > c.r - 3.0) { c.g = 0; c.b = 0; }
     // A roof needs walls: keep a gap only where every neighbour reaches above it.
     if (min(min(h0, h1), min(h2, h3)) < c.b + 1.0) { c.g = 0; c.b = 0; }
@@ -465,6 +474,12 @@ static Tree treeInCell(texture2d<float, access::read> src, int2 cell, int2 origi
     float g0 = src.read(uint2(t.c + int2(1, 0))).r, g1 = src.read(uint2(t.c - int2(1, 0))).r;
     float g2 = src.read(uint2(t.c + int2(0, 1))).r, g3 = src.read(uint2(t.c - int2(0, 1))).r;
     if (max(max(abs(g0 - t.g), abs(g1 - t.g)), max(abs(g2 - t.g), abs(g3 - t.g))) > 1.0) return t;
+    // Nothing grows on a ledge against a wall: its trunk and crown would hang down the face as a dash.
+    for (int k = 0; k < 8; k++) {
+        int2 o2 = int2(round(float2(cos(float(k) * 0.785398), sin(float(k) * 0.785398)) * 2.0));
+        int2 q = clamp(t.c + o2, int2(0), int2(n - 1));
+        if (src.read(uint2(q)).r > t.g + 8.0) return t;
+    }
     float2 w = float2(t.c + origin);
     if (hashf(pcg(h)) > groveDensity(w, t.g, seed)) return t;
     uint r = pcg(h + 5u);
@@ -1661,13 +1676,16 @@ static Hit trace(thread const Terrain& tr, float3 o, float3 d, float tMax, int m
 // from the max mips (cells a few percent of the distance wide, so a bin also bounds its neighbours' gaps). A
 // primary ray above its bin's horizon (and the neighbours') can hit nothing and skips the trace.
 constant int HORIZON_BINS = 1024;
+constant int HORIZON_SEGS = 16;
 
 kernel void bakeHorizon(device float* out [[buffer(0)]],
                         constant Frame& f [[buffer(1)]],
                         texture2d<float> hm [[texture(0)]],
                         texture2d_array<float> coarse [[texture(1)]],
-                        uint gid [[thread_position_in_grid]]) {
-    if (gid >= uint(HORIZON_BINS)) return;
+                        uint2 tid [[thread_position_in_grid]], uint lane [[thread_index_in_threadgroup]]) {
+    // HORIZON_SEGS threads per bin walk geometric slices of the distance and reduce, so the bake is not one long chain.
+    threadgroup float part[HORIZON_SEGS];
+    uint gid = tid.y;
     int levels = int(f.fade.z);
     Terrain tr { hm, coarse, coarse, coarse, hm, f.lod, f.mapInfo.xy, f.mapInfo.z, levels,
                  f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, 0.0 };
@@ -1675,8 +1693,9 @@ kernel void bakeHorizon(device float* out [[buffer(0)]],
     float2 dir = float2(sin(a), cos(a));
     float3 o = f.camPos.xyz;
     float best = -1e9;
-    float d = 1.0;
-    while (d < tr.rmax) {
+    float d = lane == 0 ? 1.0 : pow(tr.rmax, float(lane) / float(HORIZON_SEGS));
+    float dEnd = pow(tr.rmax, float(lane + 1) / float(HORIZON_SEGS));
+    while (d < dEnd) {
         float2 X = o.xz + dir * d;
         int k = levelAt(tr, length(X - tr.cam));
         if (k >= levels) break;
@@ -1689,7 +1708,12 @@ kernel void bakeHorizon(device float* out [[buffer(0)]],
         best = max(best, (hmax - o.y) / max(d - 0.75 * w, 0.5));
         d += 0.5 * w;
     }
-    out[gid] = best;
+    part[lane] = best;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0) {
+        for (int i = 1; i < HORIZON_SEGS; i++) best = max(best, part[i]);
+        out[gid] = best;
+    }
 }
 
 static inline bool aboveHorizon(device const float* hz, float3 d) {
@@ -1873,6 +1897,7 @@ struct Surface {
     float autumn;
     float level;    // 1 shades the face as dead-level ground: up normal, no corner AO
     float pale;     // sand, salt crust or snow
+    float wall;     // megaWall: among the great walls
     float3 nrm;     // structures: the plane a roof voxel shades as (zero: the face normal)
     float3 emit;    // fire, lanterns and lit windows
 };
@@ -1904,18 +1929,22 @@ static inline float3 strataTone(float y, float2 w, uint seed, float desertAmt, f
     float3 grey = mix(float3(0.22, 0.23, 0.25), float3(0.35, 0.34, 0.33), k);
     float3 sand = mix(float3(0.56, 0.36, 0.24), float3(0.70, 0.52, 0.37), k);
     float3 base = mix(grey, sand, desertAmt);
-    // Formations: on the great walls, broad units ~90 tall of pale cap rock, red or grey wall rock, shale and buff, so
+    // Formations: on the great walls, broad units ~200 tall of pale cap rock, red or grey wall rock, shale and buff, so
     // an 800-voxel face reads as geology rather than one repeated stripe. Absent from the lowland.
     if (fz > 0.0) {
-        float f = saturate(perlin2(float2(yd / 170.0 + 0.6 * perlin2(w / 2600.0, seed + 29u), 0.13), seed + 30u) * 0.8 + 0.5) * 3.0;
+        float f = saturate(perlin2(float2(yd / 380.0 + 0.6 * perlin2(w / 2600.0, seed + 29u), 0.13), seed + 30u) * 0.8 + 0.5) * 3.0;
         float fi = min(floor(f), 2.0), ff = smoothstep(0.35, 0.65, f - fi);
         const float3 warm[4] = { float3(0.62, 0.56, 0.47), float3(0.55, 0.31, 0.21), float3(0.34, 0.31, 0.30), float3(0.60, 0.47, 0.33) };
         const float3 cool[4] = { float3(0.48, 0.47, 0.44), float3(0.27, 0.28, 0.31), float3(0.42, 0.36, 0.29), float3(0.20, 0.21, 0.24) };
         float wm = saturate(desertAmt + 0.5);
         float3 fa = mix(cool[int(fi)], warm[int(fi)], wm), fb = mix(cool[int(fi) + 1], warm[int(fi) + 1], wm);
-        base = mix(base, mix(fa, fb, ff), 0.7 * fz);
-        // Weathering: stains and lichen in broad drifts, so a great face never reads as one flat grey plane.
-        float st = perlin2(w / 70.0, seed + 34u) + 0.5 * perlin2(w / 23.0 + yd / 40.0, seed + 35u) * (1.0 - smoothstep(1.0, 4.0, fp));
+        base = mix(base, mix(fa, fb, ff), 0.55 * fz);
+        // Weathering: stains and lichen in broad drifts, so a great face never reads as one flat grey plane. Taken in
+        // the face's own plane (across it and up it), never by ground position alone, which would streak a wall
+        // from foot to rim.
+        float along = w.x + w.y;
+        float st = perlin2(float2(along / 80.0, yd / 45.0), seed + 34u)
+                 + 0.5 * perlin2(float2(along / 26.0, yd / 17.0), seed + 35u) * (1.0 - smoothstep(1.0, 4.0, fp));
         base *= 1.0 + 0.22 * fz * st;
     }
 
@@ -1980,6 +2009,17 @@ static inline float3 sandRipples(int2 v, float2 uv, float2 w, float fp, float ti
     return float3(0.045 * amp * r + 0.035 * swell + 0.05 * streak, 0.018 * amp * dr * wind);
 }
 
+// 0..1 where world xz w lies among mega relief: the coarsest ring's max over ~256-voxel cells, bilinear, so it is
+// smooth across a wall (lowland rarely rises past ~190).
+static inline float megaWall(thread const Terrain& tr, float2 w) {
+    constexpr sampler blr(filter::linear, address::repeat);
+    int kc = tr.levels - 1;
+    if (kc < 1) return 0.0;
+    float cw = float(1 << kc);
+    float M = tr.ch.sample(blr, w / (cw * float(COARSE_N)), uint(kc - 1), level(max(8 - kc, 0))).r;
+    return smoothstep(190.0, 270.0, M);
+}
+
 // Surface of level k's column v (xz in level cells) on face n; uv is the face position in [0, 1) of the column.
 // Coarse columns are s voxels wide but still unit voxels tall, and carry no structures.
 static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device const Site* sites, device const float4* lampState,
@@ -1989,6 +2029,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     s.mat = 0;
     s.level = 0;
     s.pale = 0;
+    s.wall = 0;
     s.nrm = 0;
     s.emit = 0;
     int2 mapOrigin = tr.origin;
@@ -2015,11 +2056,13 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     Climate c = climateL(tr, k, (float2(v.xz) + 0.5) * cs);
     float desert = desertAmount(c);
     // Painted-hill beds belong to low mounds; on the great walls their 11-voxel bands would read as stripes.
-    float painted = smoothstep(0.0, 0.6, paintedAmount(c)) * (1.0 - smoothstep(150.0, 350.0, H));
-    float snowline = snowlineAt(c.temp) + 5.0 * perlin2(w / 160.0, seed + 21u)
-                   + 60.0 * perlin2(w / 700.0, seed + 28u) * smoothstep(150.0, 400.0, H)
+    float wallM = megaWall(tr, w);
+    s.wall = wallM;
+    float painted = smoothstep(0.0, 0.6, paintedAmount(c)) * (1.0 - wallM);
+    float snowline = snowlineAt(c.temp) + 5.0 * perlin2(w / 160.0, seed + 21u);
     // On the ranges rock breaks through the lower snowfields in drifts, so a massif is not one white sheet.
-                   + 260.0 * saturate(perlin2(w / 90.0, seed + 33u) * 0.9 + 0.45) * smoothstep(150.0, 450.0, H);
+    if (H > 150.0) snowline += 60.0 * perlin2(w / 700.0, seed + 28u) * smoothstep(150.0, 400.0, H)
+                             + 260.0 * saturate(perlin2(w / 90.0, seed + 33u) * 0.9 + 0.45) * smoothstep(150.0, 450.0, H);
     c.temp = altitudeTemp(c.temp, H);
     float cold = smoothstep(0.42, 0.18, c.temp);
     float autumn = autumnAmount(c);
@@ -2039,7 +2082,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     bool beach = H <= SEA + 1.2;
     // Rock tone shows on side and under faces, and on high treads; a low tread never reads it.
     bool needStone = !beach && (!(n.y > 0 && !underGap) || H - SEA > 0.55 * 110.0);
-    float3 stone = needStone ? strataTone(wy, wq, seed, max(desert, rimW), fpA, smoothstep(150.0, 350.0, H)) : float3(0);
+    float3 stone = needStone ? strataTone(wy, wq, seed, max(desert, rimW), fpA, wallM) : float3(0);
 
     float lagoon = smoothstep(0.0, 0.35, lagoonAmount(c));
     // Pale ground (sand, salt, snow) sits well below the clouds, and drifts in tone so open flats never read as one sheet.
@@ -2124,7 +2167,8 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     }
     s.tread = tread;
     bool snowy = float(int(H)) > snowline;
-    if (snowy) s.riser = 0.0;
+    // Snow risers prefilter to snow, except on the great walls, whose faces stay rock under snowy ledges.
+    if (snowy && wallM < 0.5) s.riser = 0.0;
     // Snow risers prefilter to snow; eased across the snowline, which far off is one straight contour.
     s.tread = mix(tread, snow, smoothstep(snowline - 6.0, snowline + 6.0, H));
 
@@ -2142,9 +2186,16 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     } else if (n.y == 0 && !underGap) {
         s.pale = beach || snowy ? 1.0 : 0.0;
         if (beach) s.albedo = tread * 0.85;
-        else if (slope < 4.0 && !snowy) s.albedo = mix(mix(tread, stone, 0.5) * 0.9, stone * 0.95, painted);
-        // Snow lies on the treads; a tall wall stays rock under it.
-        else s.albedo = snowy ? mix(stone, snow, 0.45 * (1.0 - smoothstep(6.0, 30.0, slope))) : stone;
+        else {
+            // Low risers half take the tread; a column's deepest drop alone would make a staircase wall of mixed step
+            // heights alternate per column (dashes down the face), so on steep relief the slope across the
+            // neighbours decides too.
+            float steepC = 0.5 * length(float2(hx0 - hx1, hz0 - hz1));
+            float rockW = snowy ? 1.0 : max(step(4.0, slope), max(smoothstep(1.0, 2.5, steepC), wallM));
+            // Snow lies on the treads; a tall wall stays rock under it.
+            float3 rock = snowy ? mix(stone, snow, 0.45 * (1.0 - smoothstep(6.0, 30.0, slope))) : stone;
+            s.albedo = mix(mix(mix(tread, stone, 0.5) * 0.9, stone * 0.95, painted), rock, rockW);
+        }
     } else {
         s.albedo = stone * 0.9;
     }
@@ -2323,7 +2374,8 @@ static float cornerAO(texture2d<float> hm, int size, int3 v, int3 n, float2 uv) 
 // Fraction of open sky above a point, from how far the surrounding columns rise above y within 6 voxels.
 // Heights are filtered, so a c on a column centre reads exact columns.
 // Coarse levels sample their own slice at the same world radii.
-static float skyVisibility(thread const Terrain& tr, int k, float2 c, float y, bool lite = false) {
+// mode 0: 8 directions at 2, 4 and 6; 1 (far: a pixel spans columns): 8 directions at 4; 2 (seen in water): 4 at 4.
+static float skyVisibility(thread const Terrain& tr, int k, float2 c, float y, int mode = 0) {
     constexpr sampler bl(filter::linear, address::clamp_to_edge);
     constexpr sampler blr(filter::linear, address::repeat);
     float2 inv = 1.0 / float2(tr.hm.get_width(), tr.hm.get_height());
@@ -2331,9 +2383,9 @@ static float skyVisibility(thread const Terrain& tr, int k, float2 c, float y, b
     float2 fo = float2(levelOrigin(tr, k) & (COARSE_N - 1));
     float occ = 0.0;
     const int2 dirs[8] = { int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1), int2(1, 1), int2(-1, 1), int2(1, -1), int2(-1, -1) };
-    for (int i = 0; i < 8; i += lite ? 2 : 1) {
+    for (int i = 0; i < 8; i += mode == 2 ? 2 : 1) {
         float m = 0.0;
-        for (int r = lite ? 2 : 1; r <= (lite ? 2 : 3); r++) {
+        for (int r = mode > 0 ? 2 : 1; r <= (mode > 0 ? 2 : 3); r++) {
             float dist = float(r * 2) * (i < 4 ? 1.0 : 1.414);
             float2 q = c + float2(dirs[i] * (r * 2));
             float rise = (k == 0 ? tr.hm.sample(bl, q * inv, level(0)).r
@@ -2342,7 +2394,7 @@ static float skyVisibility(thread const Terrain& tr, int k, float2 c, float y, b
         }
         occ += m;
     }
-    return 1.0 - occ / (lite ? 4.0 : 8.0);
+    return 1.0 - occ / (mode == 2 ? 4.0 : 8.0);
 }
 
 // Position on the face in [0, 1) of a column s voxels wide (y stays in unit voxels).
@@ -2375,6 +2427,20 @@ kernel void cloudField(texture2d<float, access::write> out [[texture(0)]],
                        uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= out.get_width() || gid.y >= out.get_height()) return;
     out.write(float4(cloudFineAt(info.xy + (float2(gid) + 0.5) * info.z, as_type<uint>(info.w))), gid);
+}
+
+// The slow part without the cover offset, baked around the camera every frame (cloudSlowBaked reads it).
+static inline float cloudSlowRaw(float2 q, uint seed, float time) {
+    q -= float2(cos(0.6), sin(0.6)) * time * 4.8;
+    return perlin3(float3(q / (520.0 * CLOUD_S), time * 0.004), seed + 41u) * 0.35;
+}
+
+kernel void cloudSlowField(texture2d<float, access::write> out [[texture(0)]],
+                           constant float4& info [[buffer(0)]],
+                           constant uint& seed [[buffer(1)]],
+                           uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= out.get_width() || gid.y >= out.get_height()) return;
+    out.write(float4(cloudSlowRaw(info.xy + (float2(gid) + 0.5) * info.z, seed, info.w)), gid);
 }
 
 static inline float cloudSlow(float2 q, uint seed, float time, float cover) {
@@ -2410,6 +2476,9 @@ struct Ctx {
     texture2d<float> shadowFar;
     float shadowMode;             // 0 none, 1 maps, 2 brute-force rays (debug)
     bool prof1;
+    int prof;
+    texture2d<float> slowTex;
+    float4 slowInfo;
 };
 
 // Baked fine cloud field where it covers q, else evaluated.
@@ -2421,10 +2490,18 @@ static inline float cloudFineBaked(thread const Ctx& x, float2 q) {
     return cloudFineAt(qd, x.seed);
 }
 
+// The slow part from its baked field where that covers q (texels a twentieth of its features), else evaluated.
+static inline float cloudSlowBaked(thread const Ctx& x, float2 q) {
+    constexpr sampler bl(filter::linear, address::clamp_to_edge);
+    float2 u = (q - x.slowInfo.xy) / (x.slowInfo.z * float(x.slowTex.get_width()));
+    if (x.slowInfo.z > 0.0 && all(u > 0.002) && all(u < 0.998)) return x.slowTex.sample(bl, u, level(0)).r + x.cover - 0.5;
+    return cloudSlow(q, x.seed, x.time, x.cover);
+}
+
 static inline float cloudShadow(thread const Ctx& x, float3 p, float3 L) {
     if (L.y <= 0.02 || p.y >= CLOUD_Y1) return 1.0;
     float2 q = p.xz + L.xz / L.y * (CLOUD_Y - p.y) + float2(x.origin);
-    float dens = cloudFineBaked(x, q) + cloudSlow(q, x.seed, x.time, x.cover);
+    float dens = cloudFineBaked(x, q) + cloudSlowBaked(x, q);
     // Land inside the slab is in its cloud; land above it is in sunlight.
     return mix(1.0, mix(0.6, 0.32, smoothstep(0.3, 0.5, L.y)), smoothstep(0.0, 0.14, dens) * smoothstep(CLOUD_Y1, CLOUD_Y0, p.y));
 }
@@ -2436,7 +2513,7 @@ static inline float cloudShadow(thread const Ctx& x, float3 p, float3 L) {
 // the key light, from the coarse rings' max mips. Rebaked a band per frame; shade() traces only the near ray.
 constant float SHADOW_CELL = 8.0;
 constant int SHADOW_N = 1024;
-constant float SHADOW_NEAR = 160.0;
+constant float SHADOW_NEAR = 96.0;
 
 struct ShadowBake {
     float4 key;     // xyz key light direction, w horizontal start distance
@@ -2506,7 +2583,8 @@ static float shadowMapLit(thread const Ctx& x, float3 p, bool all) {
 // columns: a higher neighbour toward the light shades a strip of a column's tread (to contact level ct), and
 // risers sit at contact level cr, as the traced shadow had them: its origin, kept inside the hit column, starts
 // a side face's ray inside the solid.
-static float stairShadow(thread const Terrain& tr, int k, float2 p, float3 L, float3 d, float ct, float cr) {
+// far: a pixel spans several columns, so the nearest column alone stands for them (TAA averages the rest).
+static float stairShadow(thread const Terrain& tr, int k, float2 p, float3 L, float3 d, float ct, float cr, bool far = false) {
     float cs = tr.lod[k].w;
     float2 q = p / cs - 0.5, f = fract(q);
     int2 c0 = int2(floor(q));
@@ -2515,8 +2593,10 @@ static float stairShadow(thread const Terrain& tr, int k, float2 p, float3 L, fl
     // Horizontal reach of a unit step's shadow along each axis, in columns.
     float2 reach = abs(L.xz) / max(L.y, 0.02) / cs;
     float lit = 0.0, area = 0.0;
-    for (int j = 0; j <= 1; j++)
-        for (int i = 0; i <= 1; i++) {
+    int n = far ? 0 : 1;
+    if (far) { c0 = int2(floor(p / cs)); f = 0.0; }
+    for (int j = 0; j <= n; j++)
+        for (int i = 0; i <= n; i++) {
             int2 c = c0 + int2(i, j);
             float w = (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y);
             float h = groundL(tr, k, c);
@@ -2565,8 +2645,10 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, int shadows)
     float wt = smoothstep(0.33, 0.6, fp);
     // Structures keep their own planes: a column-difference normal would tilt a house's edge columns.
     float wn = built ? 0.0 : s.mat == 0 && h.normal.y != 0 ? wt : wf;
-    if (s.mat == 0 && wt > 0.0 && s.level < 1.0) {
-        float R = max(max(2.0, 1.5 * fp), cs);
+    if (s.mat == 0 && wt > 0.0 && s.level < 1.0 && shadows != 2) {
+        // Side faces take the wall's direction over several columns: a single column's jog in a wall would otherwise
+        // turn a narrow face to the light and draw a pale dash down the wall.
+        float R = max(max(h.normal.y != 0 ? 2.0 : 6.0, 1.5 * fp), cs);
         float2 grad = float2(groundSmoothL(x.tr, k, p.xz + float2(R, 0)) - groundSmoothL(x.tr, k, p.xz - float2(R, 0)),
                              groundSmoothL(x.tr, k, p.xz + float2(0, R)) - groundSmoothL(x.tr, k, p.xz - float2(0, R))) / (2.0 * R);
         float3 g = normalize(float3(-grad.x, 1.0, -grad.y));
@@ -2587,10 +2669,15 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, int shadows)
     float steep = 0.5 * length(float2(s.nh.x - s.nh.y, s.nh.z - s.nh.w));
     float cliff = s.riser > 0.0 ? max(drop, 2.0 * steep) : 0.0;
     float keep = smoothstep(6.0, 14.0, cliff / fp) * smoothstep(3.0, 5.0, cliff);
+    // Among the great walls every face is rock: column by column, some faces of a wall would otherwise take the
+    // tread colour and stripe it.
+    // So is every riser of a tall, steep staircase wall: kept by its own drop alone, its deeper columns would show as
+    // strata dashes among tread-coloured ones.
+    keep = max(keep, max(s.wall, smoothstep(1.0, 2.5, steep) * smoothstep(100.0, 160.0, s.H)) * smoothstep(1.0, 3.0, cliff));
     // A riser face only a column wide (a jog in a step edge) is a lone cube face: lit, it is a bright cube; in shade,
     // stone against sand, a dark notch. With the footprint it fades to the tread it stands for, colour and light.
     float lone = 0.0;
-    if (h.normal.y == 0 && s.mat == 0 && wn < 1.0) {
+    if (h.normal.y == 0 && s.mat == 0 && wn < 1.0 && shadows != 2) {
         int2 t = h.normal.x != 0 ? int2(0, 1) : int2(1, 0), o = h.normal.xz;
         float run = float(groundL(x.tr, k, h.voxel.xz + t) > groundL(x.tr, k, h.voxel.xz + t + o) + 0.5)
                   + float(groundL(x.tr, k, h.voxel.xz - t) > groundL(x.tr, k, h.voxel.xz - t + o) + 0.5);
@@ -2645,12 +2732,12 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, int shadows)
         float reach = wf2 / max(x.L.key.y, 0.05);
         sh = sHit.hit ? 0.35 * (1.0 - smoothstep(2.0 + reach, 8.0 + reach, sHit.t)) : 1.0;
         if (maps) sh = min(sh, shadowMapLit(x, so, mapOnly));
-        if (wf2 > 0.0) sh = mix(sh, min(sh, stairShadow(x.tr, k, p.xz, x.L.key, d, contact, 0.35)), wf2);
+        if (wf2 > 0.0) sh = mix(sh, min(sh, stairShadow(x.tr, k, p.xz, x.L.key, d, contact, 0.35, fp > 3.0 || shadows == 2)), wf2);
         float floorSh = mix(mix(0.5, 0.25, hiSun), 0.32, x.L.gold);
         sh = mix(sh, floorSh + (1.0 - floorSh) * sh, wf);
         sh = mix(sh, 1.0, 0.3 * x.L.night);
     }
-    sh *= mix(1.0, cloudShadow(x, p, x.L.key), x.L.sunAmt);
+    if (!(x.prof & 32) && x.L.sunAmt > 0.0) sh *= mix(1.0, cloudShadow(x, p, x.L.key), x.L.sunAmt);
     float lowFill = mix(0.9, 1.0, smoothstep(0.1, 0.4, x.L.key.y));
     // Low light: shadows take the cool zenith, against warm key light.
     // High sun: fill is the deep zenith, so shade reads blue against warm key light.
@@ -2660,7 +2747,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, int shadows)
     skyFill *= mix(float3(1.0), float3(0.62, 0.58, 0.85), x.L.gold * x.L.sunAmt);
     float2 svAt = mix((float2(h.voxel.xz + h.normal.xz) + 0.5) * cs, p.xz, wf2);
     float svY = wf2 > 0.0 ? mix(p.y, groundSmoothL(x.tr, k, p.xz), wf2) : p.y;
-    skyFill *= mix(1.0, skyVisibility(x.tr, k, svAt, svY, lite), mix(0.55, 0.85, hiSun));
+    if (!(x.prof & 16)) skyFill *= mix(1.0, skyVisibility(x.tr, k, svAt, svY, lite || fp > 5.0 ? 2 : fp > 2.0 ? 1 : 0), mix(0.55, 0.85, hiSun));
     // A wall sees half the dome, and the half it sees is the dimmer horizon side; without this a riser in shade
     // outshines the sunlit tread above it under a low sun.
     skyFill *= 0.5 + 0.5 * saturate(nl.y);
@@ -2747,8 +2834,10 @@ static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, 
         float st = min(t, 400.0) * (float(i) + 0.5) / float(samples);
         float3 sp = o + d * st;
         float3 wp = float3(sp.x + float(x.origin.x), sp.y, sp.z + float(x.origin.y));
-        mist += saturate(perlin3(wp * float3(0.012, 0.03, 0.012) + float3(x.time * 0.01, 0, x.time * 0.006), x.seed + 50u) + 0.2)
-              * exp(-max(sp.y - SEA, 0.0) / 10.0);
+        // Mist lies in the low ground: well above the water a sample adds nothing worth its noise.
+        float low = exp(-max(sp.y - SEA, 0.0) / 10.0);
+        if (low > 0.002)
+            mist += saturate(perlin3(wp * float3(0.012, 0.03, 0.012) + float3(x.time * 0.01, 0, x.time * 0.006), x.seed + 50u) + 0.2) * low;
     }
     mist = mist / float(max(samples, 1)) * min(t, 400.0) * 0.0014 * mix(0.7, 0.3, smoothstep(0.15, 0.45, x.L.sun.y));
     // The world ends in a circle around the camera (not around o: reflections start elsewhere), fully hazed at its edge.
@@ -2763,13 +2852,16 @@ static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, 
     return exp(-((heightTerm + air + mist) * clear + 6.0 * smoothstep(x.tr.fadeStart, x.tr.rmax, r)));
 }
 
-static float3 applyFog(thread const Ctx& x, float3 col, float3 o, float3 d, float t) {
-    float T = fogTransmittance(x, o, d, t);
+static float3 applyFogT(thread const Ctx& x, float3 col, float3 o, float3 d, float T) {
     // Thin haze in-scatters less than the full horizon radiance; only thick fog converges on the sky.
     // Forward scatter fades out above the horizon as the sky's does, so fully hazed land matches the sky behind it.
     float scatter = min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night) * mix(1.0, smoothstep(0.1, 0.0, d.y), smoothstep(0.5, 0.0, T));
     float3 f = (fogColor(x, d, T) + x.L.keyCol * scatter) * mix(mix(0.3, 0.12, x.L.gold), 1.0, smoothstep(0.1, 0.9, 1.0 - T));
     return mix(f, col, T);
+}
+
+static float3 applyFog(thread const Ctx& x, float3 col, float3 o, float3 d, float t) {
+    return applyFogT(x, col, o, d, fogTransmittance(x, o, d, t));
 }
 
 // In-scatter of the nearest lamps' light along a ray to tEnd: the closed-form integral of 1/(r^2 + 4) - 1/(Rh^2 + 4)
@@ -2807,7 +2899,8 @@ struct CloudSample { float3 col; float a; float t; };
 // coverage; tops tower where it is dense, and each sample is self-shadowed toward the sun, so clouds have
 // lit crowns and shaded bases instead of reading as flat cut-outs.
 // tEnd clips the march at terrain that rises into the slab, so a peak disappears into the cloud base.
-static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float tEnd = 1e9) {
+// steps > 0 overrides the march's step count (a veil in front of land needs fewer).
+static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float tEnd = 1e9, int stepsOverride = 0) {
     CloudSample c;
     c.col = 0; c.a = 0; c.t = 6e4;
     if (d.y < 0.01) return c;
@@ -2816,7 +2909,7 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float tEn
     float t0 = max(min(ta, tb), 0.0), t1 = min(max(ta, tb), tEnd);
     if (t0 > 7000.0 * CLOUD_S || t1 <= t0) return c;
     // Night steps are dithered, so fewer suffice.
-    int steps = x.quality > 0.5 ? (x.L.night > 0.99 ? 8 : 12) : 8;
+    int steps = stepsOverride > 0 ? stepsOverride : x.quality > 0.5 ? (x.L.night > 0.99 ? 8 : 12) : 8;
     float dt = (t1 - t0) / float(steps);
     float lowSun = 1.0 - smoothstep(0.02, 0.28, abs(x.L.sun.y));
     float2 dh = normalize(d.xz + 1e-5), sh2 = normalize(x.L.sun.xz + 1e-5);
@@ -2834,7 +2927,7 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float tEn
     float kt = max(40.0 * CLOUD_S / max(length(d.xz), 1e-4), dt);
     float ka = t0, kb = t0 + kt;
     float2 qa = (o.xz + d.xz * ka) + float2(x.origin), qb = (o.xz + d.xz * kb) + float2(x.origin);
-    float sa = cloudSlow(qa, x.seed, x.time, x.cover), sb = cloudSlow(qb, x.seed, x.time, x.cover);
+    float sa = cloudSlowBaked(x, qa), sb = cloudSlowBaked(x, qb);
     float wa = -1e9, wb = -1e9;
     for (int i = 0; i < steps; i++) {
         float t = t0 + (float(i) + jit) * dt;
@@ -2844,7 +2937,7 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float tEn
             ka = kb; qa = qb; sa = sb; wa = wb;
             kb += kt;
             qb = (o.xz + d.xz * kb) + float2(x.origin);
-            sb = cloudSlow(qb, x.seed, x.time, x.cover);
+            sb = cloudSlowBaked(x, qb);
             wb = -1e9;
         }
         float kf = saturate((t - ka) / kt);
@@ -2865,8 +2958,8 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float tEn
         // Under the moon the sample's own density stands in for the occlusion toward the light.
         float toward = base;
         if (x.L.night <= 0.99) {
-            if (wa < -1e8) wa = cloudSlow(qa + sunStep, x.seed, x.time, x.cover);
-            if (wb < -1e8) wb = cloudSlow(qb + sunStep, x.seed, x.time, x.cover);
+            if (wa < -1e8) wa = cloudSlowBaked(x, qa + sunStep);
+            if (wb < -1e8) wb = cloudSlowBaked(x, qb + sunStep);
             toward = cloudFineBaked(x, q + sunStep) + mix(wa, wb, kf);
         }
         float shadow = exp(-saturate((toward - 0.04) * 3.0) * 2.2) * (0.55 + 0.45 * h01);
@@ -3144,6 +3237,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
                               texture2d_array<float> coarse [[texture(6)]], texture2d_array<float> coarseClim [[texture(7)]],
                               texture2d_array<float> coarseCover [[texture(8)]],
                               texture2d<float> shadowNear [[texture(9)]], texture2d<float> shadowFar [[texture(10)]],
+                              texture2d<float> slowTex [[texture(11)]],
                               device const Site* sites [[buffer(1)]], device const float4* lampPos [[buffer(2)]],
                               device const float4* lampState [[buffer(3)]], constant int4* refs [[buffer(4)]],
                               device const float4* birds [[buffer(5)]], device const float* horizon [[buffer(6)]]) {
@@ -3163,7 +3257,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             2.0 * tanH * f.resolution.w, f.misc.w, makeLight(f.sunDir.xyz),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
             cloudTex, f.cloud.xyz, st, sites, lampPos, lampState, lightMap, lightDir, f.lights, shadowNear, shadowFar,
-            f.misc2.z == 14 ? 2.0 : f.shadow.x, (int(f.shadow.y) & 1) != 0 };
+            f.misc2.z == 14 ? 2.0 : f.shadow.x, (int(f.shadow.y) & 1) != 0, int(f.shadow.y), slowTex,
+            f.slowCloud.w == f.camRight.w ? f.slowCloud : float4(0) };
 
     // Debug map view: 11 level 4 (+-10k tall, +-16k wide), 12 level 2, 13 level 1; hillshade, height ramp, 100-voxel
     // contours, 2k grid, yellow 10k lines, magenta world origin, red camera.
@@ -3227,6 +3322,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     bool birdRefl = false;
     float3 col;
     float tSurf;
+    float Tfog = -1.0;
     if (water) {
         float3 wp = o + d * tw;
         float2 ww = wp.xz + float2(x.origin);
@@ -3243,13 +3339,23 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         float3 r = reflect(d, n);
         r.y = abs(r.y);
         float3 refl;
+        // Land in the reflected ray hides the sun or moon its glitter would mirror.
+        float open = 1.0;
+        float cosi = saturate(-dot(d, n));
+        float fres = 0.02 + 0.98 * pow(1.0 - cosi, 5.0);
         if (x.quality > 0.5 && (int(f.shadow.y) & 4) == 0) {
             // Rippled reflections of water past 300 trace from the 2-voxel ring: its far shore reads the same, at half
             // the steps.
             Hit rh = trace(x.tr, wp + float3(0, 0.02, 0), r, x.tr.rmax, 260, max(wl, tw > 300.0 ? 1 : 0));
             // Shadowed: unshadowed, a sun-facing wall in the shade of the far rim mirrors as a pale streak.
-            refl = rh.hit ? applyFog(x, shadeL(x, wp, r, rh, x.shadowMode == 1.0 ? 2 : 1), wp, r, rh.t)
-                           : softCloudSky(x, wp, r);
+            if (rh.hit) {
+                open = 0.0;
+                // Land the haze all but hides needs no shading.
+                float T = fogTransmittance(x, wp, r, rh.t);
+                refl = applyFogT(x, T < 0.01 || (x.prof & 8) ? float3(0.0) : shadeL(x, wp, r, rh, x.shadowMode == 1.0 ? 2 : 1), wp, r, T);
+            } else {
+                refl = softCloudSky(x, wp, r);
+            }
             if (nFlocks > 0) {
                 float tB = rh.hit ? rh.t : 3000.0;
                 BirdHit bh = traceBirds(birds, nFlocks, wp, r, tB, x.pixelAngle, tw);
@@ -3260,8 +3366,6 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         }
         float3 deep = x.L.zenith * 0.18 + x.L.horizon * 0.06 + float3(0.004, 0.014, 0.018);
         float3 under = deep;
-        float cosi = saturate(-dot(d, n));
-        float fres = 0.02 + 0.98 * pow(1.0 - cosi, 5.0);
         float bedPath = h.t - tw;
         // How much of the lit bed survives the water and the surface reflection; below a few thousandths it
         // can't show, and its shade() is the costliest part of a water pixel.
@@ -3293,10 +3397,10 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         under *= 1.0 - 0.4 * x.L.night;
         col = mix(under, refl, fres);
         // Glitter path toward the sun or moon: the main EDR highlight.
-        col += x.L.keyCol * 6.0 * pow(max(dot(r, x.L.key), 0.0), mix(mix(900.0, 4000.0, x.L.night), 350.0, x.L.gold)) * fres * (x.L.shadows ? 1.0 : 0.3) * (1.0 + 0.5 * x.L.night);
+        col += x.L.keyCol * 6.0 * pow(max(dot(r, x.L.key), 0.0), mix(mix(900.0, 4000.0, x.L.night), 350.0, x.L.gold)) * fres * (x.L.shadows ? 1.0 : 0.3) * (1.0 + 0.5 * x.L.night) * open;
         // Golden hour: a broad sheen of the aureole on the water under the sun.
-        col += x.L.keyCol * 0.5 * pow(max(dot(r, x.L.key), 0.0), 40.0) * fres * x.L.gold;
-        if (x.L.night > 0.0) {
+        col += x.L.keyCol * 0.5 * pow(max(dot(r, x.L.key), 0.0), 40.0) * fres * x.L.gold * open;
+        if (x.L.night > 0.0 && open > 0.0) {
             // Moon path: the chance that some ripple facet mirrors the moon (a slope distribution, so it is
             // smooth and TAA-stable). Slopes along the view spread wider than across it, so the path runs out
             // toward the horizon; a broad skirt under the core lets it fade out rather than stop.
@@ -3342,7 +3446,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         }
         tSurf = tw;
     } else if (h.hit) {
-        col = shadeL(x, o, d, h, 1);
+        if (f.misc2.z != 2) Tfog = fogTransmittance(x, o, d, h.t);
+        col = (x.prof & 64) || (Tfog >= 0.0 && Tfog < 0.01) ? float3(0.0) : shadeL(x, o, d, h, 1);
         tSurf = h.t;
         // Debug: flat level colours, morph bands white.
         if (f.misc2.z == 9) {
@@ -3383,11 +3488,12 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             }
     }
     if (f.misc2.z == 3) return float4(float3(fogTransmittance(x, o, d, tSurf)), 1);
-    if (f.misc2.z != 2) col = applyFog(x, col, o, d, tSurf);
+    if (f.misc2.z != 2) col = Tfog >= 0.0 ? applyFogT(x, col, o, d, Tfog) : applyFog(x, col, o, d, tSurf);
     // A summit above the cloud base is seen through the slab in front of it.
-    if (!water && h.hit && o.y < CLOUD_Y0 && o.y + d.y * h.t > CLOUD_Y0) {
-        CloudSample cl = cloudSheet(x, o, d, h.t);
-        col = mix(col, cl.col, cl.a);
+    if (!(x.prof & 32) && !water && h.hit && o.y < CLOUD_Y0 && o.y + d.y * h.t > CLOUD_Y0) {
+        CloudSample cl = cloudSheet(x, o, d, h.t, 6);
+        // A flat base would cut a level line across every wall that rises into it: the veil thickens up the wall.
+        col = mix(col, cl.col, cl.a * smoothstep(CLOUD_Y0, CLOUD_Y0 + 110.0, o.y + d.y * h.t));
     }
     col = hazeAndSmoke(x, col, sites, lampPos, lampState, refs, f.refs, o, d, tSurf);
     return float4(col, birdRefl ? -tSurf : tSurf);
