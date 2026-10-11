@@ -689,14 +689,14 @@ static inline float towerTierScale(Tower T, int k) {
     return r;
 }
 
-// Stage k's axis: the upper stages stand well off the base's, mostly toward one side, so a setback is a broad terrace
-// on one side and nearly flush on the other (concentric setbacks read as a wedding cake).
+// Stage k's axis: the upper stages stand off the base's, mostly toward one side, so a setback is a broad terrace on one
+// side and narrow on the other (concentric setbacks read as a wedding cake; near flush, as fins down the face).
 static inline float2 towerStageAxis(Tower T, int k) {
     int j = min(k, T.K - 2);
     if (j <= 0) return T.c;
     uint h = pcg(T.h + 40u + uint(j));
     float a = hashf(pcg(T.h + 39u)) * 6.2831853 + 1.6 * (hashf(h) - 0.5);
-    return T.c + float2(cos(a), sin(a)) * T.R0 * (1.0 - towerTierScale(T, j)) * (0.5 + 0.4 * hashf(pcg(h)));
+    return T.c + float2(cos(a), sin(a)) * T.R0 * (1.0 - towerTierScale(T, j)) * (0.2 + 0.3 * hashf(pcg(h)));
 }
 
 struct TowerPlan { float r; float a; float am; float reff; float t; int face; float2 dir; };
@@ -3757,13 +3757,16 @@ static inline uint towerLitRoom(Tower T, float2 w, int j) {
     int bay = j < 7 ? int(floor(P.t / towerBayW(T.h, j, P.face, T.bw) + 0.5)) : 0;
     int n = hashf(pcg(T.h + 61u)) < 0.4 ? 2 : 1;
     int step = T.N > 8 ? 3 : 2;
-    for (int i = 0; i < 2; i++) {
-        if (i >= n) break;
+    // Candidates in turn, skipping bays walled up or fallen, until n are chosen.
+    for (int i = 0; i < 8; i++) {
+        if (n <= 0) break;
         uint r = pcg(T.h + 62u + 5u * uint(i));
         int jj = hashf(r) < 0.3 ? 7 : int(pcg(r + 1u) % uint(max(T.K - 2, 1)));
         int ff = jj == 7 ? int(pcg(r + 2u) % uint(T.N / step)) * step : int(pcg(r + 2u) % uint(T.N));
         int bb = jj == 7 ? 0 : int(pcg(r + 3u) % 3u) - 1;
+        if (jj != 7 && (!towerLoggiaBay(T.h, jj, ff, float(bb)) || towerBayFallen(T.h, jj, ff, float(bb)))) continue;
         if (j == jj && P.face == ff && bay == bb) return r | 1u;
+        n--;
     }
     return 0u;
 }
@@ -3817,7 +3820,7 @@ static float3 towerWallPlane(Tower T, float2 wc, float3 n) {
 }
 
 // A lit room's light: faint, a lamp deep inside.
-constant float3 TOWER_ROOM = float3(1.0, 0.55, 0.22) * 0.8;
+constant float3 TOWER_ROOM = float3(1.0, 0.55, 0.22) * 0.5;
 
 // The light of a lit room on the faces of an opening of tower R at voxel v of level k (0 where none): only the great
 // portals and the loggias' bays, a storey and a tenth tall just under a rim; weathered pockets stay dark. Out of line:
