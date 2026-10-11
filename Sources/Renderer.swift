@@ -156,6 +156,8 @@ final class World {
         var giantList: [GiantInfo] = []
         // Whether the jungle's roof (Shaders/Saver.metal jungleCanopy) may stand on this map.
         var jungle = false
+        // The jungle's extent on this map: whether the province reaches each point of a 64-voxel grid over it.
+        var jungleGrid: [Bool] = []
 
         init?(device: MTLDevice) {
             let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: World.size, height: World.size, mipmapped: false)
@@ -247,11 +249,20 @@ final class World {
     var giantBuffer: MTLBuffer { buffers[active].giants }
     var sites: [SiteInfo] { buffers[active].siteList }
     var giants: [GiantInfo] { buffers[active].giantList }
-    // Whether any cell of the active map's band mips may be flagged: some giant's reach meets it, or the jungle's roof.
-    var bandsOnMap: Bool {
+    // Whether a flagged cell of the active map's band mips (under a giant's crown or the jungle's roof) may lie within r
+    // of world xz p.
+    func bandsNear(_ p: SIMD2<Double>, radius r: Double) -> Bool {
         let b = buffers[active]
-        let lo = SIMD2(Double(b.origin.x), Double(b.origin.y)) - GiantInfo.reach, hi = lo + Double(World.size) + 2 * GiantInfo.reach
-        return b.jungle || b.giantList.contains { all($0.pos .> lo) && all($0.pos .< hi) }
+        if b.giantList.contains(where: { simd_length($0.pos - p) < r + GiantInfo.reach }) { return true }
+        guard b.jungle else { return false }
+        let n = World.size / 64 + 1
+        for z in 0..<n {
+            for x in 0..<n where b.jungleGrid[z * n + x] {
+                let q = SIMD2(Double(Int(b.origin.x) + x * 64), Double(Int(b.origin.y) + z * 64))
+                if simd_length(q - p) < r + 64 { return true }
+            }
+        }
+        return false
     }
 
     init?(device: MTLDevice, library: MTLLibrary, seed: UInt32) {
@@ -479,11 +490,12 @@ final class World {
             buf.globalMax = top + 1
             buf.siteList = World.readSites(buf.sites)
             buf.giantList = World.readGiants(buf.giants)
-            buf.jungle = stride(from: 0, through: World.size, by: 64).contains { x in
-                stride(from: 0, through: World.size, by: 64).contains { z in
+            buf.jungleGrid = stride(from: 0, through: World.size, by: 64).flatMap { z in
+                stride(from: 0, through: World.size, by: 64).map { x in
                     Provinces.at(Double(Int(o.x) + x), Double(Int(o.y) + z), seed: self.seed).0 > 0.1
                 }
             }
+            buf.jungle = buf.jungleGrid.contains(true)
             if World.logSites {
                 for g in buf.giantList { print(String(format: "giant at (%.0f, %.0f) ground %.0f top %.0f", g.pos.x, g.pos.y, g.ground, g.top)) }
             }
@@ -1255,7 +1267,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         sp.colorAttachments[0].loadAction = .dontCare
         sp.colorAttachments[0].storeAction = .store
         if let enc = cb.makeRenderCommandEncoder(descriptor: sp) {
-            enc.setRenderPipelineState(world.bandsOnMap && Renderer.profile != "noband" ? sceneBandPipeline : scenePipeline)
+            // The band test only skips through cells inside the 1-voxel map's unmorphed disc (trace in
+            // Shaders/Saver.metal): compiled in it costs ~0.5 ms, so only while bands lie that close.
+            let bands = world.bandsNear(SIMD2(camera.position.x, camera.position.z), radius: Clipmap.handoff(0) + 40)
+            enc.setRenderPipelineState(bands && Renderer.profile != "noband" ? sceneBandPipeline : scenePipeline)
             enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
             enc.setFragmentBuffer(birdBuf, offset: 0, index: 5)
             enc.setFragmentBuffer(horizonBuf, offset: 0, index: 6)
