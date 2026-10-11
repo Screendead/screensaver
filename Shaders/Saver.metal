@@ -1562,7 +1562,9 @@ static void giantIntervals(thread const Giant& g, float2 wq, float gl, int lod, 
         uint hv = hash2i(vb, g.h + 30u);
         float mask = smoothstep(0.0, 0.35, perlin2((float2(vb) * 2.0 + 1.0) / 19.0, g.h + 31u));
         // A weeping giant trails long curtains; a kapok's crown hardly any.
-        if (hashf(hv) < (g.kind == 2 ? 0.18 : g.kind == 1 ? 0.016 : 0.07) * mask) {
+        // From level 2 a column's four samples fall on four strands: a quarter of them each keeps the curtain's cover,
+        // and they are among the strands of the level inside it.
+        if (hashf(hv) < (g.kind == 2 ? 0.18 : g.kind == 1 ? 0.016 : 0.07) * mask * (lod >= 2 ? 0.25 : 1.0)) {
             float len = 4.0 + (g.kind == 2 ? 55.0 : 30.0) * pow(hashf(pcg(hv)), g.kind == 2 ? 1.3 : 2.0);
             gAdd(r, max(padBot - len, gl + 3.0), padBot + 1.0, GM_VINE);
             r.thin = true;
@@ -1924,8 +1926,13 @@ static void writeVeg(GCol gc, float G, uint2 gid, texture2d<float, access::write
         dst.write(float4(gc.H, G, gc.n == 2 ? gc.gh : G, max(gc.leafStart, G)), gid);
         return;
     }
-    dst.write(float4(gc.H, gc.gl, gc.gh, GIANT_A), gid);
-    gx.write(uint4(uint(gc.e.x), uint(gc.e.y), uint(gc.e.z) | (GAP_GIANT << 11), uint(gc.e.w)), gid);
+    // The gaps go where the morph sends them to the level-1 column's (coarseColumn): the highest in the principal slot,
+    // toward its principal gap; the taller of any two below it (the air under a crown) in the first extra slot, toward
+    // its second gap; the other in the second, which closes. With one gap the principal slot holds it inverted (lo > hi):
+    // no gap to the trace, but still the bound under which it looks for extra gaps, and air to corner AO.
+    float4 e = gc.n == 2 ? float4(gc.gl, gc.gh, 0, 0) : gc.n == 4 && gc.e.w - gc.e.z > gc.e.y - gc.e.x ? gc.e.zwxy : gc.e;
+    dst.write(float4(gc.H, gc.n == 2 ? float2(gc.gh, gc.gl) : float2(gc.gl, gc.gh), GIANT_A), gid);
+    gx.write(uint4(uint(e.x), uint(e.y), uint(e.z) | (GAP_GIANT << 11), uint(e.w)), gid);
     st.write(uint4(ST_GIANT | uint(G) | (uint(gc.leafStart) << 11) | (gc.mats << 22) | (pal << 28), 0, 0, 0), gid);
 }
 
@@ -2152,10 +2159,11 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
 static inline float solidFloor(float4 c, uint4 gx) {
     if (c.a > 0.0) return c.g;
     float4 e = extraGaps(gx);
-    if (e.w > e.z) return e.z;
-    if (e.y > e.x) return e.x;
     // Structures too: a lintel, eave, deck, stilt house or hull is open in [g, b) whatever its base says.
-    return c.b > c.g ? c.g : c.r;
+    float f = c.b > c.g ? c.g : c.r;
+    if (e.y > e.x) f = min(f, e.x);
+    if (e.w > e.z) f = min(f, e.z);
+    return f;
 }
 
 // Mip 0 of the max-mip texture: the column tops alone, 2 bytes a column for the DDA and sky visibility.
@@ -3859,6 +3867,8 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
                 float2 gs[3] = { gc.e.zw, gc.e.xy, float2(gc.gl, gc.gh) };
                 int lowI = -1;
                 for (int j = 0; j < 3; j++) if (gs[j].y > gs[j].x) { lowI = j; break; }
+                // Under three gaps, the taller of the two below the highest (as the 1-voxel map files it: writeVeg).
+                if (lowI == 0 && gs[1].y - gs[1].x > gs[0].y - gs[0].x) lowI = 1;
                 if (lowI < 0) {
                     // A buttress or an arching root raises the floor of the crown's air; a trunk, a hanging root or a
                     // skirt of leaves down to the ground fills the column.
@@ -3897,7 +3907,7 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
             }
             float2 upG = sUp.z >= max(1.0, 0.5 * nG) ? floor(sUp.xy / sUp.z + 0.5) : float2(0);
             if (k <= GAP2_LEVELS && upG.y - upG.x >= 2.0 && upG.x >= lowG.y + 2.0 && top - upG.y >= 1.0) { g2 = lowG; return float3(top, upG); }
-            g2 = lowG.xx;
+            g2 = lowG;
             return float3(top, lowG);
         }
     }
@@ -4016,7 +4026,7 @@ static inline float3 columnAt(texture2d<float> hm, int2 c, int size) {
 static inline bool solid(texture2d<float> hm, int3 v, int size) {
     float3 col = columnAt(hm, v.xz, size);
     float y = float(v.y);
-    return y < col.x && !(y >= col.y && y < col.z);
+    return y < col.x && !(y >= min(col.y, col.z) && y < max(col.y, col.z));
 }
 
 // The LOD rings. Level 0 is the 1-voxel map (texel = frame-local column); level k >= 1 is slice k - 1 of the coarse
@@ -4132,8 +4142,11 @@ static inline bool towerWallAt(constant TowerTable* tt, float2 w) { return tower
 // from the parent's floor where it has none), or closes from the top where the parent has none, so at the handoff the
 // level equals the next one exactly.
 // w: the morph weight (columnMorphW).
-static inline float3 columnMorphW(thread const Terrain& tr, int k, int2 c, float w) {
-    float3 col = columnL(tr, k, c).rgb;
+// w of the result: the height under which the column's extra gaps can lie (the top of its unmorphed principal gap, or of
+// its morphed one's floor).
+static inline float4 columnMorphW(thread const Terrain& tr, int k, int2 c, float w) {
+    float4 col = float4(columnL(tr, k, c).rgb, 0.0);
+    col.w = max(col.y, col.z);
     if (w > 0.0) {
         float ph = parentH(tr, k, c);
         // A column sliding up or down a tower's sheer wall stands part way up it as a sliver, and the band of them rules
@@ -4149,6 +4162,7 @@ static inline float3 columnMorphW(thread const Terrain& tr, int k, int2 c, float
         } else {
             col.z = mix(col.z, col.y, w);
         }
+        col.w = max(col.w, col.y);
     }
     return col;
 }
@@ -4161,7 +4175,7 @@ static inline float2 secondGapW(thread const Terrain& tr, int k, int2 c, float w
 }
 
 static inline float3 columnMorph(thread const Terrain& tr, int k, int2 c) {
-    return columnMorphW(tr, k, c, morphAt(tr, k, (float2(c) + 0.5) * tr.lod[k].w));
+    return columnMorphW(tr, k, c, morphAt(tr, k, (float2(c) + 0.5) * tr.lod[k].w)).xyz;
 }
 
 // The 1-voxel map's extra gaps (lo1, hi1, lo2, hi2) at frame-local column c, closing from the top across the morph band
@@ -4277,11 +4291,11 @@ static Hit trace(thread const Terrain& tr, float3 o, float3 d, float tMax, int m
         // it); a ray passing over it moves on as a skip would. A ray above the column never needs its gaps, which lie
         // at least two voxels under its top: coarse levels read them only for a ray inside.
         float wm = morphAt(tr, k, (float2(lc) + 0.5) * s);
-        float3 col = columnMorphW(tr, k, lc, wm);
+        float4 col = columnMorphW(tr, k, lc, wm);
         float H = col.x, gl = col.y, gh = col.z;
         bool inGap = yA >= gl && yA < gh;
         // Under the principal gap: the 1-voxel map's extra gaps, a coarse giant column's air under its crown.
-        if (!inGap && k <= GAP2_LEVELS && gh > gl && yA < gl) {
+        if (!inGap && k <= GAP2_LEVELS && gh != gl && yA < col.w) {
             float4 e;
             if (k == 0) {
                 e = extraGaps(tr.gx.read(uint2(lc)));
@@ -4726,7 +4740,9 @@ static Surface giantSurface(thread const Terrain& tr, Surface s, int k, int3 v, 
     int gm = GM_WOOD;
     if (k == 0) {
         float4 e = extraGaps(tr.gx.read(uint2(clamp(v.xz, int2(0), int2(tr.size - 1)))));
-        float3 g0 = float3(e.z, e.x, col.y), g1 = float3(e.w, e.y, col.z);
+        // The extra gaps in either order (writeVeg), both below the principal one.
+        bool sw = e.w > e.z && e.z < e.x;
+        float3 g0 = float3(sw ? e.z : e.x, sw ? e.x : e.z, col.y), g1 = float3(sw ? e.w : e.y, sw ? e.y : e.w, col.z);
         int ri = 0, nG = 0;
         bool found = false;
         for (int i = 0; i < 3; i++) {
