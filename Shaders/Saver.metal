@@ -739,11 +739,11 @@ static inline float crownY(Tower T, TowerPlan P, float y0, float y1, uint seed) 
     return clamp(floor(y / 5.0) * 5.0, y0 + 3.0, y1);
 }
 
-// How deep the masonry is weathered back from stage face P (apothem R) at height y: pockets in whole courses, deepest
+// How deep the masonry is weathered back from stage face P (apothem R) at height y, in whole courses, deepest
 // at the corners, some faces worn hard and others nearly sound. Isotropic in the face's plane, so it never streaks.
 static inline float towerErosion(Tower T, TowerPlan P, float R, float y, uint seed) {
-    float3 q = float3(P.dir.x * R, y, P.dir.y * R);
-    float n = perlin3(q / 40.0, seed + 541u) + 0.25 * perlin3(q / 16.0, seed + 542u);
+    float3 q = float3(P.dir.x * R, y * 0.7, P.dir.y * R);
+    float n = perlin3(q / 34.0, seed + 541u) + 0.4 * perlin3(q / 12.0, seed + 542u);
     float corner = smoothstep(0.3, 0.5, abs(P.am) * float(T.N) / 6.2831853);
     float zone = saturate(perlin3(float3(P.dir * 1.6, y / 170.0), seed + 543u) * 2.0 + 0.2);
     float e = 16.0 * saturate((n + 0.3 * corner) * 2.0 - 0.5) * zone;
@@ -829,25 +829,13 @@ static inline Col towerShape(Col col, Tower T, float2 wf, int s, uint seed) {
         if (ca > 0.0 && off < 3.5 + 2.5 * perlin2(float2(ca / 30.0, 0.5), seed + 508u))
             H = min(H, floor(T.Hb + T.Ht * (0.45 + 0.0025 * off * off)));
     }
-    // Weathering, course by course up the skin of the column's stage: the empty courses are pockets (overhung by the
-    // sound masonry above), and the top crumbles back where its last courses are gone.
-    float eh[8];
-    int ne = 0;
+    // Weathering: the top crumbles back course by course where the worn skin has gone. (Pockets cut in the face read as
+    // dark bricks or windows punched in it, so none are.)
     if (wallIn < 16.0 && s < 8) {
-        bool open = false;
-        float lo = 0.0;
-        for (int c = 1; c < 400; c++) {
-            float yc = y0 + 5.0 * float(c);
-            if (yc >= H) break;
-            bool hole = wallIn < towerErosion(T, Pm, Rm, yc + 2.5, seed);
-            if (hole && !open) { open = true; lo = yc; }
-            if (!hole && open) {
-                open = false;
-                // Smaller pockets read as dark bricks or windows: only hollows five courses tall or more stay.
-                if (ne < 4 && yc - lo >= 25.0) { eh[2 * ne] = lo; eh[2 * ne + 1] = yc; ne++; }
-            }
+        for (float yc = y0 + 5.0 * (ceil((H - y0) / 5.0) - 1.0); yc > y0; yc -= 5.0) {
+            if (wallIn >= towerErosion(T, Pm, Rm, yc + 2.5, seed)) break;
+            H = yc;
         }
-        if (open) H = lo;
     }
     float gaps[6] = { 0, 0, 0, 0, 0, 0 };
     int ng = 0;
@@ -865,9 +853,10 @@ static inline Col towerShape(Col col, Tower T, float2 wf, int s, uint seed) {
             else if (s < 4 && yb1 - yb0 > 6.0) { gaps[0] = yb0; gaps[1] = yb1; ng = 1; }
         }
     }
-    if (shell && Pm.reff < Rm - 10.0) {
-        // The shell is open to the sky, its floor a court where a grove can root. Every ring keeps the court (wide enough
-        // for coarse samples): filled, its top would follow the crown's broken rim and show a radial pattern from above.
+    if (shell && Pm.reff < Rm - max(10.0, 1.5 * float(s))) {
+        // The shell is open to the sky, its floor a court where a grove can root. Every ring keeps the court: filled, its
+        // top would follow the crown's broken rim and show a radial pattern from above. The wall thickens with the
+        // samples' spacing, or whole runs of the rim would fall between them and the crown lose its silhouette.
         H = min(H, yS + 3.0);
     }
     if (s < 4) {
@@ -909,13 +898,6 @@ static inline Col towerShape(Col col, Tower T, float2 wf, int s, uint seed) {
             }
         }
     }
-    // Weathered pockets in the gaps the openings leave, highest first, wherever they meet no opening.
-    for (int e = 3; e >= 0; e--) {
-        if (e >= ne || ng >= 3) continue;
-        bool clear = eh[2 * e + 1] <= H - 3.0;
-        for (int i = 0; i < 3; i++) if (i < ng && eh[2 * e] < gaps[2 * i + 1] + 2.0 && eh[2 * e + 1] > gaps[2 * i] - 2.0) clear = false;
-        if (clear) { gaps[2 * ng] = eh[2 * e]; gaps[2 * ng + 1] = eh[2 * e + 1]; ng++; }
-    }
     col.h = min(max(col.h, floor(H)), TERRAIN_CEIL);
     // Highest gap first.
     for (int i = 0; i < 3; i++)
@@ -954,13 +936,18 @@ static inline float towerWet(Climate c) {
     return smoothstep(0.25, 0.65, c.moist) * (1.0 - smoothstep(0.35, 0.7, desertAmount(c)));
 }
 
-// How far the ivy hangs below a rim, at world xz w in front of the face, at most room: mats several columns wide with
-// bare stone between, their lower edges fraying over a few columns. towerOvergrowth hangs them as leaves on the 1-voxel
-// map; towerSurface paints the same mats where the coarse rings carry none.
-static inline float towerIvyDrop(float2 w, float room, float wet, uint seed) {
-    float mat = perlin2(w / 34.0, seed + 560u) + 0.35 * perlin2(w / 14.0, seed + 561u);
-    float L = min(room, 30.0 + 150.0 * wet) * saturate(2.0 * mat + 0.3 * wet - 0.45);
-    return L * (1.0 + 0.12 * perlin2(w / 6.0, seed + 562u));
+// How far the ivy hangs below a rim at height rim, at most room, at world xz w on a face of the tower whose axis is c
+// (plan rotation rot, N sides, hash th): mats several columns wide with bare stone between, their lower edges drifting
+// smoothly along the face, a whole column at a time on the 1-voxel map (q quantised by the caller).
+static inline float towerIvyDrop(float2 w, float2 c, float rot, int N, uint th, float rim, float room, float wet, uint seed) {
+    float2 d = w - c;
+    float seg = 6.2831853 / float(N);
+    float a = atan2(d.y, d.x) - rot;
+    float fi = floor(a / seg);
+    float t = length(d) * sin(a - seg * fi - 0.5 * seg) + 97.0 * fi;
+    float2 q = float2(t, rim * 0.4 + float(th & 255u) * 7.3);
+    float mat = perlin2(q / 34.0, seed + 560u) + 0.35 * perlin2(q / 14.0, seed + 561u);
+    return min(room, 30.0 + 150.0 * wet) * saturate(2.0 * mat + 0.3 * wet - 0.45);
 }
 
 static inline Col terrainColumnS(int2 w, uint seed, int s) { return towerColumn(terrainColumnBase(w, seed), w, seed, s); }
@@ -1197,9 +1184,9 @@ static inline int2 canopySpan(Tree t, int2 o) {
 // MARK: - Tower overgrowth
 
 // The towers' own greenery, the hook stage-3 vegetation replaces: the leaf span [x, y) it adds to map column p (world
-// wc, top G), empty off the towers. Ivy hangs in mats from each rim down the face below it (a span in the column in
-// front of the face); crowns stand on the treads, the court and the plinth and spill over their edges. Mats and crowns
-// are each several columns wide and their edges drift along a face, so no column hangs a strand of its own.
+// wc, top G), empty off the towers: crowns standing on the treads, the court and the plinth, spilling over their edges.
+// (The ivy on the faces is painted by towerSurface: hung as leaves in the column in front of a face, any mat broke up
+// into vertical bars on the faces' jogs.)
 static int2 towerOvergrowth(texture2d<float, access::read> src, int2 p, int2 wc, float G, uint seed) {
     float2 wf = float2(wc) + 0.5;
     Tower T;
@@ -1215,16 +1202,6 @@ static int2 towerOvergrowth(texture2d<float, access::read> src, int2 p, int2 wc,
     float snow = treelineAt(snowlineAt(cl.temp));
     int n = int(src.get_width());
     int2 span = int2(0);
-    // Ivy: the tallest 4-neighbour is a wall rising past this column's top; the mat hangs from its rim.
-    float Hq = 0.0;
-    for (int k = 0; k < 4; k++) {
-        int2 q = clamp(p + int2(k == 0 ? 1 : k == 1 ? -1 : 0, k == 2 ? 1 : k == 3 ? -1 : 0), int2(0), int2(n - 1));
-        Hq = max(Hq, src.read(uint2(q)).r);
-    }
-    if (Hq > G + 10.0 && Hq < snow) {
-        float L = floor(towerIvyDrop(wf, Hq - G, wet, seed));
-        if (L >= 4.0) span = int2(int(Hq - L), int(Hq));
-    }
     // Crowns on a jittered 9-voxel grid: a site holds one where it stands on a flat tread of the tower or its plinth.
     const int C = 9;
     int2 home = int2(floor(wf / float(C)));
@@ -3660,23 +3637,12 @@ constant float3 TOWER_ROOM = float3(1.0, 0.55, 0.22) * 1.6;
 // where the coarse rings carry no leaves), roots over its plinth, and at night a few rooms lit. Every term is taken in
 // the face's own plane and fades to its mean with the footprint.
 static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, int3 n, float2 uv, float fp, float fpA) {
-    if (s.mat > 1) return;
+    if (s.mat != 0) return;
     float cs = x.tr.lod[k].w;
     float2 w = float2(v.xz * int(cs) + x.tr.origin);
     int i = towerIndexAt(x.towers, w + 0.5 * cs);
     if (i < 0) return;
     TowerRec R = x.towers->r[i];
-    if (s.mat == 1) {
-        // Ivy hung on a face shades as the face's plane, as the stone does: column by column a diagonal mat would be
-        // ruled with a lit and a shaded face per jog.
-        float2 dl = w + 0.5 * cs - R.a.xy;
-        float sg = 6.2831853 / R.b.z;
-        float fa = R.b.w + sg * (floor((atan2(dl.y, dl.x) - R.b.w) / sg) + 0.5);
-        float3 pn = float3(cos(fa), 0.0, sin(fa));
-        float cp = dot(float3(n), pn);
-        if (n.y == 0 && abs(cp) > 0.3) { s.nrm = cp > 0.0 ? pn : -pn; s.planar = true; }
-        return;
-    }
     float Hb = R.a.w, Ht = R.b.x, Sy = R.c.z, bw = R.c.w, R0 = R.a.z;
     int K = int(R.b.y);
     uint th = R.d.x;
@@ -3702,10 +3668,10 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
     float reff = length(dc0) * cos(am);
     float Rb = R0 + (R.d.y == 0u && abs(am) > 0.38 * seg ? 5.0 : 0.0);
     float plinthTop = Hb + (reff < R0 * 1.22 ? 6.0 : 3.0);
-    bool root = reff > Rb + 0.5 * cs && wy > plinthTop + 0.5 && k == 0;
+    bool root = reff > Rb + 0.5 * cs && wy > plinthTop + 0.5 && k <= 1;
     // Each tower its own stone: pale limestone, warm sandstone, grey granite or rose.
     float u = hashf(pcg(th + 70u));
-    float3 stone = u < 0.35 ? float3(0.36, 0.335, 0.29) : u < 0.6 ? float3(0.40, 0.315, 0.235) : u < 0.8 ? float3(0.32, 0.315, 0.30)
+    float3 stone = u < 0.4 ? float3(0.36, 0.335, 0.29) : u < 0.7 ? float3(0.39, 0.32, 0.245) : u < 0.9 ? float3(0.32, 0.315, 0.30)
                  : float3(0.35, 0.31, 0.285);
     // Broad drifts of tone over the tower and up it.
     float3 m = stone * mix(1.06, 0.9, saturate(perlin2(wq / 90.0 + float(th & 255u), seed + 530u) + 0.5));
@@ -3725,7 +3691,7 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
     // Lichen in pale crusts on the drier stone, faded to its mean with the footprint.
     float lich = smoothstep(0.25, 0.45, perlin2(float2(along, wy) / 7.0 + float2(n.xz) * 3.1, seed + 547u) + 0.25 * perlin2(float2(along, wy) / 31.0, seed + 548u));
     lich = mix(lich, 0.2, smoothstep(0.15, 0.6, fpA)) * (1.0 - 0.6 * wet);
-    m = mix(m, mix(m, float3(0.40, 0.39, 0.34), 0.5) * 1.12, 0.35 * lich);
+    m *= 1.0 + 0.07 * lich;
     float3 moss = mix(float3(0.06, 0.085, 0.04), float3(0.09, 0.11, 0.055), saturate(perlin2(wq / 13.0, seed + 534u) + 0.5));
     float conifer = smoothstep(0.50, 0.32, c.temp);
     float3 leaf = mix(mix(float3(0.035, 0.07, 0.035), float3(0.065, 0.09, 0.04), saturate(perlin2(wq / 23.0, seed + 93u) * 0.9 + 0.5)),
@@ -3760,16 +3726,20 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
         run = mix(run, 0.55, smoothstep(0.3, 1.5, fpA));
         m *= 1.0 - 0.28 * run * exp(-drop / 45.0) * step(wy, ledge);
         // The ivy below the rim: hung as leaves on the 1-voxel map, painted past it, over a halo of moss on the stone.
-        // Taken in the column in front of the face, as the leaves are hung; along the face it runs on smoothly past the
-        // 1-voxel map.
+        // Taken in the column in front of the face, as the leaves are hung.
         float2 wf = wq + float2(n.xz) * 0.5;
         if (k == 0) wf = floor(wf) + 0.5;
-        float L = towerIvyDrop(wf, drop + 200.0, wet, seed);
+        float L = towerIvyDrop(wf, R.a.xy, R.b.w, int(R.b.z), th, ledge, drop + 200.0, wet, seed);
+        if (k == 0) L = floor(L);
         float e = 0.5 * max(fpA, cs);
         float vine = smoothstep(L + e, L - e, drop) * step(1.0, L);
         float halo = smoothstep(L * 1.3 + 8.0 + e, L * 1.3 + 8.0 - e, drop) * step(1.0, L);
         m = mix(m, moss * 1.1, 0.55 * halo);
-        if (k > 0 && wy < treelineAt(snowline)) m = mix(m, leaf * 1.2, vine);
+        if (wy < treelineAt(snowline)) {
+            // Leaves in two tones voxel by voxel close up, their mean past that.
+            float tex = hashf(hash3i(int3(int(floor(wq.x)), int(floor(wy)), int(floor(wq.y))), seed + 551u)) < 0.35 ? 0.72 : 1.08;
+            m = mix(m, leaf * 1.2 * mix(tex, 0.95, smoothstep(0.05, 0.3, fp)), vine);
+        }
         // A damp band of moss along the foot.
         m = mix(m, moss * 1.1, smoothstep(Hb + 30.0, Hb + 6.0, wy) * 0.6 * wet);
         // Past level 1 the coarse columns hold no loggias: their dark bays are painted under each rim, eased in across
@@ -3805,7 +3775,7 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
         float fa = R.b.w + seg * (floor(ang / seg) + 0.5);
         float3 pn = float3(cos(fa), 0.0, sin(fa));
         float cp = dot(float3(n), pn);
-        if (abs(cp) > 0.3) { s.nrm = cp > 0.0 ? pn : -pn; s.planar = true; }
+        if (abs(cp) > 0.1) { s.nrm = cp > 0.0 ? pn : -pn; s.planar = true; }
     }
     s.level = n.y > 0 ? 1.0 : 0.0;
     // A few rooms lit at night on some towers: the faces of an opening (back wall, reveals, sill and lintel) on the
