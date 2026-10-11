@@ -10,6 +10,7 @@ final class FlightCamera {
     private var yawRate: Double = 0
     private var yawAccel: Double = 0
     private var climbRate: Double = 0
+    private(set) var terms: [Double] = [0, 0, 0, 0, 0, 0]
     private var time: Double = 0
     private(set) var surveyAmount: Double = 0
     private var facing: Double = 0
@@ -497,6 +498,18 @@ final class FlightCamera {
         for dist in [20.0, 45.0, 75.0, 110.0] {
             ahead = max(ahead, footprintMax(position.x + fwdFlat.x * dist, position.z + fwdFlat.y * dist, radius: dist < 50 ? 5 : 8) - dist * 0.12)
         }
+        // Further along the path the flight is turning onto, out to ~25 s ahead, land is met at a planned 2 voxels/s (the
+        // 3/s cap is the reserve), so a pillar or needle field is climbed from far off and the flight holds its height
+        // across the gaps rather than dipping into each. The corridor is sampled on the 4-voxel grid the heights are
+        // maxima over, so no needle slips between samples.
+        let reach = min(max(v * 25, 150), 400)
+        for dist in stride(from: 114.0, through: reach, by: 4.0) {
+            let a = yaw + yawRate * dist / v * 0.5
+            let c = p + SIMD2(sin(a), cos(a)) * dist, side = SIMD2(cos(a), -sin(a))
+            var g = -Double.infinity
+            for o in stride(from: -8.0, through: 8.0, by: 4.0) { g = max(g, h(c.x + side.x * o, c.y + side.y * o)) }
+            ahead = max(ahead, g - 13.2 - (dist - 110) * 2 / v)
+        }
         // Dense slopes close up read as block fields; climb over rough ground so they read as contours.
         var lo = Double.infinity, hi = -Double.infinity
         for (dist, side) in [(25.0, 0.0), (50.0, 0.0), (35.0, 18.0), (35.0, -18.0), (0.0, 0.0)] {
@@ -561,8 +574,6 @@ final class FlightCamera {
             }
         }
         target = max(target, min(regional, FlightCamera.ceiling))
-        let kc = 0.35
-        climbRate += (kc * kc * (target - position.y) - 2 * kc * climbRate) * dt
         // Climbs are capped (3 voxels/s): mountains are flown around and through, not leapt. A wall the routing
         // could not turn from lifts the flight just fast enough to clear it by the time it arrives, still smoothly.
         var need = 0.0
@@ -570,11 +581,17 @@ final class FlightCamera {
             let rise = footprintMax(position.x + fwdFlat.x * dist, position.z + fwdFlat.y * dist, radius: dist == 0 ? 14 : 8) + 12 - position.y
             if rise > 0 { need = max(need, rise / max((dist - 8) / v, 0.5)) }
         }
-        if need > 3 { climbRate = max(climbRate, min(need, 40)) }
-        climbRate = min(climbRate, max(3, min(1.3 * need, 40)))
+        // Vertical speed eases toward a rate that can still stop at the target (sinks capped at 6/s), changing by at most
+        // 1.2 voxels/s each second, so a climb or a dive never starts or stops with a kick; only a wall's need ramps faster.
+        let err = target - position.y
+        let accel = need > 3 ? 6.0 : 1.2
+        var want = err >= 0 ? min(0.3 * err, (2 * accel * err).squareRoot(), 3) : max(0.3 * err, -(2 * accel * -err).squareRoot(), -6)
+        if need > 3 { want = max(want, min(need, 40)) }
+        climbRate += max(-accel * dt, min(accel * dt, want - climbRate))
         position.y += climbRate * dt
         let floor = footprintMax(position.x, position.z, radius: 4) + 8
-        if position.y < floor { position.y = floor; climbRate = max(climbRate, 0) }
+        terms = [target, climbRate, need, rimLift, regional, ahead]
+        if position.y < floor { position.y = floor; climbRate = max(climbRate, 0); terms[2] = -1 }
 
         // Survey/vista cycle: the horizon sweeps the whole frame every few minutes so no region of the
         // screen stays sky (or land) for long. Smoothstep dwells at each extreme.
