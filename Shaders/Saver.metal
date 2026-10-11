@@ -6784,6 +6784,16 @@ static inline float seaNoise(float2 p, uint s) {
     return mix(mix(a, b, u.x), mix(cc, d, u.x), u.y) - 0.5;
 }
 
+// The bed's depth on the 8-voxel level: a broad ramp off the shore, which a lake's one-step shelf lacks. Surf, the
+// shore fade and the creatures follow it; on the fine depth they would trace the bed's voxel stairs.
+static float seaBroad(thread const Ctx& x, int k, float2 p) {
+    int kc = max(k, 3);
+    float b = SEA - groundSmoothL(x.tr, kc, p);
+    float mc = kc < x.tr.levels - 1 ? morphAt(x.tr, kc, p) : 0.0;
+    if (mc > 0.0) b = mix(b, SEA - groundSmoothL(x.tr, kc + 1, p), mc);
+    return b;
+}
+
 // Bioluminescence from dusk to night: bacteria blooming in some seas, lit along the swell's crests and brightest where
 // they break over the shallows; below the surface sparse jellies, plankton swirls and rare
 // rays. wp: the surface point (frame-local), ww: its world xz, k: its level; salt: the pan's saltAmount.
@@ -6793,44 +6803,44 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
     float fpv = tw * x.pixelAngle / max(-d.y, 0.1);
     float3 c = 0;
     float b2 = seaNoise(ww * (1.0 / 230.0), x.seed + 145u);
-    float bloom = smoothstep(0.0, 0.15, seaNoise(ww * (1.0 / 900.0), x.seed + 144u) + 0.45 * b2);
+    float big = seaNoise(ww * (1.0 / 900.0), x.seed + 144u);
+    float bloom = smoothstep(0.0, 0.15, big + 0.45 * b2);
     float near = smoothstep(420.0, 180.0, tw) * (1.0 - fres);
     if (bloom <= 0.0 && near <= 0.0) return 0;
-    // The bed's depth on the 8-voxel level: a broad ramp off the shore, which a lake's one-step shelf lacks. Surf, the
-    // shore fade and the creatures follow it; on the fine depth they would trace the bed's voxel stairs.
-    int kc = max(k, 3);
-    float broad = SEA - groundSmoothL(x.tr, kc, wp.xz);
-    float mc = kc < x.tr.levels - 1 ? morphAt(x.tr, kc, wp.xz) : 0.0;
-    if (mc > 0.0) broad = mix(broad, SEA - groundSmoothL(x.tr, kc + 1, wp.xz), mc);
+    // Read only where something uses it: most open water near the camera holds no creature.
+    float broad = bloom > 0.0 || salt > 0.0 ? seaBroad(x, k, wp.xz) : -1.0;
     // A pan's pools are a still skin a voxel deep; deeper water in a dry basin is open sea and glows in full.
-    amt *= 1.0 - 0.7 * salt * (1.0 - smoothstep(1.2, 2.2, broad));
+    if (salt > 0.0) amt *= 1.0 - 0.7 * salt * (1.0 - smoothstep(1.2, 2.2, broad));
     if (bloom > 0.0) {
         // The fine depth, smooth across its voxel steps and through the morph band, catches the last voxel of shore.
         float fine = 3.0;
-        if (broad < 1.6) {
+        if (broad < 1.2) {
             fine = SEA - groundSmoothL(x.tr, k, wp.xz);
             float mw = k < x.tr.levels - 1 ? morphAt(x.tr, k, wp.xz) : 0.0;
             if (mw > 0.0) fine = mix(fine, SEA - groundSmoothL(x.tr, k + 1, wp.xz), mw);
         }
         // Two swells from directions fixed per seed, one or the other ruling each region with a calm seam between;
         // each bent by a slow warp and lit in broken runs.
-        float a0 = hashf(pcg(x.seed + 73u)) * 6.2831853;
-        float2 wd1 = float2(cos(a0), sin(a0)), wd2 = float2(cos(a0 + 0.7), sin(a0 + 0.7));
-        float warp = seaNoise(ww * 0.012, x.seed + 72u);
-        float sel = smoothstep(-0.025, 0.025, seaNoise(ww * (1.0 / 520.0), x.seed + 74u));
-        // Close up a crest narrows to a fine line rather than a broad smear across the near water.
-        float sharp = mix(64.0, 14.0, saturate(fpv * 3.0));
-        float crest = 0;
-        if (sel < 1.0) crest += (1.0 - sel) * (1.0 - sel) * pow(0.5 + 0.5 * sin(dot(ww, wd1) * 0.33 + 6.0 * warp - t * 0.9), sharp);
-        if (sel > 0.0) crest += sel * sel * pow(0.5 + 0.5 * sin(dot(ww, wd2) * 0.27 - 6.0 * warp - t * 0.75), sharp);
-        crest *= smoothstep(-0.1, 0.2, seaNoise(ww * 0.05 + float2(t * 0.04, -t * 0.03), x.seed + 79u));
-        float spark = mix(smoothstep(0.02, 0.3, e0), 0.3, saturate(fpv * 2.0));
-        crest = mix(crest * (0.55 + 0.6 * spark), 0.045, saturate(fpv * 0.6));
+        float crest = 0.045;
+        if (fpv < 1.0 / 0.6) {
+            float a0 = hashf(pcg(x.seed + 73u)) * 6.2831853;
+            float2 wd1 = float2(cos(a0), sin(a0)), wd2 = float2(wd1.x * 0.765 - wd1.y * 0.644, wd1.x * 0.644 + wd1.y * 0.765);
+            float warp = seaNoise(ww * 0.012, x.seed + 72u);
+            float sel = smoothstep(0.19, 0.21, big);
+            // Close up a crest narrows to a fine line rather than a broad smear across the near water.
+            float sharp = mix(64.0, 14.0, saturate(fpv * 3.0));
+            float cr = 0;
+            if (sel < 1.0) cr += (1.0 - sel) * (1.0 - sel) * pow(0.5 + 0.5 * sin(dot(ww, wd1) * 0.33 + 6.0 * warp - t * 0.9), sharp);
+            if (sel > 0.0) cr += sel * sel * pow(0.5 + 0.5 * sin(dot(ww, wd2) * 0.27 - 6.0 * warp - t * 0.75), sharp);
+            cr *= smoothstep(-0.1, 0.2, seaNoise(ww * 0.05 + float2(t * 0.04, -t * 0.03), x.seed + 79u));
+            float spark = mix(smoothstep(0.02, 0.3, e0), 0.3, saturate(fpv * 2.0));
+            crest = mix(cr * (0.55 + 0.6 * spark), 0.045, saturate(fpv * 0.6));
+        }
         // Surf: crests break and brighten over the shallows and die out before the waterline; a faint wash laps
         // along the depth contours.
         float sh = smoothstep(0.7, 1.5, broad) * (1.0 - smoothstep(1.6, 2.7, broad));
         float shore = smoothstep(0.35, 1.3, broad) * smoothstep(0.0, 0.9, fine);
-        float lap = 0.5 + 0.5 * sin(broad * 2.6 - t * 1.3 + 1.5 * warp);
+        float lap = 0.5 + 0.5 * sin(broad * 2.6 - t * 1.3);
         float glow = (crest * (0.25 + 0.8 * sh) + 0.02 * sh * lap * lap) * shore;
         float3 hue = mix(SEAGLOW_TURQ, SEAGLOW_BLUE, smoothstep(-0.15, 0.15, b2));
         hue = mix(hue, SEAGLOW_TURQ * 1.2, saturate(glow * 1.5));
@@ -6841,12 +6851,13 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
         float3 rd = refract(d, float3(0, 1, 0), 0.75);
         float2 slant = rd.xz / max(-rd.y, 0.2);
         // Jellies: one in some 16-voxel cells, 1.2 under the surface, drifting about the cell's middle.
-        float fj = smoothstep(1.5, 2.3, broad);
-        if (fj > 0.0) {
+        {
             float2 q = ww + slant * 1.2;
             int2 cell = int2(floor(q / 16.0));
             uint h = hash2i(cell, x.seed + 75u);
             if (hashf(h) < 0.07) {
+                if (broad < -0.5) broad = seaBroad(x, k, wp.xz);
+                float fj = smoothstep(1.5, 2.3, broad);
                 float ph = hashf(pcg(h)) * 6.2831853;
                 float2 cc = (float2(cell) + 0.5) * 16.0 + 4.5 * float2(sin(t * 0.05 + ph), cos(t * 0.037 + ph * 1.7));
                 if (length_squared(q - cc) < 64.0) {
@@ -6866,12 +6877,13 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
             }
         }
         // Plankton: a swirl of sparks in some 48-voxel cells, just under the surface.
-        float fp = smoothstep(0.8, 1.5, broad);
-        if (fp > 0.0) {
+        {
             float2 q = ww + slant * 0.6;
             int2 cell = int2(floor(q / 48.0));
             uint h = hash2i(cell, x.seed + 76u);
             if (hashf(h) < 0.12) {
+                if (broad < -0.5) broad = seaBroad(x, k, wp.xz);
+                float fp = smoothstep(0.8, 1.5, broad);
                 float ph = hashf(pcg(h)) * 6.2831853;
                 float2 cc = (float2(cell) + 0.5) * 48.0 + 11.0 * float2(sin(t * 0.03 + ph), cos(t * 0.023 + ph * 1.3));
                 float R = 5.0 + 3.0 * hashf(pcg(h + 1u));
@@ -6890,12 +6902,13 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
             }
         }
         // Rays: rare, gliding slow circles 2 under the surface.
-        float fr = smoothstep(2.1, 2.7, broad);
-        if (fr > 0.0) {
+        {
             float2 q = ww + slant * 2.0;
             int2 cell = int2(floor(q / 140.0));
             uint h = hash2i(cell, x.seed + 78u);
             if (hashf(h) < 0.22) {
+                if (broad < -0.5) broad = seaBroad(x, k, wp.xz);
+                float fr = smoothstep(2.1, 2.7, broad);
                 float ph = hashf(pcg(h)) * 6.2831853;
                 float dir = (h & 128u) ? 1.0 : -1.0;
                 float an = t * 0.012 * dir + ph;
