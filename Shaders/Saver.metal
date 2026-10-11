@@ -6119,7 +6119,7 @@ static float3 bioGlow(texture2d<float> hm, texture2d<uint> st, texture2d<float> 
     bool giant = multi && ((gsb >> 28) & 7u) != 0u;
     // Giants carry their glow farther than the scatter elsewhere, which far off would mass into a sprinkled carpet;
     // theirs thins with distance one spot at a time (keep, below).
-    float far = giant ? 1.0 - 0.4 * smoothstep(0.3, 0.75, fp) : 1.0 - smoothstep(0.25, 0.5, fp);
+    float far = giant ? 1.0 - 0.25 * smoothstep(0.3, 0.75, fp) : 1.0 - smoothstep(0.25, 0.5, fp);
     if (far <= 0.0) return 0;
     int3 vw = v + int3(origin.x, 0, origin.y);
     float3 wp = p + float3(float(origin.x), 0.0, float(origin.y));
@@ -6137,7 +6137,7 @@ static float3 bioGlow(texture2d<float> hm, texture2d<uint> st, texture2d<float> 
         k4 = giant ? float4(3.0, 0.6, 0.5, 0) : float4(2.0, 0.45, 0.3, 0);
         hues = float2(0.3, 0.2);
     } else if (mat == 1) {
-        k4 = float4(giant ? 5.0 : 4.0, giant ? (n.y < 0 ? 0.45 : 0.12) : 0.015, 0.35, 1);
+        k4 = float4(giant ? 5.0 : 4.0, giant ? (n.y < 0 ? 0.4 : 0.25) : 0.015, giant ? 0.45 : 0.35, 1);
         hues = float2(0.25, 0.6);
     } else if (mat == 0 && n.y > 0) {
         k4 = float4(6.0, 0.1, 0.5, 2);
