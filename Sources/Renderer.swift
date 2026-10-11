@@ -112,6 +112,8 @@ final class World {
     // not the column's 8), and the CPU copy the camera steers by.
     private final class Buffer {
         let tex: MTLTexture
+        // Up to two more gaps per column below the column texture's (Shaders/Saver.metal packGaps).
+        let gx: MTLTexture
         let hmax: MTLTexture
         let hmax0: MTLTexture
         // levels[0] is the column texture, levels[m] for m >= 1 the max mips.
@@ -138,13 +140,18 @@ final class World {
             let sd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Uint, width: World.size, height: World.size, mipmapped: false)
             sd.usage = [.shaderRead, .shaderWrite]
             sd.storageMode = .private
-            guard let t = device.makeTexture(descriptor: td), let x = device.makeTexture(descriptor: xd), let c = device.makeTexture(descriptor: cd), let st = device.makeTexture(descriptor: sd),
+            let gd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Uint, width: World.size, height: World.size, mipmapped: false)
+            gd.usage = [.shaderRead, .shaderWrite]
+            gd.storageMode = .private
+            guard let t = device.makeTexture(descriptor: td), let x = device.makeTexture(descriptor: xd), let g = device.makeTexture(descriptor: gd),
+                  let c = device.makeTexture(descriptor: cd), let st = device.makeTexture(descriptor: sd),
                   let sb = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.siteStride, options: .storageModeShared) else { return nil }
             tex = t
             climate = c
             structTex = st
             sites = sb
             hmax = x
+            gx = g
             hmax0 = x.makeTextureView(pixelFormat: .r16Float, textureType: .type2D, levels: 0..<1, slices: 0..<1)!
             levels = [t] + (1..<x.mipmapLevelCount).map {
                 x.makeTextureView(pixelFormat: .r16Float, textureType: .type2D, levels: $0..<($0 + 1), slices: 0..<1)!
@@ -167,6 +174,8 @@ final class World {
     private let sitePipeline: MTLComputePipelineState
     private let stampPipeline: MTLComputePipelineState
     private let scratch: [MTLTexture]
+    // The raw extra gaps, between generation and cleanup.
+    private let gapScratch: MTLTexture
     // Max mips 1 and 2 of the plain heights (r) and solid floors (g) for the CPU readback: the map's own mips from 1 up also bound the
     // level-1 columns, which the camera must not steer by.
     private let cpuMips: [MTLTexture]
@@ -178,6 +187,7 @@ final class World {
 
     var heightTex: MTLTexture { buffers[active].tex }
     var maxTex: MTLTexture { buffers[active].hmax }
+    var gapTex: MTLTexture { buffers[active].gx }
     var climateTex: MTLTexture { buffers[active].climate }
     var origin: SIMD2<Int32> { buffers[active].origin }
     var globalMax: Float { buffers[active].globalMax }
@@ -196,6 +206,12 @@ final class World {
               let clean = pipeline("cleanupColumns"),
               let plant = pipeline("plantTrees"), let clim = pipeline("bakeClimate"), let place = pipeline("placeSites"), let stamp = pipeline("stampStructures"),
               let s0 = device.makeTexture(descriptor: sd), let s1 = device.makeTexture(descriptor: sd), let q = device.makeCommandQueue(),
+              let gs = device.makeTexture(descriptor: { () -> MTLTextureDescriptor in
+                  let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Uint, width: World.size, height: World.size, mipmapped: false)
+                  d.usage = [.shaderRead, .shaderWrite]
+                  d.storageMode = .private
+                  return d
+              }()),
               let a = Buffer(device: device), let b = Buffer(device: device) else { return nil }
         var mips: [MTLTexture] = []
         for l in 1...World.cpuLevel {
@@ -220,6 +236,7 @@ final class World {
         sitePipeline = place
         stampPipeline = stamp
         scratch = [s0, s1]
+        gapScratch = gs
         buffers = [a, b]
     }
 
@@ -265,10 +282,13 @@ final class World {
                 case 0:
                     enc.setComputePipelineState(genPipeline)
                     enc.setTexture(scratch[0], index: 0)
+                    enc.setTexture(gapScratch, index: 1)
                 case 1:
                     enc.setComputePipelineState(cleanupPipeline)
                     enc.setTexture(scratch[0], index: 0)
                     enc.setTexture(scratch[1], index: 1)
+                    enc.setTexture(gapScratch, index: 2)
+                    enc.setTexture(buf.gx, index: 3)
                 case 2:
                     if band == 0 {
                         enc.setComputePipelineState(sitePipeline)
@@ -305,6 +325,7 @@ final class World {
                 enc.dispatchThreads(MTLSize(width: World.size, height: World.bandRows, depth: 1), threadsPerThreadgroup: tg)
             } else {
                 enc.setComputePipelineState(cpuReducePipeline)
+                enc.setTexture(buf.gx, index: 2)
                 for (l, t) in cpuMips.enumerated() {
                     var fromColumns: Int32 = l == 0 ? 1 : 0
                     enc.setBytes(&fromColumns, length: 4, index: 0)
@@ -441,6 +462,10 @@ final class Clipmap {
     let height: MTLTexture   // r16Float array: height; max mips (from mip 1 also bounding the next level)
     let cover: MTLTexture    // r8Unorm array: canopy cover
     let climate: MTLTexture  // rgba16Float array at half resolution
+    // Must match GAP_LEVELS in Shaders/Saver.metal: levels 1...gapLevels carry one gap per column.
+    static let gapLevels = 3
+    let gaps: MTLTexture     // rg16Float array, one slice per level up to gapLevels: the column's gap (lo, hi)
+    private let gapViews: [MTLTexture]
     private let heightViews: [[MTLTexture]]
     private let coverViews: [MTLTexture]
     private let climateViews: [MTLTexture]
@@ -456,19 +481,20 @@ final class Clipmap {
         func pipeline(_ name: String) -> MTLComputePipelineState? {
             library.makeFunction(name: name).flatMap { try? device.makeComputePipelineState(function: $0) }
         }
-        func array(_ format: MTLPixelFormat, _ n: Int, mips: Bool) -> MTLTexture? {
+        func array(_ format: MTLPixelFormat, _ n: Int, mips: Bool, slices: Int = Clipmap.levels) -> MTLTexture? {
             let d = MTLTextureDescriptor()
             d.textureType = .type2DArray
             d.pixelFormat = format
             d.width = n
             d.height = n
-            d.arrayLength = Clipmap.levels
+            d.arrayLength = slices
             d.mipmapLevelCount = mips ? Int(log2(Double(n))) + 1 : 1
             d.usage = [.shaderRead, .shaderWrite, .pixelFormatView]
             d.storageMode = .private
             return device.makeTexture(descriptor: d)
         }
         guard let h = array(.r16Float, Clipmap.size, mips: true), let v = array(.r8Unorm, Clipmap.size, mips: false),
+              let g = array(.rg16Float, Clipmap.size, mips: false, slices: Clipmap.gapLevels),
               let c = array(.rgba16Float, Clipmap.size / 2, mips: false),
               let gen = pipeline("generateCoarse"), let red = pipeline("reduceMaxRegion"), let par = pipeline("reduceMaxParent") else { return nil }
         func slice(_ t: MTLTexture, _ k: Int, _ m: Int) -> MTLTexture? {
@@ -486,6 +512,13 @@ final class Clipmap {
             vv.append(tv)
             cv.append(tc)
         }
+        var gv: [MTLTexture] = []
+        for k in 0..<Clipmap.gapLevels {
+            guard let t = slice(g, k, 0) else { return nil }
+            gv.append(t)
+        }
+        gaps = g
+        gapViews = gv
         height = h
         cover = v
         climate = c
@@ -563,6 +596,7 @@ final class Clipmap {
             enc.setTexture(heightViews[j.level][0], index: 0)
             enc.setTexture(climateViews[j.level], index: 1)
             enc.setTexture(coverViews[j.level], index: 2)
+            enc.setTexture(gapViews[min(j.level, Clipmap.gapLevels - 1)], index: 3)
             enc.setBytes(&region, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
             enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 1)
             enc.dispatchThreads(MTLSize(width: Int(region.z), height: Int(region.w), depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
@@ -989,6 +1023,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setTexture(world.heightTex, index: 0)
             enc.setTexture(clipmap.height, index: 1)
             enc.setTexture(world.maxTex, index: 2)
+            enc.setTexture(world.gapTex, index: 3)
+            enc.setTexture(clipmap.gaps, index: 4)
             // HORIZON_SEGS (16) threads per bin, one threadgroup each.
             enc.dispatchThreads(MTLSize(width: 16, height: 1024, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 1, depth: 1))
         }
@@ -1028,6 +1064,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentTexture(shadowMaps[1], index: 10)
             enc.setFragmentTexture(slowTex, index: 11)
             enc.setFragmentTexture(world.maxTex, index: 12)
+            enc.setFragmentTexture(world.gapTex, index: 13)
+            enc.setFragmentTexture(clipmap.gaps, index: 14)
             enc.setFragmentBuffer(lampPos, offset: 0, index: 2)
             enc.setFragmentBuffer(lampState, offset: 0, index: 3)
             enc.setFragmentBytes(&hazeRefs, length: 128, index: 4)
@@ -1434,7 +1472,8 @@ enum Snapshot {
             if let d = Double(ProcessInfo.processInfo.environment["VR_BIRDTEST"] ?? "") { r.wildlife.testPattern(camera: r.camera, distance: d) }
             if let d = Double(ProcessInfo.processInfo.environment["VR_MURMUR"] ?? "") { r.wildlife.testMurmuration(camera: r.camera, distance: d) }
             var times: [Double] = []
-            let frames = env["VR_MOTION"] != nil ? Int(env["VR_MOTION_FRAMES"] ?? "") ?? 48 : 12
+            // VR_BENCH=n renders n still frames (gpu= is their minimum): more frames ride out the GPU's clock ramp.
+            let frames = env["VR_MOTION"] != nil ? Int(env["VR_MOTION_FRAMES"] ?? "") ?? 48 : Int(env["VR_BENCH"] ?? "") ?? 12
             // VR_FRAMES=n also writes each of the last n frames, for measuring frame-to-frame crawl.
             let dump = min(Int(env["VR_FRAMES"] ?? "") ?? 0, frames)
             var bytes = [UInt8](repeating: 0, count: w * h * 4)

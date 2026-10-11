@@ -292,8 +292,27 @@ static inline Mega megaLift(float2 p, float lagoon, uint seed) {
     return g;
 }
 
-// Column = (height, gapLo, gapHi): solid where y < height, except inside [gapLo, gapHi).
-static inline float3 terrainColumn(int2 w, uint seed) {
+// A generated column: solid where y < h, except inside its gaps. [gl, gh) is the principal (highest) gap, [lo1, hi1) and
+// [lo2, hi2) up to two more below it, highest first (empty when hi <= lo). carved: the gaps are rock carved by the mega
+// relief (overhangs, caves, bridges), whose roofs rest on any neighbour rather than all four; canyon arches are not.
+struct Col { float h, gl, gh, lo1, hi1, lo2, hi2; bool carved; };
+
+// Extra gaps (World gx, rgba16Uint): x lo1, y hi1, z lo2, w hi2 in the low 11 bits (heights stay under 2048); the top 5
+// bits of z hold flags (bit 0: carved). An empty gap is lo = hi = 0.
+constant uint GAP_BITS = 0x7ffu;
+constant uint GAP_CARVED = 1u;
+
+static inline uint4 packGaps(Col c) {
+    uint flags = c.carved ? GAP_CARVED : 0u;
+    bool g1 = c.hi1 > c.lo1, g2 = c.hi2 > c.lo2;
+    return uint4(g1 ? uint(c.lo1) : 0u, g1 ? uint(c.hi1) : 0u, (g2 ? uint(c.lo2) : 0u) | (flags << 11), g2 ? uint(c.hi2) : 0u);
+}
+
+// (lo1, hi1, lo2, hi2) of packed extra gaps.
+static inline float4 extraGaps(uint4 g) { return float4(g & GAP_BITS); }
+static inline uint gapFlags(uint4 g) { return g.z >> 11; }
+
+static inline Col terrainColumn(int2 w, uint seed) {
     float2 p = float2(w) + seedOffset(seed);
     float2 warp = float2(fbm2(p / 900.0, 2, seed + 1), fbm2(p / 900.0 + 37.1, 2, seed + 2)) * 300.0;
     float c = saturate(fbm2((p + warp) / 2000.0, 3, seed + 3) * 1.4 + 0.5);
@@ -392,38 +411,88 @@ static inline float3 terrainColumn(int2 w, uint seed) {
             if (gh > h - 3.0 || gh - gl < 3.0 || gl < SEA + 1.0) { gl = 0; gh = 0; }
         }
     }
-    return float3(h, gl, gh);
+    Col col;
+    col.h = h; col.gl = gl; col.gh = gh;
+    col.lo1 = 0; col.hi1 = 0; col.lo2 = 0; col.hi2 = 0;
+    col.carved = false;
+    return col;
 }
 
 kernel void generateHeight(texture2d<float, access::write> out [[texture(0)]],
+                           texture2d<uint, access::write> gxOut [[texture(1)]],
                            constant int4& info [[buffer(0)]],
                            constant uint& row0 [[buffer(1)]],
                            uint2 g [[thread_position_in_grid]]) {
     uint2 gid = g + uint2(0, row0);
     if (gid.x >= uint(info.z) || gid.y >= uint(info.z)) return;
     int2 w = int2(gid) + info.xy;
-    out.write(float4(terrainColumn(w, uint(info.w)), 0), gid);
+    Col c = terrainColumn(w, uint(info.w));
+    out.write(float4(c.h, c.gl, c.gh, 0), gid);
+    gxOut.write(packGaps(c), gid);
+}
+
+// Solid at height y in a column (H, gapLo, gapHi) with extra gaps e (lo1, hi1, lo2, hi2).
+static inline bool solidIn(float3 c, float4 e, float y) {
+    return y < c.x && !(y >= c.y && y < c.z) && !(y >= e.x && y < e.y) && !(y >= e.z && y < e.w);
 }
 
 // Clamps each column into its 4-neighbour height range: removes single-voxel spikes, pits and slots.
 kernel void cleanupColumns(texture2d<float, access::read> src [[texture(0)]],
                            texture2d<float, access::write> dst [[texture(1)]],
+                           texture2d<uint, access::read> gxSrc [[texture(2)]],
+                           texture2d<uint, access::write> gxDst [[texture(3)]],
                            constant uint& row0 [[buffer(1)]],
                            uint2 g [[thread_position_in_grid]]) {
     uint2 gid = g + uint2(0, row0);
     uint n = src.get_width();
     if (gid.x >= n || gid.y >= n) return;
     float4 c = src.read(gid);
+    uint4 gx = gxSrc.read(gid);
     uint2 a = uint2(max(int(gid.x) - 1, 0), gid.y), b = uint2(min(gid.x + 1, n - 1), gid.y);
     uint2 e = uint2(gid.x, max(int(gid.y) - 1, 0)), f = uint2(gid.x, min(gid.y + 1, n - 1));
-    float h0 = src.read(a).r, h1 = src.read(b).r, h2 = src.read(e).r, h3 = src.read(f).r;
+    float4 c0 = src.read(a), c1 = src.read(b), c2 = src.read(e), c3 = src.read(f);
+    float h0 = c0.r, h1 = c1.r, h2 = c2.r, h3 = c3.r;
     c.r = clamp(c.r, min(min(h0, h1), min(h2, h3)), max(max(h0, h1), max(h2, h3)));
     // A column-wide slot in a wall (both neighbours along an axis higher) shows as a dash down the face: fill it.
     if (c.r > SEA + 2.0) c.r = max(c.r, max(min(h0, h1), min(h2, h3)));
-    if (c.b > c.r - 3.0) { c.g = 0; c.b = 0; }
-    // A roof needs walls: keep a gap only where every neighbour reaches above it.
-    if (min(min(h0, h1), min(h2, h3)) < c.b + 1.0) { c.g = 0; c.b = 0; }
-    dst.write(c, gid);
+    if ((gapFlags(gx) & GAP_CARVED) == 0u) {
+        if (c.b > c.r - 3.0) { c.g = 0; c.b = 0; }
+        // A roof needs walls: keep a gap only where every neighbour reaches above it.
+        if (min(min(h0, h1), min(h2, h3)) < c.b + 1.0) { c.g = 0; c.b = 0; }
+        dst.write(c, gid);
+        gxDst.write(gx, gid);
+        return;
+    }
+    // Carved rock: a roof rests on any neighbour solid just above it (a lip's edge on the lip behind it), a gap a single
+    // column wide along either axis (rock on both sides at its middle) reads as a dash and is filled, and every roof
+    // keeps three voxels of rock over it.
+    float4 x0 = extraGaps(gxSrc.read(a)), x1 = extraGaps(gxSrc.read(b)), x2 = extraGaps(gxSrc.read(e)), x3 = extraGaps(gxSrc.read(f));
+    float4 ex = extraGaps(gx);
+    float3 gaps[3] = { float3(c.g, c.b, 0), float3(ex.x, ex.y, 0), float3(ex.z, ex.w, 0) };
+    float top = c.r;
+    for (int i = 0; i < 3; i++) {
+        float lo = gaps[i].x, hi = gaps[i].y;
+        if (hi <= lo) continue;
+        float mid = floor((lo + hi) * 0.5);
+        bool keep = hi <= top - 3.0 && hi - lo >= 3.0;
+        keep = keep && (solidIn(c0.rgb, x0, hi) || solidIn(c1.rgb, x1, hi) || solidIn(c2.rgb, x2, hi) || solidIn(c3.rgb, x3, hi));
+        keep = keep && !(solidIn(c0.rgb, x0, mid) && solidIn(c1.rgb, x1, mid)) && !(solidIn(c2.rgb, x2, mid) && solidIn(c3.rgb, x3, mid));
+        if (!keep) gaps[i] = float3(0);
+        else top = lo;
+    }
+    // The highest surviving gap is the principal one.
+    int pi = gaps[0].y > gaps[0].x ? 0 : gaps[1].y > gaps[1].x ? 1 : 2;
+    Col o;
+    o.h = c.r;
+    o.gl = gaps[pi].x; o.gh = gaps[pi].y;
+    o.lo1 = pi == 0 ? gaps[1].x : pi == 1 ? gaps[2].x : 0.0;
+    o.hi1 = pi == 0 ? gaps[1].y : pi == 1 ? gaps[2].y : 0.0;
+    o.lo2 = pi == 0 ? gaps[2].x : 0.0;
+    o.hi2 = pi == 0 ? gaps[2].y : 0.0;
+    if (o.hi1 <= o.lo1) { o.lo1 = o.lo2; o.hi1 = o.hi2; o.lo2 = 0; o.hi2 = 0; }
+    o.carved = o.gh > o.gl;
+    dst.write(float4(o.h, o.gl, o.gh, c.a), gid);
+    gxDst.write(packGaps(o), gid);
 }
 
 // MARK: - Vegetation
@@ -575,10 +644,13 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
     dst.write(float4(float(hi), G, floating ? leaf : G, leaf), gid);
 }
 
-// Height a column is solid from the ground up: under an arch's gap, a canopy or a building's openings only the part
-// below them counts.
-static inline float solidFloor(float4 c) {
+// Height a column is solid from the ground up: under an arch's gap, a canopy, a building's openings or a cave only the
+// part below them counts. Extra gaps lie below the principal one.
+static inline float solidFloor(float4 c, uint4 gx) {
     if (c.a > 0.0) return c.g;
+    float4 e = extraGaps(gx);
+    if (e.w > e.z) return e.z;
+    if (e.y > e.x) return e.x;
     // Structures too: a lintel, eave, deck, stilt house or hull is open in [g, b) whatever its base says.
     return c.b > c.g ? c.g : c.r;
 }
@@ -604,13 +676,16 @@ kernel void reduceMax(texture2d<float, access::read> src [[texture(0)]],
 // (the birds' sightline test).
 kernel void reduceCpu(texture2d<float, access::read> src [[texture(0)]],
                       texture2d<float, access::write> dst [[texture(1)]],
+                      texture2d<uint, access::read> gx [[texture(2)]],
                       constant int& fromColumns [[buffer(0)]],
                       uint2 gid [[thread_position_in_grid]]) {
     if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
     uint2 s = gid * 2;
     float4 a = src.read(s), b = src.read(s + uint2(1, 0)), c = src.read(s + uint2(0, 1)), d = src.read(s + uint2(1, 1));
     float m = max(max(a.r, b.r), max(c.r, d.r));
-    float lo = fromColumns != 0 ? min(min(solidFloor(a), solidFloor(b)), min(solidFloor(c), solidFloor(d))) : min(min(a.g, b.g), min(c.g, d.g));
+    float lo = fromColumns != 0 ? min(min(solidFloor(a, gx.read(s)), solidFloor(b, gx.read(s + uint2(1, 0)))),
+                                      min(solidFloor(c, gx.read(s + uint2(0, 1))), solidFloor(d, gx.read(s + uint2(1, 1)))))
+                                : min(min(a.g, b.g), min(c.g, d.g));
     dst.write(float4(m, lo, 0, 0), gid);
 }
 
@@ -1418,18 +1493,37 @@ constant int COARSE_N = 2048;
 // Seen at a grazing angle, trees standing several voxels tall hide far more ground than their footprint covers.
 constant float COVER_GAIN = 2.5;
 
-static inline float coarseHeight(int2 cw, int k, uint seed) {
+// Levels 1 to GAP_LEVELS carry one gap per column, the carved principal gaps of their four samples: their rounded
+// means where at least two overlap, under at least two voxels of roof. Their outline (H) ignores gaps.
+constant int GAP_LEVELS = 3;
+
+static inline float3 coarseColumn(int2 cw, int k, uint seed) {
     int s = 1 << k, off = s >> 2, hs = s >> 1;
     int2 b = cw * s + off;
-    return coarseCombine(terrainColumn(b, seed).x, terrainColumn(b + int2(hs, 0), seed).x,
-                         terrainColumn(b + int2(0, hs), seed).x, terrainColumn(b + int2(hs, hs), seed).x, float(s));
+    Col c0 = terrainColumn(b, seed), c1 = terrainColumn(b + int2(hs, 0), seed);
+    Col c2 = terrainColumn(b + int2(0, hs), seed), c3 = terrainColumn(b + int2(hs, hs), seed);
+    float H = coarseCombine(c0.h, c1.h, c2.h, c3.h, float(s));
+    if (k > GAP_LEVELS) return float3(H, 0, 0);
+    float n = 0, lo = 0, hi = 0, maxLo = 0, minHi = 1e9;
+    if (c0.carved && c0.gh > c0.gl) { n += 1; lo += c0.gl; hi += c0.gh; maxLo = max(maxLo, c0.gl); minHi = min(minHi, c0.gh); }
+    if (c1.carved && c1.gh > c1.gl) { n += 1; lo += c1.gl; hi += c1.gh; maxLo = max(maxLo, c1.gl); minHi = min(minHi, c1.gh); }
+    if (c2.carved && c2.gh > c2.gl) { n += 1; lo += c2.gl; hi += c2.gh; maxLo = max(maxLo, c2.gl); minHi = min(minHi, c2.gh); }
+    if (c3.carved && c3.gh > c3.gl) { n += 1; lo += c3.gl; hi += c3.gh; maxLo = max(maxLo, c3.gl); minHi = min(minHi, c3.gh); }
+    if (n < 2.0 || maxLo >= minHi) return float3(H, 0, 0);
+    lo = floor(lo / n + 0.5);
+    hi = floor(hi / n + 0.5);
+    if (hi - lo < 2.0 || H - hi < 2.0) return float3(H, 0, 0);
+    return float3(H, lo, hi);
 }
+
+static inline float coarseHeight(int2 cw, int k, uint seed) { return coarseColumn(cw, k, seed).x; }
 
 // Writes the world cells region.xy + [0, region.zw) of level info.x into its toroidal slice (texel = cell & 2047):
 // height and canopy cover, and every second cell also the half-resolution climate texel it starts.
 kernel void generateCoarse(texture2d<float, access::write> hOut [[texture(0)]],
                            texture2d<float, access::write> cOut [[texture(1)]],
                            texture2d<float, access::write> vOut [[texture(2)]],
+                           texture2d<float, access::write> gOut [[texture(3)]],
                            constant int4& region [[buffer(0)]],
                            constant int4& info [[buffer(1)]],
                            uint2 gid [[thread_position_in_grid]]) {
@@ -1437,7 +1531,9 @@ kernel void generateCoarse(texture2d<float, access::write> hOut [[texture(0)]],
     int k = info.x, s = 1 << k;
     uint seed = uint(info.y);
     int2 cw = region.xy + int2(gid);
-    float H = coarseHeight(cw, k, seed);
+    float3 cc = coarseColumn(cw, k, seed);
+    float H = cc.x;
+    if (k <= GAP_LEVELS) gOut.write(float4(cc.y, cc.z, 0, 0), uint2(cw & (COARSE_N - 1)));
     float2 centre = float2(cw * s) + 0.5 * float(s);
     // Expected share of the column under leaves: planting chance per tree cell times a mean canopy of ~13 columns.
     float cover = saturate(groveDensity(centre, H, seed) * 13.0 / float(TREE_CELL * TREE_CELL));
@@ -1507,6 +1603,8 @@ static inline float3 columnAt(texture2d<float> hm, int2 c, int size) {
     return hm.read(uint2(c), 0).rgb;
 }
 
+// The principal gap only: the extra gaps below it (notches, tubes) read as rock to corner AO, which only darkens their
+// already dark corners a little more; decoding them in every AO tap cost a tenth of a millisecond.
 static inline bool solid(texture2d<float> hm, int3 v, int size) {
     float3 col = columnAt(hm, v.xz, size);
     float y = float(v.y);
@@ -1531,6 +1629,8 @@ struct Terrain {
     float fadeStart;             // where the haze starts closing in on that edge
     float globalMax;
     texture2d<float> hx;         // r16Float: mip 0 the column tops, mips from 1 their maxima (the DDA's skips)
+    texture2d<uint> gx;          // the 1-voxel map's extra gaps (packGaps)
+    texture2d_array<float> cg;   // levels 1...GAP_LEVELS: each column's gap (lo, hi)
 };
 
 static inline int2 levelOrigin(thread const Terrain& tr, int k) { return k == 0 ? int2(0) : tr.origin >> k; }
@@ -1544,7 +1644,11 @@ static inline float maxAt(thread const Terrain& tr, int k, int2 mc, int m) {
 // Column (H, gapLo, gapHi, first leaf) of frame-local level cell c, unmorphed.
 static inline float4 columnL(thread const Terrain& tr, int k, int2 c) {
     if (k == 0) return tr.hm.read(uint2(clamp(c, int2(0), int2(tr.size - 1))), 0);
-    return float4(tr.ch.read(uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1)), uint(k - 1), 0).r, 0, 0, 0);
+    uint2 t = uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1));
+    float H = tr.ch.read(t, uint(k - 1), 0).r;
+    if (k > GAP_LEVELS) return float4(H, 0, 0, 0);
+    float2 g = tr.cg.read(t, uint(k - 1)).rg;
+    return float4(H, g, 0);
 }
 
 static inline float groundL(thread const Terrain& tr, int k, int2 c) {
@@ -1571,6 +1675,13 @@ static inline float parentH(thread const Terrain& tr, int k, int2 c) {
     return tr.ch.read(uint2((w >> 1) & (COARSE_N - 1)), uint(k), 0).r;
 }
 
+// Gap (lo, hi) of the next level's column over level-k cell c.
+static inline float2 parentGap(thread const Terrain& tr, int k, int2 c) {
+    if (k + 1 > GAP_LEVELS) return float2(0);
+    int2 w = c + (k == 0 ? tr.origin : tr.origin >> k);
+    return tr.cg.read(uint2((w >> 1) & (COARSE_N - 1)), uint(k)).rg;
+}
+
 // Morph weight toward the next level at frame-local xz p: 0 inside the band, 1 from 1.5 parent columns before the
 // handoff circle on, so every parent cell the circle cuts is already fully morphed on the inner side.
 static inline float morphAt(thread const Terrain& tr, int k, float2 p) {
@@ -1578,16 +1689,36 @@ static inline float morphAt(thread const Terrain& tr, int k, float2 p) {
     return smoothstep(tr.lod[k].x, tr.lod[k].z, length(p - tr.cam));
 }
 
-// Morphed (H, gapLo, gapHi): across the band a column slides to its parent's height and gaps close from the top,
-// so at the handoff the level equals the next one exactly.
-static inline float3 columnMorph(thread const Terrain& tr, int k, int2 c) {
+// Morphed (H, gapLo, gapHi): across the band a column slides to its parent's height and its gap to the parent's (opening
+// from the parent's floor where it has none), or closes from the top where the parent has none, so at the handoff the
+// level equals the next one exactly.
+// w: the morph weight (columnMorphW).
+static inline float3 columnMorphW(thread const Terrain& tr, int k, int2 c, float w) {
     float3 col = columnL(tr, k, c).rgb;
-    float w = morphAt(tr, k, (float2(c) + 0.5) * tr.lod[k].w);
     if (w > 0.0) {
         col.x = mix(col.x, parentH(tr, k, c), w);
-        col.z = mix(col.z, col.y, w);
+        float2 pg = parentGap(tr, k, c);
+        if (pg.y > pg.x) {
+            float2 g0 = col.z > col.y ? col.yz : pg.xx;
+            col.yz = mix(g0, pg, w);
+        } else {
+            col.z = mix(col.z, col.y, w);
+        }
     }
     return col;
+}
+
+static inline float3 columnMorph(thread const Terrain& tr, int k, int2 c) {
+    return columnMorphW(tr, k, c, morphAt(tr, k, (float2(c) + 0.5) * tr.lod[k].w));
+}
+
+// The 1-voxel map's extra gaps (lo1, hi1, lo2, hi2) at frame-local column c, closing from the top across the morph band
+// (the coarser levels carry only the principal gap).
+static inline float4 extraGapsMorph(thread const Terrain& tr, int2 c) {
+    float4 e = extraGaps(tr.gx.read(uint2(clamp(c, int2(0), int2(tr.size - 1)))));
+    float w = morphAt(tr, 0, float2(c) + 0.5);
+    if (w > 0.0) e.yw = mix(e.yw, e.xz, w);
+    return e;
 }
 
 static inline Climate climateL(thread const Terrain& tr, int k, float2 p) {
@@ -1679,10 +1810,21 @@ static Hit trace(thread const Terrain& tr, float3 o, float3 d, float tMax, int m
             continue;
         }
 
-        // One column, solid in [0, gl) and [gh, H); a ray passing over it moves on as a skip would.
-        float3 col = columnMorph(tr, k, lc);
+        // One column, solid below H except in its gaps (the principal one, and on the 1-voxel map up to two more below
+        // it); a ray passing over it moves on as a skip would. A ray above the column never needs its gaps, which lie
+        // at least two voxels under its top: coarse levels read them only for a ray inside.
+        float wm = morphAt(tr, k, (float2(lc) + 0.5) * s);
+        float3 col = columnMorphW(tr, k, lc, wm);
         float H = col.x, gl = col.y, gh = col.z;
         bool inGap = yA >= gl && yA < gh;
+        if (!inGap && k == 0 && gh > gl && yA < gl) {
+            float4 e = extraGaps(tr.gx.read(uint2(lc)));
+            e.yw = mix(e.yw, e.xz, wm);
+            bool g1 = yA >= e.x && yA < e.y, g2 = yA >= e.z && yA < e.w;
+            inGap = g1 || g2;
+            gl = g1 ? e.x : e.z;
+            gh = g1 ? e.y : e.w;
+        }
         h.level = k;
         if (yA < H && !inGap) {
             h.hit = true;
@@ -1729,13 +1871,15 @@ kernel void bakeHorizon(device float* out [[buffer(0)]],
                         texture2d<float> hm [[texture(0)]],
                         texture2d_array<float> coarse [[texture(1)]],
                         texture2d<float> hx [[texture(2)]],
+                        texture2d<uint> gx [[texture(3)]],
+                        texture2d_array<float> cg [[texture(4)]],
                         uint2 tid [[thread_position_in_grid]], uint lane [[thread_index_in_threadgroup]]) {
     // HORIZON_SEGS threads per bin walk geometric slices of the distance and reduce, so the bake is not one long chain.
     threadgroup float part[HORIZON_SEGS];
     uint gid = tid.y;
     int levels = int(f.fade.z);
     Terrain tr { hm, coarse, coarse, coarse, hm, f.lod, f.mapInfo.xy, f.mapInfo.z, levels,
-                 f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, 0.0, hx };
+                 f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, 0.0, hx, gx, cg };
     float a = (float(gid) + 0.5) * 6.2831853 / float(HORIZON_BINS);
     float2 dir = float2(sin(a), cos(a));
     float3 o = f.camPos.xyz;
@@ -3335,6 +3479,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
                               texture2d_array<float> coarseCover [[texture(8)]],
                               texture2d<float> shadowNear [[texture(9)]], texture2d<float> shadowFar [[texture(10)]],
                               texture2d<float> slowTex [[texture(11)]], texture2d<float> hx [[texture(12)]],
+                              texture2d<uint> gx [[texture(13)]], texture2d_array<float> cg [[texture(14)]],
                               device const Site* sites [[buffer(1)]], device const float4* lampPos [[buffer(2)]],
                               device const float4* lampState [[buffer(3)]], constant int4* refs [[buffer(4)]],
                               device const float4* birds [[buffer(5)]], device const float* horizon [[buffer(6)]],
@@ -3350,7 +3495,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     float gmax = f.misc.y;
     for (int k = 1; k < levels; k++) gmax = max(gmax, coarse.read(uint2(0), uint(k - 1), coarse.get_num_mip_levels() - 1).r + 1.0);
     if (int(f.shadow.y) & 2) gmax = min(gmax, 260.0);
-    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx };
+    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg };
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
             2.0 * tanH * f.resolution.w, f.misc.w, makeLight(f.sunDir.xyz),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
