@@ -194,12 +194,23 @@ constant float TERRAIN_CEIL = 2000.0;
 // one landform across its extent, separated by lowland 6-12k wide: alpine ranges, tablelands with sheer
 // escarpments, karst pillar forests; a low-frequency river net cuts gorges through them, and a rare tepui stands
 // on its own. U is 0 outside them, so the lowland there is exactly as before. p is seed-offset world position.
-struct Mega { float U; float wK; };
+// lipU: the lift the column would have on the cap rock behind an escarpment's edge (0: no lip here); lipR: how far the
+// cap reaches out over the soft beds, lipU01: the column's place under it (0 at the wall line, 1 at the lip's edge).
+struct Mega { float U; float wK; float lipU; float lipR; float lipU01; };
+
+// The tableland field, also tapped beside a column to measure its distance to an escarpment in voxels.
+static inline float tableField(float2 p, float M, uint seed) {
+    float2 tw = float2(fbm2(p / 1500.0, 3, seed + 220u), fbm2(p / 1500.0 + 5.3, 3, seed + 221u)) * 700.0
+              + float2(perlin2(p / 260.0, seed + 222u), perlin2(p / 260.0 + 3.1, seed + 223u)) * 90.0;
+    return fbm2((p + tw) / 6000.0, 3, seed + 224u) * 1.4 + 0.5 + 0.5 * (M - 0.5);
+}
 
 static inline Mega megaLift(float2 p, float lagoon, uint seed) {
     Mega g;
     g.U = 0.0;
     g.wK = 0.0;
+    g.lipU = 0.0; g.lipR = 0.0; g.lipU01 = 0.0;
+    float lipU = 0.0, uT = 0.0;
     float2 cw = float2(fbm2(p / 7000.0, 2, seed + 200u), fbm2(p / 7000.0 + 71.3, 2, seed + 201u)) * 3000.0;
     float2 q = p + cw;
     float m = fbm2(q / 16000.0, 3, seed + 202u) * 1.6 + 0.5;
@@ -221,13 +232,31 @@ static inline Mega megaLift(float2 p, float lagoon, uint seed) {
         if (wT > 0.0) {
             // Two tiers, each a sloping talus apron (a quarter of its height) under a sheer cap rock; outliers of the
             // field near a threshold stand as mesas, then buttes.
-            float2 tw = float2(fbm2(p / 1500.0, 3, seed + 220u), fbm2(p / 1500.0 + 5.3, 3, seed + 221u)) * 700.0
-                      + float2(perlin2(p / 260.0, seed + 222u), perlin2(p / 260.0 + 3.1, seed + 223u)) * 90.0;
-            float sv = fbm2((p + tw) / 6000.0, 3, seed + 224u) * 1.4 + 0.5 + 0.5 * (M - 0.5);
+            float sv = tableField(p, M, seed);
             float s1 = 0.25 * smoothstep(0.38, 0.45, sv) + 0.75 * smoothstep(0.45, 0.456, sv);
             float s2 = 0.25 * smoothstep(0.55, 0.62, sv) + 0.75 * smoothstep(0.62, 0.626, sv);
             float roll = 18.0 * fbm2(p / 400.0, 2, seed + 225u);
-            U += wT * smoothstep(0.0, 0.3, M) * (430.0 * s1 + 380.0 * s2 + roll * s1);
+            float fT = wT * smoothstep(0.0, 0.3, M);
+            uT = fT * (430.0 * s1 + 380.0 * s2 + roll * s1);
+            U += uT;
+            // Caprock lips: where the cap rock is hard it reaches out over the soft beds of the wall below, by a distance in
+            // voxels (the field's offset from the top of the wall over its gradient), so the overhang is a slab of even
+            // reach rather than one that thins to nothing where the field is flat. The column takes the cap's own height.
+            float reachK = smoothstep(0.30, 0.75, perlin2(p / 520.0, seed + 262u) * 0.9 + 0.5);
+            float thr = sv < 0.54 ? 0.456 : 0.626;
+            if (fT > 0.3 && reachK > 0.0 && sv < thr && sv > thr - 0.03) {
+                float e = 3.0;
+                float gx = tableField(p + float2(e, 0), M, seed) - sv, gz = tableField(p + float2(0, e), M, seed) - sv;
+                float grad = max(length(float2(gx, gz)) / e, 1e-6);
+                float delta = (thr - sv) / grad;
+                float R = 40.0 * reachK;
+                if (delta < R && R > 4.0) {
+                    float c1 = thr < 0.5 ? 1.0 : s1, c2 = thr < 0.5 ? s2 : 1.0;
+                    lipU = fT * (430.0 * c1 + 380.0 * c2 + roll * c1);
+                    g.lipR = R;
+                    g.lipU01 = delta / R;
+                }
+            }
         }
         if (wK > 0.0) {
             // Tower karst. A slow field gathers the towers into clusters (fengcong: peaks crowding on a shared rocky
@@ -263,12 +292,16 @@ static inline Mega megaLift(float2 p, float lagoon, uint seed) {
             U += wK * max(kh, 0.0);
         }
         // Lagoon country keeps only its pillars standing in the water.
-        U *= mix(1.0, wK, lagoon);
+        float keepU = mix(1.0, wK, lagoon);
         // Rivers cut gorges: slots through tableland and karst, broader valleys through ranges.
         float gorge = abs(fbm2(q / 5000.0, 3, seed + 250u));
-        U *= smoothstep(0.008, mix(0.035, 0.12, wA), gorge);
+        keepU *= smoothstep(0.008, mix(0.035, 0.12, wA), gorge);
+        // No lips over a gorge's slot, where the cap would roof the river.
+        if (lipU > 0.0) lipU = keepU > 0.98 ? (U - uT + lipU) * keepU : 0.0;
+        U *= keepU;
         g.U = U;
         g.wK = wK;
+        g.lipU = lipU;
     }
     // Tepui: in about one 30k cell in three, a sheer-walled table mountain over a talus skirt.
     const float CELL = 30000.0;
@@ -286,7 +319,7 @@ static inline Mega megaLift(float2 p, float lagoon, uint seed) {
             float t = 0.22 * smoothstep(R + 420.0, R + 10.0, d) + 0.78 * smoothstep(R + 10.0, R - 6.0, d);
             float top = 30.0 * fbm2(p / 350.0, 2, seed + 243u) * smoothstep(R, R - 80.0, d);
             float T = Hl * t + top;
-            if (T > g.U) { g.U = T; g.wK = 0.0; }
+            if (T > g.U) { g.U = T; g.wK = 0.0; g.lipU = 0.0; }
         }
     }
     return g;
@@ -311,6 +344,19 @@ static inline uint4 packGaps(Col c) {
 // (lo1, hi1, lo2, hi2) of packed extra gaps.
 static inline float4 extraGaps(uint4 g) { return float4(g & GAP_BITS); }
 static inline uint gapFlags(uint4 g) { return g.z >> 11; }
+
+// Lifted land is re-terraced into cliff bands, so mountain faces read as contours, not a stair lattice. Karst keeps its
+// sheer pillar walls.
+static inline float megaTerrace(float h, float U, float wK, float td, uint seed) {
+    float hm = h + U;
+    float tdm = mix(td, 14.0, smoothstep(40.0, 400.0, U));
+    // Beds differ in thickness from one formation to the next, so a tall wall is not one even ruled stripe.
+    tdm *= mix(1.0, 0.6 + 0.8 * hashf(hash2i(int2(int(floor(hm / 70.0)), 7), seed + 260u)), smoothstep(60.0, 200.0, U));
+    float hn3 = hm / tdm, lv3 = floor(hn3);
+    // Tall relief gets short risers between wide treads: a long ramp of single steps reads as a stair lattice.
+    float e3 = mix(0.6, 0.85, smoothstep(100.0, 400.0, U));
+    return min(mix(hm, (lv3 + smoothstep(e3, 1.0, hn3 - lv3)) * tdm, smoothstep(0.5, 30.0, U) * (1.0 - wK)), TERRAIN_CEIL);
+}
 
 static inline Col terrainColumn(int2 w, uint seed) {
     float2 p = float2(w) + seedOffset(seed);
@@ -367,19 +413,10 @@ static inline Col terrainColumn(int2 w, uint seed) {
     }
     Mega mg = megaLift(p, lagoon, seed);
     float U = mg.U;
-    if (U > 0.5) {
-        // Lifted land is re-terraced into cliff bands, so mountain faces read as contours, not a stair lattice.
-        // Karst keeps its sheer pillar walls.
-        float hm = h + U;
-        float tdm = mix(td, 14.0, smoothstep(40.0, 400.0, U));
-        // Beds differ in thickness from one formation to the next, so a tall wall is not one even ruled stripe.
-        tdm *= mix(1.0, 0.6 + 0.8 * hashf(hash2i(int2(int(floor(hm / 70.0)), 7), seed + 260u)), smoothstep(60.0, 200.0, U));
-        float hn3 = hm / tdm, lv3 = floor(hn3);
-        // Tall relief gets short risers between wide treads: a long ramp of single steps reads as a stair lattice.
-        float e3 = mix(0.6, 0.85, smoothstep(100.0, 400.0, U));
-        h = mix(hm, (lv3 + smoothstep(e3, 1.0, hn3 - lv3)) * tdm, smoothstep(0.5, 30.0, U) * (1.0 - mg.wK));
-        h = min(h, TERRAIN_CEIL);
-    }
+    float h0 = h;
+    if (U > 0.5) h = megaTerrace(h0, U, mg.wK, td, seed);
+    // The cap rock's height over a lip column: the plateau behind it by the same formula, so the lip meets it level.
+    float hCap = mg.lipU > U + 6.0 ? floor(megaTerrace(h0, mg.lipU, mg.wK, td, seed)) : 0.0;
     // A pan's rim would otherwise chop a massif flat.
     salt *= 1.0 - smoothstep(10.0, 80.0, U);
     if (eroded > 0.0) h += eroded * (1.6 * perlin2(p / 21.0 + ew / 14.0, seed + 122u) + 0.9 * perlin2(p / 9.0, seed + 125u)) * smoothstep(SEA + 40.0, SEA + 2.0, h);
@@ -412,9 +449,21 @@ static inline Col terrainColumn(int2 w, uint seed) {
         }
     }
     Col col;
-    col.h = h; col.gl = gl; col.gh = gh;
     col.lo1 = 0; col.hi1 = 0; col.lo2 = 0; col.hi2 = 0;
     col.carved = false;
+    // A caprock lip: the column rises to the cap, hollow beneath it down to its own ground. The underside is the cap
+    // rock's bedding plane, level: a sloping one would be an upturned staircase, every step a lit line. The wall below
+    // runs up under it into a rock shelter.
+    if (hCap > h + 6.0) {
+        float t0 = 12.0 + 10.0 * saturate(perlin2(p / 400.0, seed + 263u) + 0.5);
+        float ceil0 = floor(hCap - t0);
+        // The shelter is a recess of bounded height under the slab: below it the band is the escarpment's sheer wall.
+        float V = floor(18.0 + 40.0 * saturate(perlin2(p / 300.0, seed + 264u) * 0.9 + 0.5));
+        float floor0 = max(h, ceil0 - V);
+        if (ceil0 - floor0 >= 3.0) { gl = floor0; gh = ceil0; col.carved = true; }
+        h = hCap;
+    }
+    col.h = h; col.gl = gl; col.gh = gh;
     return col;
 }
 
@@ -463,9 +512,9 @@ kernel void cleanupColumns(texture2d<float, access::read> src [[texture(0)]],
         gxDst.write(gx, gid);
         return;
     }
-    // Carved rock: a roof rests on any neighbour solid just above it (a lip's edge on the lip behind it), a gap a single
-    // column wide along either axis (rock on both sides at its middle) reads as a dash and is filled, and every roof
-    // keeps three voxels of rock over it.
+    // Carved rock: its roofs are slabs the carving keeps whole (a test for a supporting neighbour cut a pillar wherever
+    // one ceiling stood a voxel above both its neighbours'); a gap a single column wide along either axis (rock on both
+    // sides at its middle) reads as a dash and is filled, and every roof keeps three voxels of rock over it.
     float4 x0 = extraGaps(gxSrc.read(a)), x1 = extraGaps(gxSrc.read(b)), x2 = extraGaps(gxSrc.read(e)), x3 = extraGaps(gxSrc.read(f));
     float4 ex = extraGaps(gx);
     float3 gaps[3] = { float3(c.g, c.b, 0), float3(ex.x, ex.y, 0), float3(ex.z, ex.w, 0) };
@@ -475,7 +524,6 @@ kernel void cleanupColumns(texture2d<float, access::read> src [[texture(0)]],
         if (hi <= lo) continue;
         float mid = floor((lo + hi) * 0.5);
         bool keep = hi <= top - 3.0 && hi - lo >= 3.0;
-        keep = keep && (solidIn(c0.rgb, x0, hi) || solidIn(c1.rgb, x1, hi) || solidIn(c2.rgb, x2, hi) || solidIn(c3.rgb, x3, hi));
         keep = keep && !(solidIn(c0.rgb, x0, mid) && solidIn(c1.rgb, x1, mid)) && !(solidIn(c2.rgb, x2, mid) && solidIn(c3.rgb, x3, mid));
         if (!keep) gaps[i] = float3(0);
         else top = lo;
@@ -2252,6 +2300,17 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     float base = -col4.a;
     bool built = col4.a < 0.0 && base < col.x;
     float H = tree ? col.y : built ? (col.z > col.y ? col.y : base) : col.x;
+    // Just under a rock gap the voxel belongs to the floor below it: its height is the gap's floor. Further down it is
+    // part of the wall the column makes as a whole, which shades as one with its neighbours'.
+    if (!tree && !built && col.z > col.y && float(v.y) < col.y) {
+        float seg = col.y;
+        if (k == 0) {
+            float4 e = extraGaps(tr.gx.read(uint2(clamp(v.xz, int2(0), int2(tr.size - 1)))));
+            if (e.y > e.x && float(v.y) < e.x) seg = e.x;
+            if (e.w > e.z && float(v.y) < e.z) seg = e.z;
+        }
+        if (float(v.y) >= seg - 6.0) H = seg;
+    }
     s.canopy = tree ? 0.55 : 1.0;
     s.H = H;
     float hx0 = groundL(tr, k, v.xz + int2(-1, 0)), hx1 = groundL(tr, k, v.xz + int2(1, 0));
@@ -2832,6 +2891,34 @@ static float stairShadow(thread const Terrain& tr, int k, float2 p, float3 L, fl
     return lit / area;
 }
 
+// Whether column c of level k is hollow at height y (inside one of its rock gaps).
+static inline bool hollowAt(thread const Terrain& tr, int k, int2 c, float y) {
+    float4 col = columnL(tr, k, c);
+    if (col.z <= col.y || col.a != 0.0) return false;
+    if (y >= col.y && y < col.z) return true;
+    if (k > 0 || y >= col.y) return false;
+    float4 e = extraGaps(tr.gx.read(uint2(clamp(c, int2(0), int2(tr.size - 1)))));
+    return (y >= e.x && y < e.y) || (y >= e.z && y < e.w);
+}
+
+// Share of the ground near p under a roof at height y: per column, whether it or a 4-neighbour is hollow at y, bilinear
+// over the four columns nearest p. A function of position alone, never of which way a face turns, so the jogging faces of
+// a wall under a roof all agree, and it fades over a column or two at a roof's edge.
+static float roofShare(thread const Terrain& tr, int k, float2 p, float y) {
+    float cs = tr.lod[k].w;
+    float2 q = p / cs - 0.5, f = fract(q);
+    int2 i0 = int2(floor(q));
+    float r = 0.0;
+    for (int j = 0; j < 2; j++)
+        for (int i = 0; i < 2; i++) {
+            int2 c = i0 + int2(i, j);
+            bool h = hollowAt(tr, k, c, y) || hollowAt(tr, k, c + int2(1, 0), y) || hollowAt(tr, k, c - int2(1, 0), y)
+                  || hollowAt(tr, k, c + int2(0, 1), y) || hollowAt(tr, k, c - int2(0, 1), y);
+            if (h) r += (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y);
+        }
+    return r;
+}
+
 // shadows: 0 none, 1 traced near ray and maps, 2 maps only (reflections: ripples hide contact shadows).
 // L: the light (the bed under water takes it refracted); inWater: seen in rippled water.
 static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3 d, Hit h, int shadows, bool inWater = false) {
@@ -2850,7 +2937,19 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     float3 nS = normalize(float3(s.nh.x - s.nh.y, 2.0 * cs, s.nh.z - s.nh.w));
     // Below ~2 pixels per voxel step shadows and sky visibility alias into a hatch that crawls under motion;
     // shade the continuous slope under the stairs instead.
-    float wf2 = s.mat == 0 ? smoothstep(0.2, 0.5, fp) : 0.0;
+    // Taken just over half a column into the air in front of the face: on the face, or exactly half a column out, the
+    // footprint's split between rock and air turns on rounding.
+    // Floors are asked just above, undersides just below.
+    float roofW = 0.0;
+    if (s.mat == 0) {
+        float4 c0 = columnL(x.tr, k, h.voxel.xz + h.normal.xz);
+        float4 c1 = columnL(x.tr, k, h.voxel.xz);
+        if (c0.z > c0.y || c1.z > c1.y) roofW = roofShare(x.tr, k, p.xz, p.y + 0.5 * n.y);
+    }
+    // Faces under a roof, and undersides, are not stairs on a heightfield: no heightfield prefilter applies to them. A
+    // lip's front and top are ordinary wall and ground.
+    float ov = s.mat == 0 ? max(roofW, h.normal.y < 0 ? 1.0 : 0.0) : 0.0;
+    float wf2 = s.mat == 0 ? smoothstep(0.2, 0.5, fp) * (1.0 - ov) : 0.0;
     bool built = s.mat >= 4;
     // Tops a few pixels wide keep their exact normal: a column's central difference tilts only the tops at a
     // ledge, so they would shade unlike the rest of their plane. Toward 2 pixels per voxel the slope under the
@@ -2859,7 +2958,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // behind it. Canopies keep their column normal blend.
     float wt = smoothstep(0.33, 0.6, fp);
     // Structures keep their own planes: a column-difference normal would tilt a house's edge columns.
-    float wn = built ? 0.0 : s.mat == 0 && h.normal.y != 0 ? wt : wf;
+    float wn = (built ? 0.0 : s.mat == 0 && h.normal.y != 0 ? wt : wf) * (1.0 - ov);
     if (s.mat == 0 && wt > 0.0 && s.level < 1.0 && shadows != 2) {
         // Side faces take the wall's direction over several columns: a single column's jog in a wall would otherwise
         // turn a narrow face to the light and draw a pale dash down the wall.
@@ -2870,6 +2969,17 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         nS = h.normal.y != 0 ? g : normalize(mix(nS, g, wt));
     }
     float3 nl = normalize(mix(normalize(n - float3(s.slope.x, 0.0, s.slope.y)), nS, wn));
+    // A wall under a roof faces the hollow in front of it: its direction is where the hollow share rises, over a few
+    // columns, so its jogging faces light as one wall rather than striping light and dark.
+    if (ov > 0.0 && h.normal.y == 0 && wf > 0.0) {
+        // The hollow's own share (a column hollow here, not beside), whose gradient points out of the rock.
+        float2 gw = 0.0;
+        for (int j = -1; j <= 1; j += 2) {
+            gw.x += float(j) * float(hollowAt(x.tr, k, int2(floor((p.xz + float2(1.5 * cs * float(j), 0)) / cs)), p.y));
+            gw.y += float(j) * float(hollowAt(x.tr, k, int2(floor((p.xz + float2(0, 1.5 * cs * float(j))) / cs)), p.y));
+        }
+        if (dot(gw, gw) > 1e-3) nl = normalize(mix(nl, normalize(float3(gw.x, 0.0, gw.y)), ov * wf));
+    }
     if (any(s.nrm != 0.0)) nl = s.nrm;
     nl = normalize(mix(nl, float3(0, 1, 0), s.level));
     // Coarse levels are always past the footprint where corner AO is fully replaced.
@@ -2889,6 +2999,8 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // So is every riser of a tall, steep staircase wall: kept by its own drop alone, its deeper columns would show as
     // strata dashes among tread-coloured ones.
     keep = max(keep, max(s.wall, smoothstep(1.0, 2.5, steep) * smoothstep(100.0, 160.0, s.H)) * smoothstep(1.0, 3.0, cliff));
+    // Overhangs keep their strata and their own faces' normals.
+    keep = max(keep, ov);
     // A slope steep over a wide span (+-16 voxels and more) is seen almost edge-on to its treads: from afar it is a
     // rock face. Its risers painted in the tread colour read as a veil of the ground above (grass, snow, hypsometric
     // bands) hung across the rock, and its treads as pale lines ruled across it, so both take the face's rock.
@@ -2897,7 +3009,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         float R2 = max(16.0, 2.0 * cs);
         float2 g2 = float2(groundSmoothL(x.tr, k, p.xz + float2(R2, 0)) - groundSmoothL(x.tr, k, p.xz - float2(R2, 0)),
                            groundSmoothL(x.tr, k, p.xz + float2(0, R2)) - groundSmoothL(x.tr, k, p.xz - float2(0, R2))) / (2.0 * R2);
-        sus = smoothstep(0.6, 1.1, length(g2));
+        sus = smoothstep(0.6, 1.1, length(g2)) * (1.0 - ov);
         if (h.normal.y == 0) keep = max(keep, sus);
         // Treads and risers alike light as the face they make up, or every tread is a lit line across it.
         nl = normalize(mix(nl, normalize(float3(-g2.x, 1.0, -g2.y)), wf * sus));
@@ -2909,7 +3021,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         int2 t = h.normal.x != 0 ? int2(0, 1) : int2(1, 0), o = h.normal.xz;
         float run = float(groundL(x.tr, k, h.voxel.xz + t) > groundL(x.tr, k, h.voxel.xz + t + o) + 0.5)
                   + float(groundL(x.tr, k, h.voxel.xz - t) > groundL(x.tr, k, h.voxel.xz - t + o) + 0.5);
-        lone = (1.0 - 0.5 * run) * smoothstep(0.01, 0.05, fp) * (1.0 - wn) * (1.0 - keep);
+        lone = (1.0 - 0.5 * run) * smoothstep(0.01, 0.05, fp) * (1.0 - wn) * (1.0 - keep) * (1.0 - ov);
     }
     float3 alb = h.normal.y == 0 ? mix(s.albedo, s.tread, max(wf * (1.0 - keep), lone)) : mix(s.albedo, s.face, wf * sus);
     float deep = L.night * smoothstep(0.32, 0.45, -L.sun.y);
@@ -2958,8 +3070,12 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         float contact = 0.35 * (1.0 - smoothstep(2.0, 8.0, 0.5 / L.key.y));
         // The lift moves the ray's start about 1 / L.y along it; contact reach moves with it.
         float reach = wf2 / max(L.key.y, 0.05);
-        sh = sHit.hit ? 0.35 * (1.0 - smoothstep(2.0 + reach, 8.0 + reach, sHit.t)) : 1.0;
+        // A roof overhead is never a contact shadow.
+        sh = sHit.hit ? (sHit.normal.y < 0 && sHit.iters < shadowIters ? 0.0 : 0.35 * (1.0 - smoothstep(2.0 + reach, 8.0 + reach, sHit.t))) : 1.0;
         if (maps) sh = min(sh, shadowMapLit(x, so, mapOnly));
+        // Under a roof the roof stands in for the ray: the maps see an overhang only from two texels out, and a traced ray
+        // that slips out under the edge on one row and not the next stripes the back wall with sun.
+        sh = min(sh, 1.0 - roofW);
         if (wf2 > 0.0) sh = mix(sh, min(sh, stairShadow(x.tr, k, p.xz, L.key, d, contact, 0.35, fp > 3.0 || shadows == 2)), wf2);
         float floorSh = mix(mix(0.5, 0.25, hiSun), 0.32, L.gold);
         sh = mix(sh, floorSh + (1.0 - floorSh) * sh, wf);
@@ -2973,19 +3089,26 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     float3 skyFill = mix(L.horizon, L.zenith, saturate(zw + 0.15 * nl.y)) * 0.9 * lowFill * mix(1.0, 0.85, hiSun);
     // Golden hour: shade is the violet dome opposite the sun, well below the key, so hillsides keep dark values.
     skyFill *= mix(float3(1.0), float3(0.62, 0.58, 0.85), L.gold * L.sunAmt);
-    float2 svAt = mix((float2(h.voxel.xz + h.normal.xz) + 0.5) * cs, p.xz, wf2);
+    // Under a roof the visibility is taken where the point is, not at its column's centre: column by column it would
+    // jump between reaching past the roof's edge and not, striping the wall.
+    float2 svAt = mix((float2(h.voxel.xz + h.normal.xz) + 0.5) * cs, p.xz, max(wf2, ov));
     float svY = wf2 > 0.0 ? mix(p.y, groundSmoothL(x.tr, k, p.xz), wf2) : p.y;
-    if (!(x.prof & 16)) skyFill *= mix(1.0, skyVisibility(x.tr, k, svAt, svY, lite || fp > 5.0 ? 2 : fp > 2.0 ? 1 : 0), mix(0.55, 0.85, hiSun));
+    float sv = x.prof & 16 ? 1.0 : skyVisibility(x.tr, k, svAt, svY, lite || fp > 5.0 ? 2 : fp > 2.0 ? 1 : 0);
+    // Under a roof the sky comes only through the mouth: the visibility counts in full, and the deeper in, the less.
+    skyFill *= mix(1.0, sv * mix(1.0, sv, roofW), mix(mix(0.55, 0.85, hiSun), 1.0, roofW));
     // A wall sees half the dome, and the half it sees is the dimmer horizon side; without this a riser in shade
     // outshines the sunlit tread above it under a low sun.
     skyFill *= 0.5 + 0.5 * saturate(nl.y);
     float3 bounce = (1.0 - saturate(nl.y)) * 0.35 * alb * L.keyCol * max(L.key.y, 0.0);
+    // Light bounced into a hollow comes in through its mouth; an underside stays well under the lit top of its slab.
+    bounce *= mix(1.0, 0.1 + 0.5 * sv, ov);
     // High sun: risers sit in cooler shade so terraces keep their modelling at noon.
     float3 riserShade = mix(float3(1.0), float3(0.82, 0.86, 0.95),
-                            (h.normal.y == 0 ? 1.0 - saturate(nl.y) : 0.0) * smoothstep(0.3, 0.6, L.key.y) * smoothstep(1.5, 4.0, drop));
+                            (h.normal.y == 0 ? 1.0 - saturate(nl.y) : 0.0) * smoothstep(0.3, 0.6, L.key.y) * smoothstep(1.5, 4.0, drop) * (1.0 - ov));
     // Night: no pure-black riser feet; a faint indigo ambient keeps the steps readable as stone, not holes.
     ao = mix(ao, 1.0, 0.25 * L.night);
-    skyFill += float3(0.09, 0.12, 0.25) * L.night;
+    // Night: a cave mouth stays a dark hole.
+    skyFill += float3(0.09, 0.12, 0.25) * L.night * mix(1.0, 0.3 + 0.7 * sv, roofW);
     // Deep in the night, land sits below the sky so night reads as night (won night A/B): moonlight is graded
     // to a cool silver and the fill to a deep blue well under it, so slopes facing the moon still model. In
     // early night it is already dark and keeps its contours (darkening lost the dusk A/B).
@@ -3509,6 +3632,22 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
 
     // Debug map view: 11 level 4 (+-10k tall, +-16k wide), 12 level 2, 13 level 1; hillshade, height ramp, 100-voxel
     // contours, 2k grid, yellow 10k lines, magenta world origin, red camera.
+    // Debug: the 1-voxel map from above, 0.25 voxel per pixel around the camera: heights shaded, gaps magenta (darker with
+    // more gaps), the camera red.
+    if (f.misc2.z == 16) {
+        float2 uv = in.uv - 0.5;
+        uv.x *= f.resolution.x / f.resolution.y;
+        int2 c = int2(floor(f.camPos.xz + uv * 280.0));
+        float4 col = hm.read(uint2(clamp(c, int2(0), int2(f.mapInfo.z - 1))));
+        float hx = hm.read(uint2(clamp(c + int2(1, 0), int2(0), int2(f.mapInfo.z - 1)))).r;
+        float3 cl = float3(0.3 + 0.5 * fract(col.r / 50.0)) * (hx > col.r ? 0.7 : 1.0);
+        if (col.b > col.g) {
+            float4 e = extraGaps(gx.read(uint2(clamp(c, int2(0), int2(f.mapInfo.z - 1)))));
+            cl = float3(1, 0, 1) * (e.y > e.x ? 0.6 : 1.0) * (0.6 + 0.4 * fract(col.b / 20.0));
+        }
+        if (length(uv) < 0.006) cl = float3(1, 0, 0);
+        return float4(cl * cl, 1);
+    }
     if (f.misc2.z >= 11 && f.misc2.z <= 13) {
         int k = f.misc2.z == 11 ? 4 : f.misc2.z == 12 ? 2 : 1;
         float cs = float(1 << k);
@@ -3527,6 +3666,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
                  : h0 < 1200 ? mix(float3(0.5, 0.35, 0.3), float3(0.6, 0.6, 0.65), (h0 - 600.0) / 600.0) : float3(0.95);
         c *= 0.35 + 0.9 * lit;
         if (floor(h0 / 100.0) != floor(hx / 100.0) || floor(h0 / 100.0) != floor(hz / 100.0)) c *= 0.6;
+        // Gaps (overhangs, caves, bridges) in magenta.
+        if (k <= GAP_LEVELS) { float2 gp = cg.read(uint2(ci & (COARSE_N - 1)), uint(k - 1)).rg; if (gp.y > gp.x) c = float3(1, 0, 1); }
         float2 wc = cell * cs;
         float px = 1300.0 * cs / f.resolution.y;
         float2 g1 = abs(wc - 2000.0 * floor(wc / 2000.0 + 0.5)), g2 = abs(wc - 10000.0 * floor(wc / 10000.0 + 0.5));
@@ -3542,6 +3683,12 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     if (f.shadow.z == 0.0 || !aboveHorizon(horizon, d)) h = trace(x.tr, o, d, x.tr.rmax, primaryIters, 0);
     if (f.misc2.z == 1) return float4(float(h.iters) / float(primaryIters), h.hit ? 0.3 : 0.0, h.iters >= primaryIters - 1 ? 1 : 0, 1);
     if (f.misc2.z == 5) return float4(skyColor(d, x.L, false, x.seed, x.time), 1);
+    // Debug: geometry by face (white tops, magenta undersides, orange x sides, green z sides), 10-voxel height ticks.
+    if (f.misc2.z == 15) {
+        if (!h.hit) return float4(0.3, 0.5, 0.9, 1e4);
+        float3 nc = h.normal.y > 0 ? float3(0.9) : h.normal.y < 0 ? float3(0.9, 0.1, 0.9) : h.normal.x != 0 ? float3(0.9, 0.5, 0.2) : float3(0.2, 0.7, 0.3);
+        return float4(nc * (h.voxel.y % 10 == 0 ? 0.6 : 1.0) / (1.0 + h.t / 400.0), h.t);
+    }
     if (f.misc2.z == 6) return float4(skyWithClouds(x, o, d).rgb, 1);
 
     float tw = d.y < 0 ? (SEA - o.y) / d.y : 1e9;
