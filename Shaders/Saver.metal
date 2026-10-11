@@ -925,8 +925,9 @@ static void giantIntervals(thread const Giant& g, float2 wq, float gl, int lod, 
         }
     }
     // Canopy pads: broad, flat-bottomed clouds of leaves with lumpy tops, the tiers of the crown; vines hang from them.
-    float lump = 0.6 * perlin2(wq / 13.0, g.h + 20u) + 0.4 * perlin2(wq / 5.5, g.h + 21u);
-    float sag = perlin2(wq / 7.0, g.h + 22u);
+    // Fine terms break the clumps' smooth profiles, which column by column read as ribs.
+    float lump = 0.6 * perlin2(wq / 13.0, g.h + 20u) + 0.4 * perlin2(wq / 5.5, g.h + 21u) + 0.35 * perlin2(wq / 2.3, g.h + 25u);
+    float sag = perlin2(wq / 7.0, g.h + 22u) + 0.6 * perlin2(wq / 2.7 + 3.1, g.h + 26u);
     float padBot = 1e9;
     for (int j = 0; j < GIANT_PADS; j++) {
         float T;
@@ -2502,7 +2503,7 @@ constant int GAP_LEVELS = 4;
 // Of those, levels 1...GAP2_LEVELS also carry a second gap below it (a giant's crown: the air under it, with the gap
 // between its tiers as the principal one); further out a giant keeps only the air under its crown. Must match
 // Clipmap.gap2Levels in Sources/Renderer.swift.
-constant int GAP2_LEVELS = 2;
+constant int GAP2_LEVELS = 1;
 
 static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantRec* giants, thread float2& g2, thread float& depth) {
     g2 = 0.0;
@@ -3406,7 +3407,9 @@ static Surface giantSurface(thread const Terrain& tr, Surface s, int k, int3 v, 
         uint th = hash3i(tk, seed + 94u);
         float tex = hashf(th) < 0.35 ? 0.72 : 1.0 + 0.12 * hashf(pcg(th));
         a *= mix(tex, 0.92, smoothstep(0.015, 0.04, fp));
-        a *= mix(0.62, 1.18, saturate((y - runLo) / max(runHi - runLo - 1.0, 1.0)));
+        // Darker with depth under the run's top: a clump's side darkens down from its crest the way the dome turns
+        // from the sky, rather than by each column's own span (which striped the clumps column by column).
+        a *= mix(1.15, 0.62, saturate((runHi - 1.0 - y) / 14.0));
         s.mat = 1;
         s.canopy = 1.0;
     } else if (gm == GM_VINE) {

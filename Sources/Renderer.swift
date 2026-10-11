@@ -323,6 +323,8 @@ final class World {
             advance(pieces: 1, wait: false)
         } else if drift > World.recentre && !pending {
             pending = true
+            // The new map's giant table starts from this one's, so placeGiants fills only the cells that changed.
+            memcpy(buffers[1 - active].giants.contents(), cur.giants.contents(), cur.giants.length)
             job = (1 - active, o, 0, CACurrentMediaTime())
             advance(pieces: 1, wait: false)
         }
@@ -611,7 +613,7 @@ final class Clipmap {
     // Must match GAP_LEVELS in Shaders/Saver.metal: levels 1...gapLevels carry one gap per column.
     static let gapLevels = 4
     // Must match GAP2_LEVELS: levels 1...gap2Levels also carry a second gap (giants' crowns).
-    static let gap2Levels = 2
+    static let gap2Levels = 1
     let gaps: MTLTexture     // rg16Float array, levels 1...gapLevels: the column's gap (lo, hi)
     let gaps2: MTLTexture    // rg16Float array, levels 1...gap2Levels: a second gap below it (a giant crown's air)
     private let gapViews: [MTLTexture]
@@ -1000,6 +1002,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         wildlife.heightAt = { [unowned world] x, z in world.height(x: x, z: z) }
         wildlife.giantsAt = { [unowned world] in world.giants }
         world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
+        if camera.startNearGiant() { world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z)) }
         // Placing the camera reads only the far heights, which level 3 holds: the CPU waits for that level alone.
         refreshFar(only: 3)
         camera.placeAtStart()
@@ -1675,8 +1678,9 @@ enum Snapshot {
                 prevY = p.y
                 if i % 12 == 0 {
                     fflush(stdout)
-                    print(String(format: "flight t=%d pos=(%.0f,%.0f) y=%.0f ground=%.0f wall=%.2f far=%.0f yaw=%.0f", i, p.x, p.z, p.y, g, wall,
-                                 r.farHeight(x: p.x + sin(r.camera.yaw) * 600, z: p.z + cos(r.camera.yaw) * 600) ?? -1, r.camera.yaw * 180 / .pi))
+                    let nearG = r.world.giants.map { simd_length(SIMD2(p.x, p.z) - $0.pos) }.min() ?? -1
+                    print(String(format: "flight t=%d pos=(%.0f,%.0f) y=%.0f ground=%.0f wall=%.2f far=%.0f yaw=%.0f giant=%.0f", i, p.x, p.z, p.y, g, wall,
+                                 r.farHeight(x: p.x + sin(r.camera.yaw) * 600, z: p.z + cos(r.camera.yaw) * 600) ?? -1, r.camera.yaw * 180 / .pi, nearG))
                 }
                 if i % 60 == 0 {
                     for _ in 0..<4 {

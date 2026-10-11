@@ -243,7 +243,8 @@ final class FlightCamera {
         var best = 0.0
         for g in world.giants {
             let v = g.pos - p, d = simd_length(v)
-            guard d > 300, d < 9000 else { continue }
+            // Not once close: framing it from a few hundred off would circle the flight in under its crown.
+            guard d > 700, d < 9000 else { continue }
             let off = abs(FlightCamera.angleDiff(atan2(v.x, v.y), heading))
             if d < 3500 {
                 // Framed to one side, so the flight passes it a few hundred voxels off.
@@ -254,6 +255,21 @@ final class FlightCamera {
             }
         }
         return best
+    }
+
+    // A flight starting over 3.5k from every giant moves to 2.5k short of the nearest (on the line from it to the start, so
+    // the start stays as near its own country as it can), facing it: it reaches the landmark within minutes. True if
+    // it moved. world.giants is the table round the start's map (+-18k).
+    func startNearGiant() -> Bool {
+        let p = SIMD2(position.x, position.z)
+        guard let g = world.giants.min(by: { simd_length($0.pos - p) < simd_length($1.pos - p) }) else { return false }
+        let d = simd_length(g.pos - p)
+        guard d > 3500 else { return false }
+        let q = g.pos + (p - g.pos) / d * 2500
+        position.x = q.x
+        position.z = q.y
+        yaw = atan2(g.pos.x - q.x, g.pos.y - q.y) + 0.35
+        return true
     }
 
     func placeAtStart() {
@@ -383,13 +399,12 @@ final class FlightCamera {
         for g in world.giants where g.top > position.y - 25 {
             let v = g.pos - p
             let along = simd_dot(v, fwdFlat), across = v.x * fwdFlat.y - v.y * fwdFlat.x
-            let clear = GiantInfo.reach + 70
+            let clear = GiantInfo.reach + 140
             guard along > -clear, along < 1000, abs(across) < clear else { continue }
             let w = (1 - max(along, 0) / 1000) * (1 - abs(across) / clear)
             steerGiant += (across >= 0 ? -1 : 1) * 0.09 * min(1, 2.5 * w)
         }
-        // The nearest giant not yet passed, up to 12k off, draws the heading gently toward a point beside it; one
-        // passed within 1500 (or 600 behind) is done with.
+        // The nearest giant not yet reached, up to 12k off, draws the heading gently toward a point beside it.
         var steerPilgrim = 0.0
         if time >= nextPilgrim {
             nextPilgrim = time + 2
@@ -399,7 +414,8 @@ final class FlightCamera {
                 let key = SIMD2(Int(g.pos.x.rounded()), Int(g.pos.y.rounded()))
                 if visitedGiants.contains(key) { continue }
                 let v = g.pos - p, d = simd_length(v)
-                if d < 600 || (d < 1500 && simd_dot(v, fwdFlat) < 0) { visitedGiants.insert(key); continue }
+                // Within 1500 it is reached: framing it and passing beside it are the shots' and the steering's.
+                if d < 1500 { visitedGiants.insert(key); continue }
                 if d < best { best = d; pilgrim = g.pos }
             }
         }
@@ -408,7 +424,12 @@ final class FlightCamera {
             let side = (v.x * fwdFlat.y - v.y * fwdFlat.x) >= 0 ? 1.0 : -1.0
             let n = simd_normalize(SIMD2(-v.y, v.x)) * side
             let aim = g + n * (GiantInfo.reach + 260)
-            steerPilgrim = sin(FlightCamera.angleDiff(atan2(aim.x - p.x, aim.y - p.y), yaw)) * 0.035
+            let bearing = atan2(aim.x - p.x, aim.y - p.y)
+            // Not over a massif: where the land toward it rises well above the flight, the way round is the routing's.
+            var rise = 0.0
+            for d in [300.0, 600.0, 900.0] { rise = max(rise, hFar(p.x + sin(bearing) * d, p.y + cos(bearing) * d) - position.y) }
+            // Nor while a slope fills the frame: getting clear of it comes first.
+            steerPilgrim = sin(FlightCamera.angleDiff(bearing, yaw)) * 0.06 * min(max((60 - rise) / 40, 0), 1) * (1 - hug)
         }
         let urgency = max(min(blockedAhead / 20, 1), 0.7 * crowd)
         avoidRate = routeYaw.map { sin(FlightCamera.angleDiff($0, yaw)) * 0.15 * urgency } ?? 0
