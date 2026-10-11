@@ -1070,6 +1070,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         // Placing the camera reads only the far heights, which level 3 holds: the CPU waits for that level alone.
         refreshFar(only: 3)
         camera.placeAtStart()
+        // A start moved off the massifs needs its own map now: on the first frame it would wait behind the coarse rings.
+        world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
         // The other rings are built ahead of the first frame on the same queue, which orders that frame after them;
         // nothing waits on the CPU. Afterwards only strips are rewritten.
         if let cb = queue.makeCommandBuffer() {
