@@ -797,7 +797,7 @@ static inline float towerErosion(Tower T, TowerPlan P, float R, float y, uint se
 // The talus of fallen masonry heaped against the base at plan P (from the base's axis), world wf, deepest and widest on
 // the side the crown fell to, lumpy, gone by 0.4 R0 out: x its height over the slope from the outer plinth's top at the
 // wall down to the ground y out, y its share of the way to the wall.
-static inline float2 towerTalus(Tower T, TowerPlan P, float2 wf, uint seed) {
+static inline float2 towerTalus(Tower T, TowerPlan P, float2 wf, int s, uint seed) {
     float e = P.reff - T.R0;
     if (e < 0.0) return 0.0;
     float fall = 0.5 + 0.5 * cos(P.a - T.th0);
@@ -805,7 +805,8 @@ static inline float2 towerTalus(Tower T, TowerPlan P, float2 wf, uint seed) {
     float f = saturate(1.0 - e / L);
     if (f <= 0.0) return 0.0;
     float amp = T.R0 * (0.08 + 0.14 * fall) * saturate(0.55 + 0.9 * perlin2(P.dir * 2.3, seed + 517u));
-    float lump = 4.0 * perlin2(wf / 8.0, seed + 519u) + 1.5 * perlin2(wf / 3.5, seed + 524u);
+    // Octaves finer than a coarse ring's columns would alias there, and its talus differ from the finer ring's.
+    float lump = (s < 8 ? 4.0 * perlin2(wf / 8.0, seed + 519u) : 0.0) + (s < 4 ? 1.5 * perlin2(wf / 3.5, seed + 524u) : 0.0);
     return float2(max(amp * f * sqrt(f) + lump * saturate(f * 3.0), 0.0), f);
 }
 
@@ -869,7 +870,7 @@ static inline Col towerShape(Col col, Tower T, float2 wf, int s, uint seed) {
     }
     if (m < 0) {
         float root = s < 4 ? towerRootH(T, P0, seed) : 0.0;
-        float2 tal = towerTalus(T, P0, wf, seed);
+        float2 tal = towerTalus(T, P0, wf, s, seed);
         col.h = max(col.h + root, floor(mix(min(ground, T.Hb + 3.0), T.Hb + 3.0, tal.y) + tal.x));
         return col;
     }
@@ -890,13 +891,13 @@ static inline Col towerShape(Col col, Tower T, float2 wf, int s, uint seed) {
     if (hashf(ch) < 0.65) {
         float hf = Rm * tan(0.5 * seg);
         float drop = min((H - y0) * (0.25 + 0.5 * hashf(pcg(ch + 1u))), 20.0 + 50.0 * hashf(pcg(ch + 2u)));
-        float dc = hf - abs(Pm.t) + 7.0 * perlin2(wf / 7.0, seed + 523u) + 0.3 * drop * perlin2(wf / 13.0, seed + 530u);
+        float dc = hf - abs(Pm.t) + (s < 8 ? 7.0 * perlin2(wf / 7.0, seed + 523u) : 0.0) + 0.3 * drop * perlin2(wf / 13.0, seed + 530u);
         if (dc < hf * (0.25 + 0.45 * hashf(pcg(ch))))
             H = max(y0, H - floor(drop / 5.0) * 5.0);
     }
     // The parapet along each rim broken down a course or three, in runs of a few columns.
     if (!shell && wallIn < 8.0 + 0.05 * T.R0)
-        H = max(y0, H - 5.0 * floor(3.5 * saturate(perlin2(wf / 11.0, seed + 531u) + 0.6 * perlin2(wf / 4.0, seed + 532u) + 0.15)));
+        H = max(y0, H - 5.0 * floor(3.5 * saturate(perlin2(wf / 11.0, seed + 531u) + (s < 4 ? 0.6 * perlin2(wf / 4.0, seed + 532u) : 0.0) + 0.15)));
     // A great collapse on most towers: a wedge of the upper storeys fallen on the crown's side, its floor broken in
     // courses, the outer skin gone deeper than the core.
     uint hc = pcg(T.h + 30u);
@@ -928,7 +929,7 @@ static inline Col towerShape(Col col, Tower T, float2 wf, int s, uint seed) {
         float L = max(8.0, 0.45 * T.R0 * (towerTierScale(T, m) - towerTierScale(T, m + 1)));
         float f = saturate(1.0 - out[m + 1] / L);
         if (f > 0.0)
-            H += floor((3.0 + 0.1 * T.R0) * f * sqrt(f) * saturate(0.35 + perlin2(wf / 19.0, seed + 527u) + 0.4 * perlin2(wf / 7.0, seed + 528u)));
+            H += floor((3.0 + 0.1 * T.R0) * f * sqrt(f) * saturate(0.35 + perlin2(wf / 19.0, seed + 527u) + (s < 8 ? 0.4 * perlin2(wf / 7.0, seed + 528u) : 0.0)));
     }
     float gaps[6] = { 0, 0, 0, 0, 0, 0 };
     int ng = 0;
@@ -3911,7 +3912,7 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
         Tower T = towerFromRec(R);
         TowerPlan P0 = towerPlan(T, dc0);
         float inner = R0 * (1.2 + 0.08 * perlin2(P0.dir * 3.7, seed + 520u));
-        root = wy > Hb + max(reff < inner ? 6.0 : 3.0, 3.0 + towerTalus(T, P0, w + 0.5 * cs, seed).x) + 0.5;
+        root = wy > Hb + max(reff < inner ? 6.0 : 3.0, 3.0 + towerTalus(T, P0, w + 0.5 * cs, 1, seed).x) + 0.5;
     }
     // A face of the plan's polygon is a plane: its voxel jogs shade as that plane, and every detail fades with the
     // footprint across the plane, not across the jog's own face, or the jogs' two orientations fade apart in stripes.
@@ -3927,7 +3928,7 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
     m *= (1.0 + 0.12 * perlin2(float2(along / 37.0, wy / 29.0), seed + 531u)) * (1.0 + 0.2 * perlin2(float2(along / 130.0, wy / 95.0), seed + 546u));
     // Age darkens the foot and the wet country's stone, and grime lies over it in broad blotches.
     m *= mix(1.0, 0.72, smoothstep(Hb + 120.0, Hb, wy) * (0.4 + 0.6 * wet));
-    m *= mix(0.72, 1.0, smoothstep(-0.35, 0.25, perlin2(float2(along / 47.0, wy / 33.0), seed + 529u) + 0.4 * perlin2(float2(along, wy) / 15.0, seed + 538u)));
+    m *= mix(0.78, 1.0, smoothstep(-0.35, 0.25, perlin2(float2(along / 30.0, wy / 70.0), seed + 529u) + 0.4 * perlin2(float2(along / 10.0, wy / 25.0), seed + 538u)));
     // Courses: each storey a different tone, a voxel block's own tone close up; the fallen masonry off the stages more so.
     // (Far off, storey bands read as strata.)
     if (fpA < 0.6) {
