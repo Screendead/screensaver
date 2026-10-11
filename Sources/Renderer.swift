@@ -995,9 +995,10 @@ final class Clipmap {
 final class Renderer: NSObject, MTKViewDelegate {
     let device: MTLDevice
     let queue: MTLCommandQueue
-    // sceneFragment specialised by [towers][bands]: function constant 1 compiles the towers in (only frames with one in
-    // view need them), constant 0 the band test in the DDA (BAND_FC, only while a giant or the jungle is near). Each
-    // costs every pixel a little even unused.
+    // sceneFragment specialised by [towers][none, bands, bands and islands]: function constant 1 compiles the towers in
+    // (only frames with one in view need them), constant 0 the band test in the DDA (BAND_FC, only while a giant or the
+    // jungle is near, or an island in view), constant 2 the islands' shade and sky occlusion (ISLE_FC, an island within
+    // isleShadeReach). Each costs every pixel a little even unused.
     let scenePipelines: [[MTLRenderPipelineState]]
     let postPipeline: MTLRenderPipelineState
     let taaPipeline: MTLRenderPipelineState
@@ -1052,6 +1053,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     private static let lampReach: [Double] = [1, 20, 16, 7, 10, 24, 22, 6]   // LAMP_R in Shaders/Saver.metal
     private var tileMasks = [UInt32](repeating: 0, count: 16 * 16)
     static let ditherCells = 864.0
+    // Islands farther than this need no band test (past it the coarsest rings' columns are wide enough to walk under
+    // them), shade without their sky occlusion and cast no island shade (only a long dusk shadow reaches back).
+    static let isleShadeReach = 4000.0
     private var historyIndex = 0
     private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
     let world: World
@@ -1111,17 +1115,20 @@ final class Renderer: NSObject, MTKViewDelegate {
         taa.vertexFunction = lib.makeFunction(name: "fullscreenVertex")
         taa.fragmentFunction = lib.makeFunction(name: "taaFragment")
         taa.colorAttachments[0].pixelFormat = .rgba16Float
-        func sceneVariant(towers: Bool, bands: Bool) -> MTLRenderPipelineDescriptor {
+        func sceneVariant(towers: Bool, bands: Bool, isles: Bool) -> MTLRenderPipelineDescriptor {
             let fc = MTLFunctionConstantValues()
-            var b = bands, t = towers
+            var b = bands, t = towers, i = isles
             fc.setConstantValue(&b, type: .bool, index: 0)
             fc.setConstantValue(&t, type: .bool, index: 1)
+            fc.setConstantValue(&i, type: .bool, index: 2)
             let d = scene.copy() as! MTLRenderPipelineDescriptor
             d.fragmentFunction = try? lib.makeFunction(name: "sceneFragment", constantValues: fc)
             return d
         }
-        let sceneStates = [false, true].map { t in [false, true].compactMap { b in try? device.makeRenderPipelineState(descriptor: sceneVariant(towers: t, bands: b)) } }
-        guard sceneStates.allSatisfy({ $0.count == 2 }),
+        let sceneStates = [false, true].map { t in
+            [(false, false), (true, false), (true, true)].compactMap { v in try? device.makeRenderPipelineState(descriptor: sceneVariant(towers: t, bands: v.0, isles: v.1)) }
+        }
+        guard sceneStates.allSatisfy({ $0.count == 3 }),
               let tp = try? device.makeRenderPipelineState(descriptor: taa),
               let pp = try? device.makeRenderPipelineState(descriptor: post),
               let cf = lib.makeFunction(name: "cloudField").flatMap({ try? device.makeComputePipelineState(function: $0) }),
@@ -1454,15 +1461,16 @@ final class Renderer: NSObject, MTKViewDelegate {
         if let enc = cb.makeRenderCommandEncoder(descriptor: sp) {
             // The canopies' band test only skips through cells inside the 1-voxel map's unmorphed disc (trace in
             // Shaders/Saver.metal), so it is compiled in only while bands lie that close; islands' bands hold on every
-            // ring, so an island anywhere in view needs it.
+            // ring, needed out to isleShadeReach.
             let cam2 = SIMD2(camera.position.x, camera.position.z)
-            let isles = world.islesNear(cam2, radius: edgeRadius)
-            let bands = isles || world.bandsNear(cam2, radius: Clipmap.handoff(0) + 40)
-            f.shadow.w = isles ? 1 : 0
+            let isles = world.islesNear(cam2, radius: Renderer.isleShadeReach)
+            let bands = (isles || world.bandsNear(cam2, radius: Clipmap.handoff(0) + 40)) && Renderer.profile != "noband"
+            let shade = bands && isles
+            f.shadow.w = shade ? 1 : 0
             var isleTable = Islands.table(world.isles, near: cam2, within: 3000)
             let tb = camera.basis, tanV = tan(25.0 * .pi / 180) * 1.05
             towers.frameTable(eye: camera.position, fwd: tb.fwd, right: tb.right, up: tb.up, tanH: tanV * Double(aspect), tanV: tanV)
-            enc.setRenderPipelineState(scenePipelines[towers.tableCount > 0 ? 1 : 0][bands && Renderer.profile != "noband" ? 1 : 0])
+            enc.setRenderPipelineState(scenePipelines[towers.tableCount > 0 ? 1 : 0][shade ? 2 : bands ? 1 : 0])
             enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
             enc.setFragmentBuffer(birdBuf, offset: 0, index: 5)
             enc.setFragmentBuffer(horizonBuf, offset: 0, index: 6)

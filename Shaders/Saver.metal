@@ -422,6 +422,8 @@ struct Col { float h, gl, gh, lo1, hi1, lo2, hi2; bool carved; bool island; };
 constant uint GAP_BITS = 0x7ffu;
 constant uint GAP_CARVED = 1u;
 constant uint GAP_ISLAND = 4u;
+// An island's air is at least this tall on the 1-voxel map (its keel clears the ground by 60); no other rock gap is.
+constant float ISLE_AIR = 59.0;
 
 static inline uint4 packGaps(Col c) {
     uint flags = (c.carved ? GAP_CARVED : 0u) | (c.island ? GAP_ISLAND : 0u);
@@ -1439,6 +1441,9 @@ constant uint GAP_GIANT = 2u;
 // every pipeline built without the constant.
 constant bool BAND_FC [[function_constant(0)]];
 constant bool BAND_SKIP = is_function_constant_defined(BAND_FC) && BAND_FC;
+// The islands' shade and sky occlusion: compiled in only while an island is near (Renderer picks the pipeline).
+constant bool ISLE_FC [[function_constant(2)]];
+constant bool SCENE_ISLES = is_function_constant_defined(ISLE_FC) && ISLE_FC;
 constant int GIANT_LIMBS = 12;
 constant int GIANT_FLANGES = 9;
 constant int GM_WOOD = 0, GM_LEAF = 1, GM_VINE = 2;
@@ -2519,7 +2524,7 @@ kernel void bandTop(texture2d<float, access::read> src [[texture(0)]],
     bool any = false;
     for (int i = 0; i < 4; i++) {
         float4 col = src.read(cs[i]);
-        ig[i] = col.a == 0.0 && col.b > col.g && (gapFlags(gx.read(cs[i])) & GAP_ISLAND) != 0u;
+        ig[i] = col.a == 0.0 && col.b - col.g >= ISLE_AIR;
         any = any || ig[i];
     }
     if (any) {
@@ -4460,9 +4465,10 @@ static inline float maxAt(thread const Terrain& tr, int k, int2 mc, int m) {
     return abs(tr.ch.read(uint2(mc & ((COARSE_N >> m) - 1)), uint(k - 1), uint(m)).r);
 }
 
-// Whether a column's principal gap is an island's air: on the 1-voxel map its flag, further out its floor's sign.
-static inline bool isleGapL(thread const Terrain& tr, int k, int2 c) {
-    if (k == 0) return (gapFlags(tr.gx.read(uint2(clamp(c, int2(0), int2(tr.size - 1))))) & GAP_ISLAND) != 0u;
+// Whether column c's principal gap (col: columnL) is an island's air: on the 1-voxel map a rock gap at least ISLE_AIR
+// tall (no other gap is), further out its floor's sign.
+static inline bool isleGapL(thread const Terrain& tr, int k, int2 c, float4 col) {
+    if (k == 0) return col.a == 0.0 && col.z - col.y >= ISLE_AIR;
     if (k > GAP_LEVELS) return false;
     return tr.cg.read(uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1)), uint(k - 1)).r < 0.0;
 }
@@ -4483,7 +4489,7 @@ static inline float4 columnL(thread const Terrain& tr, int k, int2 c) {
 static inline float groundL(thread const Terrain& tr, int k, int2 c, float y) {
     if (k == 0) {
         float4 col = tr.hm.read(uint2(clamp(c, int2(0), int2(tr.size - 1))), 0);
-        if (col.a == 0.0 && col.b > col.g && y < col.b && isleGapL(tr, 0, c)) return col.g;
+        if (y < col.b && col.a == 0.0 && col.b - col.g >= ISLE_AIR) return col.g;
         return col.a > 0.0 ? col.g : col.r;
     }
     uint2 t = uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1));
@@ -4572,7 +4578,7 @@ static inline float3 columnMorphW(thread const Terrain& tr, int k, int2 c, float
             wh = step(0.5, w);
         float2 pg = parentGapS(tr, k, c);
         bool cv = col.z > col.y;
-        bool isl = pg.x < 0.0 || (cv && c4.a == 0.0 && isleGapL(tr, k, c));
+        bool isl = pg.x < 0.0 || (cv && isleGapL(tr, k, c, c4));
         pg.x = abs(pg.x);
         bool pv = pg.y > pg.x;
         if (isl) {
@@ -5375,7 +5381,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     s.canopy = tree ? 0.55 : 1.0;
     s.H = H;
     // An island's body: its top is meadow, coloured as the lowland under it is (its height would read as upland rock).
-    bool isleCol = !tree && !built && !giant && col.z > col.y && isleGapL(tr, k, v.xz);
+    bool isleCol = !tree && !built && !giant && col.z > col.y && isleGapL(tr, k, v.xz, col4);
     float Hc = isleCol && float(v.y) >= col.z ? col.y + 4.0 : H;
     bool isleRoot = false;
     s.isleUnder = isleCol && float(v.y) < col.z;
@@ -5391,10 +5397,10 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         hz0 = a2.a > 0.0 ? a2.g : a2.r; hz1 = a3.a > 0.0 ? a3.g : a3.r;
         // Under an island's edge the ground sees the island's own ground beside it, not a cliff to its top.
         float vy = min(float(v.y), s.gy);
-        if (a0.a == 0.0 && a0.b > a0.g && vy < a0.b && isleGapL(tr, 0, v.xz + int2(-1, 0))) hx0 = a0.g;
-        if (a1.a == 0.0 && a1.b > a1.g && vy < a1.b && isleGapL(tr, 0, v.xz + int2(1, 0))) hx1 = a1.g;
-        if (a2.a == 0.0 && a2.b > a2.g && vy < a2.b && isleGapL(tr, 0, v.xz + int2(0, -1))) hz0 = a2.g;
-        if (a3.a == 0.0 && a3.b > a3.g && vy < a3.b && isleGapL(tr, 0, v.xz + int2(0, 1))) hz1 = a3.g;
+        if (vy < a0.b && a0.a == 0.0 && a0.b - a0.g >= ISLE_AIR) hx0 = a0.g;
+        if (vy < a1.b && a1.a == 0.0 && a1.b - a1.g >= ISLE_AIR) hx1 = a1.g;
+        if (vy < a2.b && a2.a == 0.0 && a2.b - a2.g >= ISLE_AIR) hz0 = a2.g;
+        if (vy < a3.b && a3.a == 0.0 && a3.b - a3.g >= ISLE_AIR) hz1 = a3.g;
         // A root hangs well below a neighbour's underside (a keel's beds step by seven at most).
         if (isleCol && vy >= col.z) {
             float hang = max(max(a0.a == 0.0 && a0.b > a0.g ? a0.b : 0.0, a1.a == 0.0 && a1.b > a1.g ? a1.b : 0.0),
@@ -5412,9 +5418,8 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         // Rock gaps only: canopies and buildings hold theirs with a non-zero alpha, and an island's air is no roof.
         s.gapSpan = float2(1e9, -1e9);
         float4 cs5[5] = { col4, a0, a1, a2, a3 };
-        int2 o5[5] = { int2(0), int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1) };
         for (int i = 0; i < 5; i++)
-            if (cs5[i].b > cs5[i].g && cs5[i].a == 0.0 && (i == 0 ? !isleCol : !isleGapL(tr, 0, v.xz + o5[i])))
+            if (cs5[i].b > cs5[i].g && cs5[i].a == 0.0 && cs5[i].b - cs5[i].g < ISLE_AIR)
                 s.gapSpan = float2(min(s.gapSpan.x, cs5[i].g), max(s.gapSpan.y, cs5[i].b));
         s.gapNear = s.gapSpan.y > s.gapSpan.x;
         frontCol = n.x < 0 ? a0 : n.x > 0 ? a1 : n.z < 0 ? a2 : a3;
@@ -5424,7 +5429,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         hz0 = groundL(tr, k, v.xz + int2(0, -1), vy); hz1 = groundL(tr, k, v.xz + int2(0, 1), vy);
         float4 fr = n.y == 0 ? columnL(tr, k, v.xz + n.xz) : float4(0);
         frontCol = fr;
-        bool cg0 = col.z > col.y && !isleCol, fg = fr.z > fr.y && !isleGapL(tr, k, v.xz + n.xz);
+        bool cg0 = col.z > col.y && !isleCol, fg = fr.z > fr.y && !isleGapL(tr, k, v.xz + n.xz, fr);
         s.gapNear = cg0 || fg;
         s.gapSpan = float2(min(cg0 ? col.y : 1e9, fg ? fr.y : 1e9), max(cg0 ? col.z : -1e9, fg ? fr.z : -1e9));
     }
@@ -5464,7 +5469,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     // An island's air is no roof.
     bool underGap = !tree && !built && !giant && ((col.z > col.y && float(v.y) < col.z && !isleCol)
                     || (n.y == 0 && frontCol.a == 0.0 && frontCol.b > frontCol.g && float(v.y) >= frontCol.g && float(v.y) < frontCol.b
-                        && !isleGapL(tr, k, v.xz + n.xz)));
+                        && !isleGapL(tr, k, v.xz + n.xz, frontCol)));
 
     float salt = saltAmount(c);
     float rimW = smoothstep(0.05, 0.4, salt);
@@ -6215,7 +6220,7 @@ static float shadowMapLit(thread const Ctx& x, float3 p, bool all) {
     float S = all ? Sn.y : Sn.x;
     float pen = mix(6.0, 14.0, bn);
     float lit = smoothstep(S - pen, S + pen, p.y);
-    if (x.isleShadows) {
+    if (SCENE_ISLES && x.isleShadows) {
         float li = isleShadeLit(x.shadowNear, w, SHADOW_CELL, p.y, pen);
         if (bn > 0.0) li = mix(li, isleShadeLit(x.shadowFar, w, 4.0 * SHADOW_CELL, p.y, pen), bn);
         lit = min(lit, li);
@@ -6267,7 +6272,7 @@ static float stairShadow(thread const Terrain& tr, int k, float2 p, float y, flo
 static inline bool hollowAt(thread const Terrain& tr, int k, int2 c, float y) {
     float4 col = columnL(tr, k, c);
     if (col.z <= col.y || col.a != 0.0) return false;
-    if (y >= col.y && y < col.z) return !isleGapL(tr, k, c);
+    if (y >= col.y && y < col.z) return !isleGapL(tr, k, c, col);
     if (k > 0 || y >= col.y) return false;
     float4 e = extraGaps(tr.gx.read(uint2(clamp(c, int2(0), int2(tr.size - 1)))));
     return (y >= e.x && y < e.y) || (y >= e.z && y < e.w);
@@ -6278,10 +6283,11 @@ constant float ROOF_SKY = 0.55;
 
 // hollowAt as the trace sees it: the column morphed toward the next level's.
 static inline bool hollowAtMorph(thread const Terrain& tr, int k, int2 c, float y) {
-    if (columnL(tr, k, c).a != 0.0) return false;
+    float4 c4 = columnL(tr, k, c);
+    if (c4.a != 0.0) return false;
     float3 col = columnMorph(tr, k, c);
     if (col.z <= col.y) return false;
-    if (y >= col.y && y < col.z) return !isleGapL(tr, k, c) && parentGapS(tr, k, c).x >= 0.0;
+    if (y >= col.y && y < col.z) return !isleGapL(tr, k, c, c4) && parentGapS(tr, k, c).x >= 0.0;
     if (k > 0 || y >= col.y) return false;
     float4 e = extraGapsMorph(tr, c);
     return (y >= e.x && y < e.y) || (y >= e.z && y < e.w);
@@ -6861,7 +6867,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // only six voxels out, so in a shelter it reads the roof all round and varies column by column with the back wall's
     // jogs, striping it.
     skyFill *= mix(1.0 - mix(0.55, 0.85, hiSun) * (1.0 - sv), ROOF_SKY, roofW);
-    if (x.isles->n.x > 0) skyFill *= 1.0 - 0.85 * isleSkyOcc(x, p);
+    if (SCENE_ISLES && x.isles->n.x > 0) skyFill *= 1.0 - 0.85 * isleSkyOcc(x, p);
     // A wall sees half the dome, and the half it sees is the dimmer horizon side; without this a riser in shade
     // outshines the sunlit tread above it under a low sun.
     skyFill *= built ? 0.7 + 0.3 * saturate(nl.y) : 0.5 + 0.5 * saturate(nl.y);
