@@ -2169,6 +2169,8 @@ struct Surface {
     float riser;    // drop below this face, for side faces
     float autumn;
     float level;    // 1 shades the face as dead-level ground: up normal, no corner AO
+    bool gapNear;   // this column or the one in front of the face has a rock gap (on the 1-voxel map: any 4-neighbour)
+    float2 gapSpan; // the lowest floor and highest roof of those gaps (extra gaps lie lower still: floor 0 then)
     float pale;     // sand, salt crust or snow
     float wall;     // megaWall: among the great walls
     float3 nrm;     // structures: the plane a roof voxel shades as (zero: the face normal)
@@ -2346,8 +2348,26 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     }
     s.canopy = tree ? 0.55 : 1.0;
     s.H = H;
-    float hx0 = groundL(tr, k, v.xz + int2(-1, 0)), hx1 = groundL(tr, k, v.xz + int2(1, 0));
-    float hz0 = groundL(tr, k, v.xz + int2(0, -1)), hz1 = groundL(tr, k, v.xz + int2(0, 1));
+    float hx0, hx1, hz0, hz1;
+    if (k == 0) {
+        // The neighbours' whole columns: their ground, and whether any holds a gap, from the same reads.
+        float4 a0 = columnL(tr, 0, v.xz + int2(-1, 0)), a1 = columnL(tr, 0, v.xz + int2(1, 0));
+        float4 a2 = columnL(tr, 0, v.xz + int2(0, -1)), a3 = columnL(tr, 0, v.xz + int2(0, 1));
+        hx0 = a0.a > 0.0 ? a0.g : a0.r; hx1 = a1.a > 0.0 ? a1.g : a1.r;
+        hz0 = a2.a > 0.0 ? a2.g : a2.r; hz1 = a3.a > 0.0 ? a3.g : a3.r;
+        // Rock gaps only: canopies and buildings hold theirs with a non-zero alpha.
+        s.gapSpan = float2(1e9, -1e9);
+        float4 cs5[5] = { col4, a0, a1, a2, a3 };
+        for (int i = 0; i < 5; i++)
+            if (cs5[i].b > cs5[i].g && cs5[i].a == 0.0) s.gapSpan = float2(min(s.gapSpan.x, cs5[i].g), max(s.gapSpan.y, cs5[i].b));
+        s.gapNear = s.gapSpan.y > s.gapSpan.x;
+    } else {
+        hx0 = groundL(tr, k, v.xz + int2(-1, 0)); hx1 = groundL(tr, k, v.xz + int2(1, 0));
+        hz0 = groundL(tr, k, v.xz + int2(0, -1)); hz1 = groundL(tr, k, v.xz + int2(0, 1));
+        float4 fr = n.y == 0 ? columnL(tr, k, v.xz + n.xz) : float4(0);
+        s.gapNear = col.z > col.y || fr.z > fr.y;
+        s.gapSpan = float2(min(col.z > col.y ? col.y : 1e9, fr.z > fr.y ? fr.y : 1e9), max(col.z > col.y ? col.z : -1e9, fr.z > fr.y ? fr.z : -1e9));
+    }
     s.nh = float4(hx0, hx1, hz0, hz1);
     float slope = max(max(H - hx0, H - hx1), max(H - hz0, H - hz1));
     float2 w = float2(v.xz * int(cs) + mapOrigin);
@@ -2934,22 +2954,34 @@ static inline bool hollowAt(thread const Terrain& tr, int k, int2 c, float y) {
     return (y >= e.x && y < e.y) || (y >= e.z && y < e.w);
 }
 
-// Share of the ground near p under a roof at height y: per column, whether it or a 4-neighbour is hollow at y, bilinear
-// over the four columns nearest p. A function of position alone, never of which way a face turns, so the jogging faces of
-// a wall under a roof all agree, and it fades over a column or two at a roof's edge.
-static float roofShare(thread const Terrain& tr, int k, float2 p, float y) {
+// Near p at height y: x, the share of the ground under a roof (per column, whether it or a 4-neighbour is hollow at y,
+// bilinear over the four columns nearest p); yz, which way the hollow lies (its share's gradient over those four). A
+// function of position alone, never of which way a face turns, so the jogging faces of a wall under a roof all agree,
+// and it fades over a column or two at a roof's edge. Twelve columns, each read once.
+static float3 roofField(thread const Terrain& tr, int k, float2 p, float y) {
     float cs = tr.lod[k].w;
     float2 q = p / cs - 0.5, f = fract(q);
     int2 i0 = int2(floor(q));
-    float r = 0.0;
+    // The 4x4 block from i0 - 1, less its corners; bit (j * 4 + i).
+    uint hb = 0u;
+    for (int j = 0; j < 4; j++)
+        for (int i = 0; i < 4; i++) {
+            if ((i == 0 || i == 3) && (j == 0 || j == 3)) continue;
+            if (hollowAt(tr, k, i0 + int2(i - 1, j - 1), y)) hb |= 1u << uint(j * 4 + i);
+        }
+    if (hb == 0u) return float3(0);
+    float share = 0.0;
+    float hv[4];
     for (int j = 0; j < 2; j++)
         for (int i = 0; i < 2; i++) {
-            int2 c = i0 + int2(i, j);
-            bool h = hollowAt(tr, k, c, y) || hollowAt(tr, k, c + int2(1, 0), y) || hollowAt(tr, k, c - int2(1, 0), y)
-                  || hollowAt(tr, k, c + int2(0, 1), y) || hollowAt(tr, k, c - int2(0, 1), y);
-            if (h) r += (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y);
+            uint b = uint((j + 1) * 4 + i + 1);
+            uint near = (1u << b) | (1u << (b - 1u)) | (1u << (b + 1u)) | (1u << (b - 4u)) | (1u << (b + 4u));
+            float w = (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y);
+            if ((hb & near) != 0u) share += w;
+            hv[j * 2 + i] = float((hb >> b) & 1u);
         }
-    return r;
+    float2 g = float2(mix(hv[1] - hv[0], hv[3] - hv[2], f.y), mix(hv[2] - hv[0], hv[3] - hv[1], f.x));
+    return float3(share, g);
 }
 
 // shadows: 0 none, 1 traced near ray and maps, 2 maps only (reflections: ripples hide contact shadows).
@@ -2973,12 +3005,13 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // Taken just over half a column into the air in front of the face: on the face, or exactly half a column out, the
     // footprint's split between rock and air turns on rounding.
     // Floors are asked just above, undersides just below.
-    float roofW = 0.0;
+    float3 rf = 0.0;
     if (s.mat == 0) {
-        float4 c0 = columnL(x.tr, k, h.voxel.xz + h.normal.xz);
-        float4 c1 = columnL(x.tr, k, h.voxel.xz);
-        if (c0.z > c0.y || c1.z > c1.y) roofW = roofShare(x.tr, k, p.xz, p.y + 0.5 * n.y);
+        // Only near the gaps' heights: a lip's top or the sheer wall under a shelter lies outside every gap around it.
+        // Extra gaps lie under the principal ones, so below those only the floor of the map bounds them.
+        if (s.gapNear && p.y < s.gapSpan.y + 1.5 && (p.y > s.gapSpan.x - 1.5 || k == 0)) rf = roofField(x.tr, k, p.xz, p.y + 0.5 * n.y);
     }
+    float roofW = rf.x;
     // Faces under a roof, and undersides, are not stairs on a heightfield: no heightfield prefilter applies to them. A
     // lip's front and top are ordinary wall and ground.
     float ov = s.mat == 0 ? max(roofW, h.normal.y < 0 ? 1.0 : 0.0) : 0.0;
@@ -3005,12 +3038,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // A wall under a roof faces the hollow in front of it: its direction is where the hollow share rises, over a few
     // columns, so its jogging faces light as one wall rather than striping light and dark.
     if (ov > 0.0 && h.normal.y == 0 && wf > 0.0) {
-        // The hollow's own share (a column hollow here, not beside), whose gradient points out of the rock.
-        float2 gw = 0.0;
-        for (int j = -1; j <= 1; j += 2) {
-            gw.x += float(j) * float(hollowAt(x.tr, k, int2(floor((p.xz + float2(1.5 * cs * float(j), 0)) / cs)), p.y));
-            gw.y += float(j) * float(hollowAt(x.tr, k, int2(floor((p.xz + float2(0, 1.5 * cs * float(j))) / cs)), p.y));
-        }
+        float2 gw = rf.yz;
         if (dot(gw, gw) > 1e-3) nl = normalize(mix(nl, normalize(float3(gw.x, 0.0, gw.y)), ov * wf));
     }
     if (any(s.nrm != 0.0)) nl = s.nrm;
@@ -3216,9 +3244,12 @@ static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, 
     float dy = abs(d.y) < 1e-4 ? 1e-4 : d.y;
     float heightTerm = a * hf * k * (1.0 - exp(-dy * t / hf)) / dy;
     float mist = 0;
-    int samples = mistSamples >= 0 ? mistSamples : x.quality > 0.5 ? 4 : 2;
+    // Two samples at a per-pixel, per-frame offset along the ray: the temporal resolve integrates them into the four
+    // evenly spaced ones this replaced (the mist is smooth over tens of voxels).
+    int samples = mistSamples >= 0 ? mistSamples : x.quality > 0.5 ? 2 : 1;
+    float jit = mistSamples >= 0 ? 0.5 : x.dither;
     for (int i = 0; i < samples; i++) {
-        float st = min(t, 400.0) * (float(i) + 0.5) / float(samples);
+        float st = min(t, 400.0) * (float(i) + jit) / float(samples);
         float3 sp = o + d * st;
         float3 wp = float3(sp.x + float(x.origin.x), sp.y, sp.z + float(x.origin.y));
         // Mist lies in the low ground: well above the water a sample adds nothing worth its noise.
@@ -3665,22 +3696,6 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
 
     // Debug map view: 11 level 4 (+-10k tall, +-16k wide), 12 level 2, 13 level 1; hillshade, height ramp, 100-voxel
     // contours, 2k grid, yellow 10k lines, magenta world origin, red camera.
-    // Debug: the 1-voxel map from above, 0.25 voxel per pixel around the camera: heights shaded, gaps magenta (darker with
-    // more gaps), the camera red.
-    if (f.misc2.z == 16) {
-        float2 uv = in.uv - 0.5;
-        uv.x *= f.resolution.x / f.resolution.y;
-        int2 c = int2(floor(f.camPos.xz + uv * 280.0));
-        float4 col = hm.read(uint2(clamp(c, int2(0), int2(f.mapInfo.z - 1))));
-        float hx = hm.read(uint2(clamp(c + int2(1, 0), int2(0), int2(f.mapInfo.z - 1)))).r;
-        float3 cl = float3(0.3 + 0.5 * fract(col.r / 50.0)) * (hx > col.r ? 0.7 : 1.0);
-        if (col.b > col.g) {
-            float4 e = extraGaps(gx.read(uint2(clamp(c, int2(0), int2(f.mapInfo.z - 1)))));
-            cl = float3(1, 0, 1) * (e.y > e.x ? 0.6 : 1.0) * (0.6 + 0.4 * fract(col.b / 20.0));
-        }
-        if (length(uv) < 0.006) cl = float3(1, 0, 0);
-        return float4(cl * cl, 1);
-    }
     if (f.misc2.z >= 11 && f.misc2.z <= 13) {
         int k = f.misc2.z == 11 ? 4 : f.misc2.z == 12 ? 2 : 1;
         float cs = float(1 << k);
@@ -3716,13 +3731,6 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     if (f.shadow.z == 0.0 || !aboveHorizon(horizon, d)) h = trace(x.tr, o, d, x.tr.rmax, primaryIters, 0);
     if (f.misc2.z == 1) return float4(float(h.iters) / float(primaryIters), h.hit ? 0.3 : 0.0, h.iters >= primaryIters - 1 ? 1 : 0, 1);
     if (f.misc2.z == 5) return float4(skyColor(d, x.L, false, x.seed, x.time), 1);
-    // Debug: geometry by face (white tops, magenta undersides, orange x sides, green z sides), 10-voxel height ticks.
-    if (f.misc2.z == 15) {
-        if (!h.hit) return float4(0.3, 0.5, 0.9, 1e4);
-        float3 nc = h.normal.y > 0 ? float3(0.9) : h.normal.y < 0 ? float3(0.9, 0.1, 0.9) : h.normal.x != 0 ? float3(0.9, 0.5, 0.2) : float3(0.2, 0.7, 0.3);
-        return float4(nc * (h.voxel.y % 10 == 0 ? 0.6 : 1.0) / (1.0 + h.t / 400.0), h.t);
-    }
-    if (f.misc2.z == 6) return float4(skyWithClouds(x, o, d).rgb, 1);
 
     float tw = d.y < 0 ? (SEA - o.y) / d.y : 1e9;
     bool water = d.y < 0 && tw > 0 && (!h.hit || tw < h.t);
