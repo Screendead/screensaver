@@ -679,6 +679,13 @@ static inline int giantSlot(int2 cell) {
     return m.y * GIANT_WIN + m.x;
 }
 
+// A giant's leaf palette: 1 deep green, 2 teal-green, 3 green flushed with muted rust (one in six); 0 is the jungle's
+// own (emergents).
+static inline uint giantPalette(uint h) {
+    float k = hashf(pcg(h + 77u));
+    return k < 1.0 / 6.0 ? 3u : k < 0.58 ? 1u : 2u;
+}
+
 // The giant whose reach, grown by pad, covers world xz w. Reach and pad stay under half a cell, so at most the 2x2
 // cells round w can hold it.
 static inline bool giantAt(device const GiantRec* T, float2 w, float pad, thread Giant& g) {
@@ -727,7 +734,11 @@ kernel void placeGiants(device GiantRec* out [[buffer(0)]],
             if (!ok) continue;
             r.c = P; r.G = G; r.h = h;
             r.yT = mix(205.0, 250.0, hashf(pcg(h + 3u)));
-            r.kind = 0u;
+            // Banyan, kapok or weeping, two in five, two in five, one in five.
+            float kh = hashf(pcg(h + 4u));
+            r.kind = kh < 0.4 ? 0u : kh < 0.8 ? 1u : 2u;
+            // A kapok stands taller.
+            if (r.kind == 1u) r.yT = mix(235.0, 265.0, hashf(pcg(h + 3u)));
             break;
         }
     }
@@ -739,15 +750,19 @@ struct GLimb { float3 p0, p1, p2; float r0, r1; float L; };
 static inline GLimb giantLimb(thread const Giant& g, int i) {
     uint hi = pcg(g.h + 1000u + uint(i) * 131u);
     float f = (float(i) + 0.5) / float(GIANT_LIMBS);
-    float y0 = g.yT * mix(0.42, 0.98, f) + 12.0 * (hashf(hi) - 0.5);
+    // Kapok (kind 1): limbs only near the top, long and level, a flat crown on a clear column.
+    bool kapok = g.kind == 1;
+    float y0 = g.yT * mix(kapok ? 0.70 : 0.42, 0.98, f) + 12.0 * (hashf(hi) - 0.5);
     float az = float(i) * 2.39996 + 0.5 * hashf(pcg(hi));
-    float L = mix(125.0, 62.0, f) * (0.85 + 0.3 * hashf(pcg(hi + 1u)));
+    float L = mix(kapok ? 112.0 : 125.0, kapok ? 80.0 : 62.0, f) * (0.85 + 0.3 * hashf(pcg(hi + 1u)));
     float2 dir = float2(cos(az), sin(az)), perp = float2(-dir.y, dir.x);
     float bend = (hashf(pcg(hi + 2u)) - 0.5) * 0.5;
     GLimb l;
     l.p0 = float3(dir * 8.0, y0).xzy;
-    l.p1 = float3(dir * L * 0.45 + perp * L * bend * 0.4, y0 + L * 0.34).xzy;
-    l.p2 = float3(dir * L + perp * L * bend, y0 + L * 0.30 + 6.0 * hashf(pcg(hi + 3u))).xzy;
+    // A weeping giant (kind 2) arches its limbs out and down.
+    float rise = kapok ? 0.16 : g.kind == 2 ? 0.30 : 0.34, end = kapok ? 0.10 : g.kind == 2 ? 0.02 : 0.30;
+    l.p1 = float3(dir * L * 0.45 + perp * L * bend * 0.4, y0 + L * rise).xzy;
+    l.p2 = float3(dir * L + perp * L * bend, y0 + L * end + 6.0 * hashf(pcg(hi + 3u))).xzy;
     l.r0 = mix(10.0, 5.5, f);
     l.r1 = mix(2.6, 1.6, f);
     l.L = L;
@@ -766,15 +781,15 @@ static inline float4 giantPad(thread const Giant& g, int j, thread float& thick)
         uint hd = pcg(g.h + 900u + uint(d));
         float a = float(d) * 2.1 + hashf(hd);
         float2 o = d == 0 ? float2(0) : float2(cos(a), sin(a)) * (26.0 + 14.0 * hashf(pcg(hd)));
-        thick = d == 0 ? 50.0 : 30.0;
-        return float4(o.x, g.G + g.yT + (d == 0 ? 36.0 : 14.0 + 10.0 * hashf(pcg(hd + 1u))), o.y, d == 0 ? 50.0 : 34.0);
+        thick = (d == 0 ? 50.0 : 30.0) * (g.kind == 1 ? 0.6 : 1.0);
+        return float4(o.x, g.G + g.yT + (d == 0 ? (g.kind == 1 ? 18.0 : 36.0) : 14.0 + 10.0 * hashf(pcg(hd + 1u))), o.y, d == 0 ? 50.0 : 34.0);
     }
     GLimb l = giantLimb(g, j / 3);
     int kind = j % 3;
     uint hp = pcg(g.h + 1500u + uint(j) * 29u);
     float3 p = kind == 1 ? bez(l, 0.62) : l.p2;
     float R = kind == 0 ? 0.36 * l.L + 12.0 : kind == 1 ? 0.28 * l.L + 6.0 : 0.26 * l.L + 8.0;
-    thick = kind == 0 ? 22.0 + 0.12 * l.L : 16.0 + 0.08 * l.L;
+    thick = (kind == 0 ? 22.0 + 0.12 * l.L : 16.0 + 0.08 * l.L) * (g.kind == 1 ? 0.7 : 1.0);
     if (kind == 1 && l.L < 95.0) R = 0.0;
     if (kind == 2) {
         float2 dir = normalize(l.p2.xz - l.p0.xz);
@@ -796,10 +811,12 @@ static inline void gAdd(thread GRuns& r, float lo, float hi, int m) {
 static inline float giantTrunkR(thread const Giant& g, float2 q, float yr) {
     float t = saturate(yr / (g.yT + 30.0));
     float R = mix(25.0, 8.0, t * t * (3.0 - 2.0 * t)) + 26.0 * exp(-max(yr, 0.0) / 18.0);
-    // Braided like a strangler fig's mass of roots: deep flutes that twist slowly up the trunk.
+    // Braided like a strangler fig's mass of roots: deep flutes that twist slowly up the trunk; a kapok's column is
+    // smooth and straight, its foot carried by the buttresses.
+    if (g.kind == 1) R = mix(19.0, 10.0, t) + 10.0 * exp(-max(yr, 0.0) / 12.0);
     float th = atan2(q.y, q.x) + yr / 150.0;
     float f = perlin3(float3(cos(th) * 2.6, sin(th) * 2.6, yr / 34.0), g.h + 5u);
-    return R * (1.0 + 0.34 * f);
+    return R * (1.0 + (g.kind == 1 ? 0.10 : 0.34) * f);
 }
 
 static void giantIntervals(thread const Giant& g, float2 wq, float gl, int lod, thread GRuns& r) {
@@ -831,7 +848,8 @@ static void giantIntervals(thread const Giant& g, float2 wq, float gl, int lod, 
         float La = 45.0 + 70.0 * hashf(pcg(hi + 1u));
         if (along > Lb + La) continue;
         float side = dot(q, float2(-dir.y, dir.x)) + 9.0 * perlin2(float2(along / 38.0, float(i) * 3.7), g.h + 11u) * smoothstep(10.0, 50.0, along);
-        float Hb = 30.0 + 42.0 * hashf(pcg(hi + 2u));
+        // A kapok's buttresses are tall plates, flaring far up its column.
+        float Hb = (g.kind == 1 ? 55.0 : 30.0) + 42.0 * hashf(pcg(hi + 2u));
         if (along < Lb) {
             float u = saturate((along - 14.0) / (Lb - 14.0));
             float w = mix(7.0, 2.5, u);
@@ -874,7 +892,7 @@ static void giantIntervals(thread const Giant& g, float2 wq, float gl, int lod, 
         // Aerial roots: dropped from the limb, leaning out as they fall, thickening where they root.
         for (int k = 0; k < 3; k++) {
             uint hp = pcg(g.h + uint(i) * 97u + uint(k) * 13u + 400u);
-            if (hashf(hp) > 0.45 || lod >= 2) continue;
+            if (hashf(hp) > (g.kind == 1 ? 0.0 : g.kind == 2 ? 0.25 : 0.45) || lod >= 2) continue;
             float t = 0.35 + 0.2 * float(k) + 0.1 * hashf(pcg(hp));
             float3 top = bez(l, t);
             float2 out = normalize(top.xz + 1e-3) * (4.0 + 10.0 * hashf(pcg(hp + 2u)));
@@ -921,8 +939,9 @@ static void giantIntervals(thread const Giant& g, float2 wq, float gl, int lod, 
     if (padBot < 1e8 && lod == 0) {
         uint hv = hash2i(int2(floor(wq)), g.h + 30u);
         float mask = smoothstep(0.0, 0.35, perlin2(wq / 19.0, g.h + 31u));
-        if (hashf(hv) < 0.035 * mask) {
-            float len = 4.0 + 30.0 * pow(hashf(pcg(hv)), 2.0);
+        // A weeping giant trails long curtains; a kapok's crown hardly any.
+        if (hashf(hv) < (g.kind == 2 ? 0.09 : g.kind == 1 ? 0.008 : 0.035) * mask) {
+            float len = 4.0 + (g.kind == 2 ? 55.0 : 30.0) * pow(hashf(pcg(hv)), g.kind == 2 ? 1.3 : 2.0);
             gAdd(r, max(padBot - len, gl + 3.0), padBot + 1.0, GM_VINE);
         }
     }
@@ -1042,6 +1061,9 @@ static JCan jungleCanopy(float2 w, float gs, float J, uint seed) {
         lo = min(lo, open < 0.06 ? -1e9 : base - 4.5);
     }
     if (hi < max(lo, gs) + 1.0) return o;
+    // Along the water the roof comes down to it, mangrove-like: crowns standing on poles over the beach would be
+    // lollipops against the open water.
+    if (gs < SEA + 6.0) lo = -1e9;
     o.lo = max(floor(lo + 0.5), -1.0);
     o.hi = max(floor(hi + 0.5), o.lo + 1.0);
     return o;
@@ -1268,7 +1290,7 @@ static inline int2 canopySpan(Tree t, int2 o) {
 // trunks and buried canopies, b = w under a floating canopy) where it is one, else as a multi-run column (GIANT_A, its
 // ground and materials in st, extra gaps in gx).
 static void writeVeg(GCol gc, float G, uint2 gid, texture2d<float, access::write> dst, texture2d<uint, access::read_write> gx,
-                     texture2d<uint, access::write> st) {
+                     texture2d<uint, access::write> st, uint pal) {
     bool simple = gc.n == 1 || (gc.n == 2 && gc.gl == G && gc.leafStart == gc.gh);
     if (simple && (gc.mats >> (2u * uint(gc.n - 1)) & 3u) != uint(GM_VINE) && G < 2047.0) {
         dst.write(float4(gc.H, G, gc.n == 2 ? gc.gh : G, max(gc.leafStart, G)), gid);
@@ -1276,7 +1298,7 @@ static void writeVeg(GCol gc, float G, uint2 gid, texture2d<float, access::write
     }
     dst.write(float4(gc.H, gc.gl, gc.gh, GIANT_A), gid);
     gx.write(uint4(uint(gc.e.x), uint(gc.e.y), uint(gc.e.z) | (GAP_GIANT << 11), uint(gc.e.w)), gid);
-    st.write(uint4(ST_GIANT | uint(G) | (uint(gc.leafStart) << 11) | (gc.mats << 22), 0, 0, 0), gid);
+    st.write(uint4(ST_GIANT | uint(G) | (uint(gc.leafStart) << 11) | (gc.mats << 22) | (pal << 28), 0, 0, 0), gid);
 }
 
 // Runs after cleanupColumns, which would clamp one-column trunks away. Tree columns set w = first leaf
@@ -1403,7 +1425,7 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
         if (float(hi) > G) gAdd(rr, trunk ? G : float(lo), float(hi), GM_LEAF);
     }
     GCol gc;
-    if (isGiant ? giantColumn(gi, w, G, rr, gc) : runsColumn(rr, G, gc)) writeVeg(gc, G, gid, dst, gx, st);
+    if (isGiant ? giantColumn(gi, w, G, rr, gc) : runsColumn(rr, G, gc)) writeVeg(gc, G, gid, dst, gx, st, isGiant ? giantPalette(gi.h) : 0u);
     else dst.write(col, gid);
 }
 
@@ -3566,7 +3588,11 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         float3 a;
         if (gm == GM_LEAF) {
             float kq = saturate(perlin2(wq / 31.0, seed + 601u) * 0.9 + 0.5);
-            a = mix(float3(0.034, 0.078, 0.050), float3(0.075, 0.112, 0.042), kq);
+            uint pal = k == 0 ? (gsb >> 28) & 7u : giantPalette(gi.h);
+            a = pal == 2u ? mix(float3(0.024, 0.070, 0.060), float3(0.050, 0.098, 0.066), kq)
+                          : mix(float3(0.034, 0.078, 0.050), float3(0.075, 0.112, 0.042), kq);
+            // A rust flush drifts over part of the crown, strongest on its upper leaves.
+            if (pal == 3u) a = mix(a, float3(0.115, 0.062, 0.030), 0.7 * smoothstep(0.05, 0.45, perlin2(wq / 23.0, seed + 604u) + 0.25 * saturate((y - runLo) / max(runHi - runLo, 1.0))));
             int2 tx = int2(floor(uv * 16.0));
             int3 tk = n.y != 0 ? int3(v.x * 16 + tx.x, v.y * 2 + max(n.y, 0), v.z * 16 + tx.y)
                     : n.x != 0 ? int3(v.x * 2 + max(n.x, 0), v.y * 16 + tx.y, v.z * 16 + tx.x)
