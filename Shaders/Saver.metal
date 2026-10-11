@@ -2417,6 +2417,9 @@ static inline float morphAt(thread const Terrain& tr, int k, float2 p) {
     return smoothstep(tr.lod[k].x, tr.lod[k].z, length(p - tr.cam));
 }
 
+// Whether world xz w lies on a tower's plinth. Out of line: the trace's inner loop asks it only beside a tower's walls.
+static __attribute__((noinline)) bool towerWallAt(constant TowerTable* tt, float2 w) { return towerIndexAt(tt, w) >= 0; }
+
 // Morphed (H, gapLo, gapHi): across the band a column slides to its parent's height and its gap to the parent's (opening
 // from the parent's floor where it has none), or closes from the top where the parent has none, so at the handoff the
 // level equals the next one exactly.
@@ -2428,7 +2431,7 @@ static inline float3 columnMorphW(thread const Terrain& tr, int k, int2 c, float
         // A column sliding up or down a tower's sheer wall stands part way up it as a sliver, and the band of them rules
         // the wall with stripes: there it steps at the middle of the band instead.
         float wh = w;
-        if (tr.towerN > 0 && abs(ph - col.x) > 12.0 && towerIndexAt(tr.towers, (float2(c) + 0.5) * tr.lod[k].w + float2(tr.origin)) >= 0)
+        if (tr.towerN > 0 && abs(ph - col.x) > 12.0 && towerWallAt(tr.towers, (float2(c) + 0.5) * tr.lod[k].w + float2(tr.origin)))
             wh = step(0.5, w);
         col.x = mix(col.x, ph, wh);
         float2 pg = parentGap(tr, k, c);
@@ -3744,6 +3747,53 @@ static float3 towerWallPlane(Tower T, float2 wc, float3 n) {
 constant float TOWER_LIT = 0.07;
 constant float3 TOWER_ROOM = float3(1.0, 0.55, 0.22) * 1.6;
 
+// The light of a lit room on the faces of an opening of tower R at voxel v of level k (0 where none): only the great
+// portals and the loggias' bays, a storey and a tenth tall just under a rim; weathered pockets stay dark. Out of line:
+// it runs only at night, and inlined it slows every pixel's shading by day.
+static __attribute__((noinline)) float3 towerRoomLight(thread const Ctx& x, TowerRec R, int k, int3 v, int3 n, float2 w, float night) {
+    float cs = x.tr.lod[k].w;
+    float Hb = R.a.w, Sy = R.c.z;
+    int K = int(R.b.y);
+    uint seed = x.seed;
+    float yv = float(v.y);
+    float4 here = columnL(x.tr, k, v.xz);
+    float4 e = k == 0 ? extraGaps(x.tr.gx.read(uint2(clamp(v.xz, int2(0), int2(x.tr.size - 1))))) : float4(0);
+    float2 g = float2(-1.0);
+    if (n.y > 0) {
+        if (here.b > here.g && here.g == yv + 1.0) g = here.gb;
+        else if (e.y > e.x && e.x == yv + 1.0) g = e.xy;
+        else if (e.w > e.z && e.z == yv + 1.0) g = e.zw;
+    } else if (n.y < 0) {
+        if (here.b > here.g && here.b == yv) g = here.gb;
+        else if (e.y > e.x && e.y == yv) g = e.xy;
+        else if (e.w > e.z && e.w == yv) g = e.zw;
+    } else {
+        int2 q = v.xz + n.xz;
+        float4 f = columnL(x.tr, k, q);
+        float4 fe = k == 0 ? extraGaps(x.tr.gx.read(uint2(clamp(q, int2(0), int2(x.tr.size - 1))))) : float4(0);
+        if (f.b > f.g && yv >= f.g && yv < f.b) g = f.gb;
+        else if (fe.y > fe.x && yv >= fe.x && yv < fe.y) g = fe.xy;
+        else if (fe.w > fe.z && yv >= fe.z && yv < fe.w) g = fe.zw;
+    }
+    int jr = -1;
+    Tower T = towerFromRec(R);
+    float2 wc = w + 0.5 * cs;
+    if (g.y > g.x) {
+        for (int j = 0; j < 6; j++) {
+            if (j >= K - 2) break;
+            float top = tierY(T, towerPlan(T, wc - towerStageAxis(T, j)), j, seed);
+            if (g.y <= top - 3.0 && g.y >= top - 7.0 && abs(g.y - g.x - floor(Sy * 1.1)) <= 2.0 + float(k)) jr = j;
+        }
+        if (abs(g.x - (Hb + 6.0)) <= float(k) && g.y - g.x >= 26.0) jr = 7;
+    }
+    if (jr >= 0) {
+        uint lh = towerRoomHash(T, wc, jr, seed);
+        if (hashf(lh) < TOWER_LIT)
+            return TOWER_ROOM * night * (0.8 + 0.2 * hashf(pcg(lh))) * flicker(x.time, float(lh & 255u), seed);
+    }
+    return 0.0;
+}
+
 // A tower's masonry in place of the terrain's surface s: each tower its own old stone laid in storey courses, stained
 // under its ledges, lichened, darkened by age at the foot; greened on its treads, hung with ivy under its rims (painted
 // where the coarse rings carry no leaves), roots over its plinth, and at night a few rooms lit. Every term is taken in
@@ -3943,44 +3993,8 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
     // 1-voxel map, faded out across its morph band, where the painted bays take over.
     float night = saturate(x.lights.w * 4.0) * (k == 0 ? 1.0 : k == 1 ? 1.0 - morphAt(x.tr, 1, (float2(v.xz) + 0.5) * cs) : 0.0);
     if (night > 0.0 && R.d.z != 0u) {
-        float yv = float(v.y);
-        float4 here = columnL(x.tr, k, v.xz);
-        float4 e = k == 0 ? extraGaps(x.tr.gx.read(uint2(clamp(v.xz, int2(0), int2(x.tr.size - 1))))) : float4(0);
-        float2 g = float2(-1.0);
-        if (n.y > 0) {
-            if (here.b > here.g && here.g == yv + 1.0) g = here.gb;
-            else if (e.y > e.x && e.x == yv + 1.0) g = e.xy;
-            else if (e.w > e.z && e.z == yv + 1.0) g = e.zw;
-        } else if (n.y < 0) {
-            if (here.b > here.g && here.b == yv) g = here.gb;
-            else if (e.y > e.x && e.y == yv) g = e.xy;
-            else if (e.w > e.z && e.w == yv) g = e.zw;
-        } else {
-            int2 q = v.xz + n.xz;
-            float4 f = columnL(x.tr, k, q);
-            float4 fe = k == 0 ? extraGaps(x.tr.gx.read(uint2(clamp(q, int2(0), int2(x.tr.size - 1))))) : float4(0);
-            if (f.b > f.g && yv >= f.g && yv < f.b) g = f.gb;
-            else if (fe.y > fe.x && yv >= fe.x && yv < fe.y) g = fe.xy;
-            else if (fe.w > fe.z && yv >= fe.z && yv < fe.w) g = fe.zw;
-        }
-        // Only the great portals and the loggias' bays (a storey and a tenth tall, just under a rim): weathered pockets
-        // stay dark.
-        int jr = -1;
-        Tower T = towerFromRec(R);
-        float2 wc = w + 0.5 * cs;
-        if (g.y > g.x) {
-            for (int j = 0; j < 6; j++) {
-                if (j >= K - 2) break;
-                float top = tierY(T, towerPlan(T, wc - towerStageAxis(T, j)), j, seed);
-                if (g.y <= top - 3.0 && g.y >= top - 7.0 && abs(g.y - g.x - floor(Sy * 1.1)) <= 2.0 + float(k)) jr = j;
-            }
-            if (abs(g.x - (Hb + 6.0)) <= float(k) && g.y - g.x >= 26.0) jr = 7;
-        }
-        if (jr >= 0) {
-            uint lh = towerRoomHash(T, wc, jr, seed);
-            if (hashf(lh) < TOWER_LIT)
-                s.emit = TOWER_ROOM * night * (0.8 + 0.2 * hashf(pcg(lh))) * flicker(x.time, float(lh & 255u), seed);
-        }
+        float3 e = towerRoomLight(x, R, k, v, n, w, night);
+        if (any(e > 0.0)) s.emit = e;
     }
 }
 
