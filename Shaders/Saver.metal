@@ -6877,26 +6877,52 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     float3 col;
     float tSurf;
     float Tfog = -1.0;
+    // The lagoon bed's shading and the land's share one call: each call site inlines all of shade.
+    float3 wp = 0, n = 0, r = 0;
+    float2 ww = 0;
+    float e0 = 0, lagoon = 0, salt = 0, fres = 0, bedShows = 0;
+    int wl = 0;
+    Light Ls = x.L;
+    bool shadeHit = false;
     if (water) {
-        float3 wp = o + d * tw;
-        float2 ww = wp.xz + float2(x.origin);
-        float e0 = perlin3(float3(ww * 0.3, x.time * 0.25), x.seed + 60u);
+        wp = o + d * tw;
+        ww = wp.xz + float2(x.origin);
+        e0 = perlin3(float3(ww * 0.3, x.time * 0.25), x.seed + 60u);
         float ex = perlin3(float3((ww + float2(0.05, 0)) * 0.3, x.time * 0.25), x.seed + 60u);
         float ez = perlin3(float3((ww + float2(0, 0.05)) * 0.3, x.time * 0.25), x.seed + 60u);
-        int wl = levelAt(x.tr, length(wp.xz - x.tr.cam));
+        wl = levelAt(x.tr, length(wp.xz - x.tr.cam));
         Climate wc = climateL(x.tr, wl, wp.xz);
-        float lagoon = smoothstep(0.0, 0.35, lagoonAmount(wc));
+        lagoon = smoothstep(0.0, 0.35, lagoonAmount(wc));
         // Pools on a salt pan are a still skin over pale crust: a near-perfect mirror.
-        float salt = saltAmount(wc);
+        salt = saltAmount(wc);
         float rs = max(0.35 * saturate(1.0 - tw * x.pixelAngle * 4.0) * (1.0 - 0.6 * lagoon), 0.08 * x.L.night) * (1.0 - 0.7 * salt);
-        float3 n = normalize(float3(-(ex - e0) * rs, 1.0, -(ez - e0) * rs));
-        float3 r = reflect(d, n);
+        n = normalize(float3(-(ex - e0) * rs, 1.0, -(ez - e0) * rs));
+        r = reflect(d, n);
         r.y = abs(r.y);
+        float cosi = saturate(-dot(d, n));
+        fres = 0.02 + 0.98 * pow(1.0 - cosi, 5.0);
+        float bedPath = h.t - tw;
+        // How much of the lit bed survives the water and the surface reflection; below a few thousandths it
+        // can't show, and its shade() is the costliest part of a water pixel.
+        bedShows = (1.0 - fres) * max(exp(-bedPath * mix(0.35, 0.08, salt)) * (1.0 - lagoon),
+                                      lagoon * exp(-(bedPath + SEA - (o.y + d.y * h.t)) * 0.065));
+        // Lagoon beds are lit by sunlight refracted steeply down through the surface. Flux per horizontal
+        // area is kept (less what the surface reflects), so the light is redistributed from risers to treads.
+        float2 kh = x.L.key.xz / 1.33;
+        float3 kr = float3(kh.x, sqrt(max(1.0 - dot(kh, kh), 0.0)), kh.y);
+        float ky = max(x.L.key.y, 0.0);
+        Ls.key = normalize(mix(x.L.key, kr, lagoon));
+        Ls.keyCol *= mix(1.0, ky / kr.y * (0.98 - 0.98 * pow(1.0 - ky, 5.0)), lagoon);
+        shadeHit = h.hit && bedShows > 0.003;
+    } else if (h.hit) {
+        if (f.misc2.z != 2) Tfog = fogTransmittance(x, o, d, h.t);
+        shadeHit = !((x.prof & 64) || (Tfog >= 0.0 && Tfog < 0.01));
+    }
+    float3 lit = shadeHit ? shadeL(x, Ls, o, d, h, water ? 0 : 1) : float3(0);
+    if (water) {
         float3 refl;
         // Land in the reflected ray hides the sun or moon its glitter would mirror.
         float open = 1.0;
-        float cosi = saturate(-dot(d, n));
-        float fres = 0.02 + 0.98 * pow(1.0 - cosi, 5.0);
         if (x.quality > 0.5 && (int(f.shadow.y) & 4) == 0) {
             // Rippled reflections of water past 300 trace from the 2-voxel ring: its far shore reads the same, at half
             // the steps.
@@ -6921,21 +6947,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         float3 deep = x.L.zenith * 0.18 + x.L.horizon * 0.06 + float3(0.004, 0.014, 0.018);
         float3 under = deep;
         float bedPath = h.t - tw;
-        // How much of the lit bed survives the water and the surface reflection; below a few thousandths it
-        // can't show, and its shade() is the costliest part of a water pixel.
-        float bedShows = (1.0 - fres) * max(exp(-bedPath * mix(0.35, 0.08, salt)) * (1.0 - lagoon),
-                                            lagoon * exp(-(bedPath + SEA - (o.y + d.y * h.t)) * 0.065));
         if (h.hit) {
             float path = bedPath;
-            // Lagoon beds are lit by sunlight refracted steeply down through the surface. Flux per horizontal
-            // area is kept (less what the surface reflects), so the light is redistributed from risers to treads.
-            Light Lr = x.L;
-            float2 kh = x.L.key.xz / 1.33;
-            float3 kr = float3(kh.x, sqrt(max(1.0 - dot(kh, kh), 0.0)), kh.y);
-            float ky = max(x.L.key.y, 0.0);
-            Lr.key = normalize(mix(x.L.key, kr, lagoon));
-            Lr.keyCol *= mix(1.0, ky / kr.y * (0.98 - 0.98 * pow(1.0 - ky, 5.0)), lagoon);
-            float3 lit = bedShows > 0.003 ? shadeL(x, Lr, o, d, h, 0) : float3(0);
             under = mix(deep, lit * mix(float3(0.55, 0.8, 0.85), float3(0.9, 0.95, 0.97), salt), exp(-path * mix(0.35, 0.08, salt)));
             if (lagoon > 0.0) {
                 // Clear water over sand: red is absorbed first, so the bed turns aquamarine, then teal, then blue.
@@ -7000,8 +7013,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         }
         tSurf = tw;
     } else if (h.hit) {
-        if (f.misc2.z != 2) Tfog = fogTransmittance(x, o, d, h.t);
-        col = (x.prof & 64) || (Tfog >= 0.0 && Tfog < 0.01) ? float3(0.0) : shadeL(x, x.L, o, d, h, 1);
+        col = lit;
         tSurf = h.t;
         // Debug: flat level colours, morph bands white.
         if (f.misc2.z == 9) {
