@@ -789,6 +789,12 @@ final class Renderer: NSObject, MTKViewDelegate {
     // The terrain horizon around the camera (bakeHorizon): sky pixels above it skip the trace.
     private let horizonPipeline: MTLComputePipelineState
     private let horizonBuf: MTLBuffer
+    // The forest-province fields around the camera (bakeProvinces in Shaders/Saver.metal), which shading samples rather
+    // than evaluating per pixel; rebaked whole once the camera has moved a quarter of the window.
+    private let provPipeline: MTLComputePipelineState
+    private let provTex: MTLTexture
+    private var provCentre: SIMD2<Double>?
+    static let provN = 512, provCell = 64.0
     private var farHeights: [Float16] = []
     private var farCentre = SIMD2<Int>(Int.min, Int.min)
     private var farAge = 0
@@ -896,6 +902,7 @@ final class Renderer: NSObject, MTKViewDelegate {
               let shP = lib.makeFunction(name: "bakeShadowHeight").flatMap({ try? device.makeComputePipelineState(function: $0) }),
               let hzP = lib.makeFunction(name: "bakeHorizon").flatMap({ try? device.makeComputePipelineState(function: $0) }),
               let hzB = device.makeBuffer(length: 1024 * 4, options: .storageModePrivate),
+              let pvP = lib.makeFunction(name: "bakeProvinces").flatMap({ try? device.makeComputePipelineState(function: $0) }),
               let lampP = lib.makeFunction(name: "updateLamps").flatMap({ try? device.makeComputePipelineState(function: $0) }),
               let lightP = lib.makeFunction(name: "bakeLights").flatMap({ try? device.makeComputePipelineState(function: $0) }),
               let lpos = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.maxLamps * 16, options: .storageModePrivate),
@@ -913,6 +920,12 @@ final class Renderer: NSObject, MTKViewDelegate {
         shadowPipeline = shP
         horizonPipeline = hzP
         horizonBuf = hzB
+        provPipeline = pvP
+        let pd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Float, width: Renderer.provN, height: Renderer.provN, mipmapped: false)
+        pd.usage = [.shaderRead, .shaderWrite]
+        pd.storageMode = .private
+        guard let pt = device.makeTexture(descriptor: pd) else { return nil }
+        provTex = pt
         let sd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg32Float, width: Renderer.shadowN, height: Renderer.shadowN, mipmapped: false)
         sd.usage = [.shaderRead, .shaderWrite]
         sd.storageMode = .private
@@ -1150,6 +1163,18 @@ final class Renderer: NSObject, MTKViewDelegate {
                        active: activeLevels, giants: world.giantBuffer)
         bakeLamps(into: cb, frame: &f)
         fillLampTiles(frame: f, width: w, height: h)
+        let cam2 = SIMD2(camera.position.x, camera.position.z)
+        if provCentre.map({ simd_length($0 - cam2) > Double(Renderer.provN) * Renderer.provCell / 4 }) ?? true,
+           let enc = cb.makeComputeCommandEncoder() {
+            provCentre = cam2
+            var info = SIMD4<Int32>(Int32(floor(cam2.x / Renderer.provCell)) - Int32(Renderer.provN / 2),
+                                    Int32(floor(cam2.y / Renderer.provCell)) - Int32(Renderer.provN / 2), 0, Int32(bitPattern: world.seed))
+            enc.setComputePipelineState(provPipeline)
+            enc.setTexture(provTex, index: 0)
+            enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
+            enc.dispatchThreads(MTLSize(width: Renderer.provN, height: Renderer.provN, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+            enc.endEncoding()
+        }
         // The shadow maps and the horizon share no data: one concurrent pass, so their short dispatches overlap.
         let bakes = cb.makeComputeCommandEncoder(dispatchType: .concurrent)
         if let bakes { bakeShadows(into: bakes, frame: &f) }
@@ -1206,6 +1231,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentTexture(world.gapTex, index: 13)
             enc.setFragmentTexture(clipmap.gaps, index: 14)
             enc.setFragmentTexture(world.bandTex, index: 15)
+            enc.setFragmentTexture(provTex, index: 16)
             enc.setFragmentBuffer(lampPos, offset: 0, index: 2)
             enc.setFragmentBuffer(lampState, offset: 0, index: 3)
             enc.setFragmentBytes(&hazeRefs, length: 128, index: 4)

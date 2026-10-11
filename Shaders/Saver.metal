@@ -159,14 +159,36 @@ kernel void bakeClimate(texture2d<float, access::write> out [[texture(0)]],
     out.write(float4(c.temp, c.moist, c.fall, c.basin), gid);
 }
 
-// Baked climate at map-local position p (column centres at integer + 0.5); origin, seed: the map's.
-static inline Climate climateAt(texture2d<float> t, float2 p, int2 origin, uint seed) {
+// The province fields baked around the camera (bakeProvinces): PROV_N texels a side, PROV_CELL voxels each, held
+// toroidally by world texel. Must match Renderer.provN and provCell in Sources/Renderer.swift.
+constant int PROV_N = 512;
+constant float PROV_CELL = 64.0;
+
+static inline float2 provincesBaked(texture2d<float> pv, float2 w) {
+    constexpr sampler br(filter::linear, address::repeat);
+    return pv.sample(br, w / (PROV_CELL * float(PROV_N)), level(0)).rg;
+}
+
+kernel void bakeProvinces(texture2d<float, access::write> out [[texture(0)]],
+                          constant int4& info [[buffer(0)]],
+                          uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= uint(PROV_N) || gid.y >= uint(PROV_N)) return;
+    // info.xy: the window's first texel (world texel index); w: seed.
+    int2 c = info.xy + int2(gid);
+    uint seed = uint(info.w);
+    float2 pv = provinces((float2(c) + 0.5) * PROV_CELL + seedOffset(seed), seed);
+    out.write(float4(pv, 0, 0), uint2(c & (PROV_N - 1)));
+}
+
+// Baked climate at map-local position p (column centres at integer + 0.5); pv, origin: the province texture and the
+// map's origin.
+static inline Climate climateAt(texture2d<float> t, float2 p, texture2d<float> pv, int2 origin) {
     constexpr sampler bl(filter::linear, address::clamp_to_edge);
     float4 v = t.sample(bl, p / float2(t.get_width(), t.get_height()), level(0));
     Climate c;
     c.temp = v.x; c.moist = v.y; c.fall = v.z; c.basin = v.w;
-    float2 pv = provinces(p + float2(origin) + seedOffset(seed), seed);
-    c.jungle = pv.x; c.old = pv.y;
+    float2 q = provincesBaked(pv, p + float2(origin));
+    c.jungle = q.x; c.old = q.y;
     return c;
 }
 
@@ -2457,6 +2479,8 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
             }
         }
         if (nT >= 2.0) {
+            // Marks the column as a giant's for shading (coverDepthL).
+            depth = -1.0;
             float top = floor(sH / nT + 0.5);
             if (k > GAP_LEVELS || nS >= 2.0 || sLow.z < 1.0) return float3(max(top, H), 0, 0);
             float2 lowG = floor(sLow.xy / sLow.z + 0.5);
@@ -2509,7 +2533,7 @@ kernel void generateCoarse(texture2d<float, access::write> hOut [[texture(0)]],
     float cover = saturate(groveDensity(centre, H, seed) * 13.0 / float(TREE_CELL * TREE_CELL));
     hOut.write(float4(H), uint2(cw & (COARSE_N - 1)));
     // g: the depth of leaves under the top (coarseVeg), in units of 64 voxels.
-    vOut.write(float4(cover, depth / 64.0, 0, 0), uint2(cw & (COARSE_N - 1)));
+    vOut.write(float4(cover, depth < 0.0 ? 1.0 : min(depth, 63.0) / 64.0, 0, 0), uint2(cw & (COARSE_N - 1)));
     if (all((cw & 1) == 0)) {
         int2 cj = cw >> 1;
         Climate c = climate((float2(cj) + 0.5) * float(2 * s), seed);
@@ -2606,6 +2630,7 @@ struct Terrain {
     texture2d<float> hb;         // band mips (bandTop): the air a cell leaves open under canopies
     uint seed;
     device const GiantRec* giants; // the giant table (placeGiants)
+    texture2d<float> pv;           // the province fields (bakeProvinces)
 };
 
 static inline int2 levelOrigin(thread const Terrain& tr, int k) { return k == 0 ? int2(0) : tr.origin >> k; }
@@ -2649,7 +2674,7 @@ static inline float coverL(thread const Terrain& tr, int k, int2 c) {
     return tr.cv.read(uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1)), uint(k - 1), 0).r;
 }
 
-// (cover, depth of the leaves under the column's top in voxels: coarseVeg) of coarse column c.
+// (cover, depth of the leaves under the column's top in voxels: coarseVeg; 64 on a giant's columns) of coarse column c.
 static inline float2 coverDepthL(thread const Terrain& tr, int k, int2 c) {
     if (k == 0) return 0.0;
     float2 v = tr.cv.read(uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1)), uint(k - 1), 0).rg;
@@ -2712,13 +2737,13 @@ static inline float4 extraGapsMorph(thread const Terrain& tr, int2 c) {
 }
 
 static inline Climate climateL(thread const Terrain& tr, int k, float2 p) {
-    if (k == 0) return climateAt(tr.clim, p, tr.origin, tr.seed);
+    if (k == 0) return climateAt(tr.clim, p, tr.pv, tr.origin);
     constexpr sampler bl(filter::linear, address::repeat);
     float2 u = (p / (2.0 * tr.lod[k].w) + float2((tr.origin >> (k + 1)) & (COARSE_N / 2 - 1))) / float(COARSE_N / 2);
     float4 v = tr.cc.sample(bl, u, uint(k - 1), level(0));
     Climate c;
     c.temp = v.x; c.moist = v.y; c.fall = v.z; c.basin = v.w;
-    float2 pv = provinces(p + float2(tr.origin) + seedOffset(tr.seed), tr.seed);
+    float2 pv = provincesBaked(tr.pv, p + float2(tr.origin));
     c.jungle = pv.x; c.old = pv.y;
     return c;
 }
@@ -2882,7 +2907,7 @@ kernel void bakeHorizon(device float* out [[buffer(0)]],
     uint gid = tid.y;
     int levels = int(f.fade.z);
     Terrain tr { hm, coarse, coarse, coarse, hm, f.lod, f.mapInfo.xy, f.mapInfo.z, levels,
-                 f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, 0.0, hx, gx, cg, hx, uint(f.mapInfo.w), giants };
+                 f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, 0.0, hx, gx, cg, hx, uint(f.mapInfo.w), giants, hx };
     float a = (float(gid) + 0.5) * 6.2831853 / float(HORIZON_BINS);
     float2 dir = float2(sin(a), cos(a));
     float3 o = f.camPos.xyz;
@@ -3259,7 +3284,8 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     // A giant: on the 1-voxel map its columns carry GIANT_A, with the ground and materials in st; further out its
     // columns are those within its reach, wood and leaf from a little above the ground at its axis.
     Giant gi;
-    bool giant = k == 0 ? col4.a == GIANT_A : giantAt(tr.giants, float2(v.xz * int(cs) + mapOrigin) + 0.5 * cs, cs, gi);
+    float2 cdK = coverDepthL(tr, k, v.xz);
+    bool giant = k == 0 ? col4.a == GIANT_A : cdK.y >= 64.0 && giantAt(tr.giants, float2(v.xz * int(cs) + mapOrigin) + 0.5 * cs, cs, gi);
     uint gsb = giant && k == 0 ? st.read(uint2(clamp(v.xz, int2(0), int2(tr.size - 1)))).r : 0u;
     float gLoc = k == 0 ? float(gsb & 2047u) : 0.0;
     if (giant && k > 0) gLoc = gi.G + 6.0;
@@ -3416,7 +3442,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     bool vegLeaf = false;
     float vegLo = 0.0;
     if (k > 0) {
-        float2 cd = coverDepthL(tr, k, v.xz);
+        float2 cd = cdK;
         // The top of a forested coarse column is its leaves (coarseVeg).
         vegLo = col.x - cd.y;
         vegLeaf = !giant && cd.y > 0.0 && float(v.y) >= vegLo;
@@ -3482,6 +3508,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
             leaf = mix(leaf, jl, smoothstep(0.1, 0.4, c.jungle));
         }
         // A 16x16 leaf texture: two-tone texels, faded out once a texel nears a pixel.
+        if (fp < 0.04) {
         int2 tx = int2(floor(uv * 16.0));
         int3 tk = n.y != 0 ? int3(v.x * 16 + tx.x, v.y * 2 + max(n.y, 0), v.z * 16 + tx.y)
                 : n.x != 0 ? int3(v.x * 2 + max(n.x, 0), v.y * 16 + tx.y, v.z * 16 + tx.x)
@@ -3489,6 +3516,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         uint th = hash3i(tk, seed + 94u);
         float tex = hashf(th) < 0.35 ? 0.72 : 1.0 + 0.12 * hashf(pcg(th));
         leaf *= mix(tex, 0.92, smoothstep(0.015, 0.04, fp));
+        } else leaf *= 0.92;
         // Upper leaves catch more sky.
         leaf *= mix(0.85, 1.15, saturate((float(v.y) - leafLo) / max(col.x - leafLo - 1.0, 1.0)));
         s.albedo = leaf;
@@ -4699,7 +4727,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
                               texture2d<float> shadowNear [[texture(9)]], texture2d<float> shadowFar [[texture(10)]],
                               texture2d<float> slowTex [[texture(11)]], texture2d<float> hx [[texture(12)]],
                               texture2d<uint> gx [[texture(13)]], texture2d_array<float> cg [[texture(14)]],
-                              texture2d<float> hb [[texture(15)]],
+                              texture2d<float> hb [[texture(15)]], texture2d<float> pvTex [[texture(16)]],
                               device const Site* sites [[buffer(1)]], device const float4* lampPos [[buffer(2)]],
                               device const float4* lampState [[buffer(3)]], constant int4* refs [[buffer(4)]],
                               device const float4* birds [[buffer(5)]], device const float* horizon [[buffer(6)]],
@@ -4715,7 +4743,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     float gmax = f.misc.y;
     for (int k = 1; k < levels; k++) gmax = max(gmax, coarse.read(uint2(0), uint(k - 1), coarse.get_num_mip_levels() - 1).r + 1.0);
     if (int(f.shadow.y) & 2) gmax = min(gmax, 260.0);
-    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, hb, uint(f.mapInfo.w), giants };
+    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, hb, uint(f.mapInfo.w), giants, pvTex };
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
             2.0 * tanH * f.resolution.w, f.misc.w, makeLight(f.sunDir.xyz),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
@@ -4751,7 +4779,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         if (k <= GAP_LEVELS) { float2 gp = cg.read(uint2(ci & (COARSE_N - 1)), uint(k - 1)).rg; if (gp.y > gp.x) c = float3(1, 0, 1); }
         float2 wc = cell * cs;
         // Forest provinces: jungle warm, old growth cool; giants white.
-        float2 pv = provinces(wc + seedOffset(uint(f.mapInfo.w)), uint(f.mapInfo.w));
+        float2 pv = provincesBaked(pvTex, wc);
         c = mix(c, float3(0.9, 0.5, 0.1), 0.45 * smoothstep(0.15, 0.6, pv.x));
         c = mix(c, float3(0.2, 0.4, 1.0), 0.45 * smoothstep(0.2, 0.6, pv.y));
         { Giant gm; if (giantAt(giants, wc, 0.0, gm)) c = float3(1); }
@@ -4923,14 +4951,6 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         if (f.misc2.z != 2) Tfog = fogTransmittance(x, o, d, h.t);
         col = (x.prof & 64) || (Tfog >= 0.0 && Tfog < 0.01) ? float3(0.0) : shadeL(x, x.L, o, d, h, 1);
         tSurf = h.t;
-        // DEBUG15 (temporary): column classes on the 1-voxel map.
-        if (f.misc2.z == 15 && h.level == 0) {
-            float4 c4 = hm.read(uint2(clamp(h.voxel.xz, int2(0), int2(f.mapInfo.z - 1))));
-            float y = float(h.voxel.y);
-            float3 dc = c4.a == GIANT_A ? float3(1, 0.2, 0.1) : c4.a > 0.0 ? (y >= c4.a ? float3(0.1, 0.8, 0.1) : float3(0.6, 0.35, 0.1)) : float3(0.4);
-            float l = dot(col, float3(0.3, 0.59, 0.11));
-            return float4(dc * (0.3 + 2.0 * l), h.t);
-        }
         // Debug: flat level colours, morph bands white.
         if (f.misc2.z == 9) {
             const float3 flat[5] = { float3(1, 0, 0), float3(0, 1, 0), float3(0, 0, 1), float3(1, 1, 0), float3(1, 0, 1) };
