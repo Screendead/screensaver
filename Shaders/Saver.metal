@@ -7198,7 +7198,8 @@ fragment float4 postFragment(VOut in [[stage_in]], texture2d<float> scene [[text
     uint bx = b.x ^ b.y;
     uint bayer = ((bx & 1u) << 5) | ((b.y & 1u) << 4) | ((bx & 2u) << 2) | ((b.y & 2u) << 1) | ((bx & 4u) >> 1) | ((b.y & 4u) >> 2);
     const float levels = 7.0;
-    float3 enc = floor(linearToSRGB(saturate(c)) * levels + (DITHER_FC ? (float(bayer) + 0.5) / 64.0 : 0.5)) / levels;
+    float3 enc = linearToSRGB(saturate(c));
+    if (DITHER_FC) enc = floor(enc * levels + (float(bayer) + 0.5) / 64.0) / levels;
     float headroom = f.misc2.w;
     if (headroom <= 1.0) return float4(enc, 1);
     // EDR: identical to SDR below scene value 1; energy above it rolls per channel into the headroom.
