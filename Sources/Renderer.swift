@@ -101,6 +101,8 @@ struct GiantInfo {
     var pos: SIMD2<Double>
     var ground: Double
     var top: Double
+    // 0 banyan, 1 kapok, 2 weeping (placeGiants).
+    var kind = 0
 }
 
 // A structure site as the camera and the smoke and halo lists see it, in world coordinates.
@@ -508,7 +510,7 @@ final class World {
             }
             buf.jungle = buf.jungleGrid.contains(true)
             if World.logSites {
-                for g in buf.giantList { print(String(format: "giant at (%.0f, %.0f) ground %.0f top %.0f", g.pos.x, g.pos.y, g.ground, g.top)) }
+                for g in buf.giantList { print(String(format: "giant at (%.0f, %.0f) ground %.0f top %.0f kind %d", g.pos.x, g.pos.y, g.ground, g.top, g.kind)) }
             }
             if World.logSites {
                 var counts = [Int](repeating: 0, count: 7)
@@ -569,8 +571,9 @@ final class World {
         let p = buf.contents().bindMemory(to: GiantRec.self, capacity: World.giantWin * World.giantWin)
         return (0..<(World.giantWin * World.giantWin)).compactMap { i in
             let r = p[i]
-            // The crown's top: GIANT_PADS' dome in Shaders/Saver.metal rises about yT + 36 + 0.55 * 50 + 7.
-            return r.g > 0 ? GiantInfo(pos: SIMD2(Double(r.c.x), Double(r.c.y)), ground: Double(r.g), top: Double(r.g + r.yT) + 75) : nil
+            // The crown's top: giantPad's dome in Shaders/Saver.metal rises about yT + 36 + 0.55 * 56 + 9.5, the high limbs'
+            // clumps to about yT + 84.
+            return r.g > 0 ? GiantInfo(pos: SIMD2(Double(r.c.x), Double(r.c.y)), ground: Double(r.g), top: Double(r.g + r.yT) + 85, kind: Int(r.kind)) : nil
         }
     }
 
