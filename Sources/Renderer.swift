@@ -53,7 +53,7 @@ struct ShadowBake {
 struct SkyClock {
     var phase: Double = -0.035 // just before sunrise: open on blue hour
     var day = 0
-    static let dayLength: Double = 24 * 60
+    static let dayLength: Double = 12 * 60
 
     // Peak day is held to a long-afternoon sun (flat high noon judged weakest); night keeps its full depth
     // (a shallower night judged worse). Both halves meet at the horizon.
