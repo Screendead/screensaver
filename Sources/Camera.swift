@@ -39,6 +39,8 @@ final class FlightCamera {
     private var nextRoute: Double = 0
     private var routeYaw: Double?
     private var blockedAhead: Double = 0
+    // 0...1, eased: how much a slope close by fills the frame (looked down onto, or rising beside the flight).
+    private var hug: Double = 0
     // Structure sites on the loaded map.
     var sitesAt: () -> [SiteInfo] = { [] }
     // Index of the current night, as the lamps read it (beacons and rites burn only on some nights).
@@ -350,7 +352,7 @@ final class FlightCamera {
             let awayYaw = atan2(push.x, push.y)
             steerAway = sin(FlightCamera.angleDiff(awayYaw, yaw)) * 0.2 * crowd
         }
-        let urgency = max(min(blockedAhead / 40, 1), 0.7 * crowd)
+        let urgency = max(min(blockedAhead / 20, 1), 0.7 * crowd)
         avoidRate = routeYaw.map { sin(FlightCamera.angleDiff($0, yaw)) * 0.15 * urgency } ?? 0
         // The birds' sightline predictions (Wildlife.hidden) rely on turns of at most 0.09 rad/s.
         let targetRate = max(-0.09, min(0.09, (drift + steerShot + steerKey + steerMoon) * (1 - urgency) + avoidRate + steerAway))
@@ -383,6 +385,21 @@ final class FlightCamera {
         // Over the great relief the flight keeps well up: close above, its stepped slopes read as a block lattice.
         let groundHere = h(position.x, position.z)
         clearance += 70 * min(max((groundHere - 150) / 200, 0), 1)
+        // A slope close by filling the frame (the view ray meets it within ~150, or land within 220 rises above the eye
+        // across much of the width) is a dull, dark framing: lift away from it and raise the view toward the far land.
+        // Rays at the frame's centre and a quarter of the way up it.
+        var meet = Double.infinity, meetUp = Double.infinity
+        let b3 = basis
+        let up3 = simd_normalize(b3.fwd + b3.up * tan(0.12))
+        for dist in stride(from: 20.0, through: 240.0, by: 14.0) {
+            let q = position + b3.fwd * dist, u = position + up3 * dist
+            if meet.isInfinite, h(q.x, q.z) > q.y { meet = dist }
+            if meetUp.isInfinite, h(u.x, u.z) > u.y { meetUp = dist }
+        }
+        let hugNow = max(max(min(max((150 - meet) / 90, 0), 1), min(max((240 - meetUp) / 120, 0), 1)),
+                         min(max((wallInFrame() - 0.3) / 0.4, 0), 1))
+        hug += (hugNow - hug) * min(1, dt * (hugNow > hug ? 0.3 : 0.08))
+        clearance += 25 * hug
         // Passing the site a shot was built around: a little lower, so the windows read.
         if let f = focus, simd_length(f - p) < 150 { clearance = max(clearance - 8, min(clearance, 22)) }
         // Canyon and mesa country: down among the walls they fill the frame, so rise to look across the rims.
@@ -454,6 +471,7 @@ final class FlightCamera {
         // frame to land and the moon's path across the water.
         let moonPitch = min(asin(moon.y) - 0.38, 0.13)
         targetPitch += (moonPitch - targetPitch) * facingMoon
+        targetPitch += 0.12 * hug
         surveyAmount = s
         pitch += ((pitchOverride ?? targetPitch) - pitch) * min(1, dt * 0.25)
         let targetRoll = max(-0.07, min(0.07, -yawRate * 0.8))

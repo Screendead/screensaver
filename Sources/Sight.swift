@@ -79,7 +79,8 @@ struct Sight {
         let night = Sight.smoothstep(-0.04, -0.20, sunY)
         var clear = 1 + (0.15 - 1) * Sight.smoothstep(0.2, 0.45, sunY)
         clear *= 1 + (0.35 - 1) * night
-        let air = K * (1 - exp(-c2 * t * t / K)) + lambda * t * t / (t + 1500)
+        // As the shader's airAloft: the haze thins above 120.
+        let air = (K * (1 - exp(-c2 * t * t / K)) + lambda * t * t / (t + 1500)) * exp(-max(o.y + min(d.y, 0.2) * 0.75 * min(t, 2000) - 120, 0) / 400)
         return exp(-((heightTerm + air) * clear + 6 * Sight.smoothstep(0.7 * worldEdge, worldEdge, r)))
     }
 

@@ -230,23 +230,36 @@ static inline Mega megaLift(float2 p, float lagoon, uint seed) {
             U += wT * smoothstep(0.0, 0.3, M) * (430.0 * s1 + 380.0 * s2 + roll * s1);
         }
         if (wK > 0.0) {
-            // Pillars at the maxima of a warped field, isolated at the fringe and crowding (never merging into a wall)
-            // in the core, with thin needles among the fringe pillars. Each pillar stands on a talus apron, its sheer
-            // shaft ends in a rounded, craggy crown, and neighbours differ in height, so a field reads as eroded rock
-            // rather than a skyline of flat roofs.
+            // Tower karst. A slow field gathers the towers into clusters (fengcong: peaks crowding on a shared rocky
+            // pedestal) with open plains between, where towers stand alone (fenglin). Two populations: slender
+            // towers on a ~50 lattice and massive ones on a ~130 lattice, so girth and spacing vary; each tower's
+            // height comes from noise on its own scale, so neighbours differ. Each stands on a talus apron, its sheer
+            // shaft ends in a rounded, craggy crown, and thin needles rise among the fringe towers.
             float P = 280.0 + 260.0 * saturate(fbm2(q / 5000.0, 2, seed + 230u) * 1.5 + 0.5);
             float2 kw = float2(perlin2(p / 60.0, seed + 231u), perlin2(p / 60.0 + 7.7, seed + 232u)) * 14.0;
+            float clus = saturate(fbm2(q / 750.0, 2, seed + 239u) * 3.0 + 0.3 + 0.2 * (core - 0.5));
+            float dens = clus * clus * (3.0 - 2.0 * clus);
             float c1 = perlin2((p + kw) / 52.0, seed + 233u);
             float c2 = perlin2((p + kw) / 23.0, seed + 235u);
-            float thr = mix(0.40, 0.14, core * core);
+            float cB = perlin2((p + kw * 2.5) / 130.0, seed + 245u);
+            float thr = mix(0.5, 0.22, dens) + 0.16 * perlin2(p / 170.0, seed + 248u);
             float skirt = smoothstep(thr - 0.14, thr, c1);
             float big = smoothstep(thr, thr + 0.02, c1);
-            float crown = smoothstep(thr + 0.01, thr + 0.26, c1);
-            float thin = smoothstep(0.52, 0.54, c2) * (1.0 - core) * smoothstep(0.1, 0.4, perlin2(p / 900.0, seed + 236u) + 0.3);
-            float hv = 0.35 + 0.65 * saturate(perlin2(p / 95.0, seed + 234u) * 1.1 + 0.5);
+            float crown = smoothstep(thr + 0.01, thr + 0.18, c1);
+            float thrB = mix(0.42, 0.27, dens);
+            float skirtB = smoothstep(thrB - 0.16, thrB, cB);
+            float bigB = smoothstep(thrB, thrB + 0.015, cB);
+            float crownB = smoothstep(thrB + 0.01, thrB + 0.16, cB);
+            float thin = smoothstep(0.52, 0.54, c2) * (1.0 - dens) * smoothstep(0.1, 0.4, perlin2(p / 900.0, seed + 236u) + 0.3);
+            float hv = 0.25 + 0.75 * saturate(perlin2(p / 61.0, seed + 234u) * 1.3 + 0.5);
+            float hB = 0.45 + 0.5 * saturate(perlin2(p / 150.0, seed + 246u) * 1.2 + 0.5);
             float crag = perlin2(p / 11.0, seed + 237u) + 0.5 * perlin2(p / 4.7, seed + 238u);
-            float shaft = P * M * hv * (0.10 * skirt + 0.62 * big + 0.28 * crown * crown) + 9.0 * crag * big;
-            float kh = max(shaft, P * M * hv * 0.8 * thin);
+            float shaft = P * M * hv * (0.10 * skirt + 0.62 * big + 0.28 * crown * (2.0 - crown)) * 0.5;
+            float shaftB = P * M * hB * (0.12 * skirtB + 0.58 * bigB + 0.30 * crownB * (2.0 - crownB));
+            // The cluster's pedestal: a rolling rock base the crowded towers share.
+            float ped = P * M * 0.22 * dens * smoothstep(-0.15, 0.35, perlin2((p + kw * 3.0) / 210.0, seed + 247u));
+            float kh = max(max(shaft, shaftB) + 9.0 * crag * max(big, bigB), P * M * hv * 0.8 * thin);
+            kh = max(kh, ped + 0.5 * kh);
             U += wK * max(kh, 0.0);
         }
         // Lagoon country keeps only its pillars standing in the water.
@@ -340,6 +353,8 @@ static inline float3 terrainColumn(int2 w, uint seed) {
         // Karst keeps its sheer pillar walls.
         float hm = h + U;
         float tdm = mix(td, 14.0, smoothstep(40.0, 400.0, U));
+        // Beds differ in thickness from one formation to the next, so a tall wall is not one even ruled stripe.
+        tdm *= mix(1.0, 0.6 + 0.8 * hashf(hash2i(int2(int(floor(hm / 70.0)), 7), seed + 260u)), smoothstep(60.0, 200.0, U));
         float hn3 = hm / tdm, lv3 = floor(hn3);
         // Tall relief gets short risers between wide treads: a long ramp of single steps reads as a stair lattice.
         float e3 = mix(0.6, 0.85, smoothstep(100.0, 400.0, U));
@@ -1910,6 +1925,7 @@ static float3 skyColor(float3 d, Light L, bool withDiscs, uint seed, float time)
 struct Surface {
     float3 albedo;
     float3 tread;   // the column's top colour, used to prefilter risers at distance
+    float3 face;    // the colour a steep face of this column shows from afar: rock, snow-flecked over the snowline
     float4 nh;      // neighbour heights: -x, +x, -z, +z
     float H;
     int mat;        // 0 terrain, 1 leaf, 2 wood, 3 pale bark
@@ -1943,8 +1959,11 @@ static inline float3 autumnLeaf(float2 w, float birch, uint seed) {
 // `wall` (0..1) marks the great walls of mega relief, whose rock reads as formations from foot to rim.
 static inline float3 strataTone(float y, float2 w, uint seed, float desertAmt, float fp, float wall = 0.0) {
     float yd = y + 1.2 * perlin2(w / 140.0, seed + 24u) + 0.3 * perlin2(w / 30.0, seed + 25u);
-    float k = 0.5 + 0.5 * sin(yd * 0.38 + 2.2 * perlin2(w * 0.01, seed + 22u) + 1.3 * perlin2(w * 0.003, seed + 23u));
-    k = smoothstep(0.25, 0.75, k);
+    // Beds of uneven thickness (the phase runs faster and slower up the face) with soft contacts: an even, hard-edged
+    // 16-voxel zebra reads as posterised banding on a tall face.
+    float k = 0.5 + 0.5 * sin(yd * 0.38 + 5.0 * perlin2(float2(yd / 41.0, 0.27), seed + 39u)
+                             + 2.2 * perlin2(w * 0.01, seed + 22u) + 1.3 * perlin2(w * 0.003, seed + 23u));
+    k = smoothstep(0.1, 0.9, k);
     // On the great walls the regular 16-voxel bands would read as a zebra stripe; the formations carry the tone there.
     float fz = max(smoothstep(120.0, 300.0, y), wall);
     k = mix(k, 0.5, 0.9 * fz);
@@ -2052,6 +2071,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     s.level = 0;
     s.pale = 0;
     s.wall = 0;
+    s.face = 0;
     s.nrm = 0;
     s.emit = 0;
     int2 mapOrigin = tr.origin;
@@ -2193,6 +2213,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     if (snowy && wallM < 0.5) s.riser = 0.0;
     // Snow risers prefilter to snow; eased across the snowline, which far off is one straight contour.
     s.tread = mix(tread, snow, smoothstep(snowline - 6.0, snowline + 6.0, H));
+    s.face = needStone ? (snowy ? mix(stone, snow, 0.45 * (1.0 - smoothstep(6.0, 30.0, slope))) : stone * 0.95) : s.tread;
 
     if (n.y > 0 && !underGap) {
         if (float(v.y + 1) > snowline) s.albedo = snow;
@@ -2696,6 +2717,19 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, int shadows)
     // So is every riser of a tall, steep staircase wall: kept by its own drop alone, its deeper columns would show as
     // strata dashes among tread-coloured ones.
     keep = max(keep, max(s.wall, smoothstep(1.0, 2.5, steep) * smoothstep(100.0, 160.0, s.H)) * smoothstep(1.0, 3.0, cliff));
+    // A slope steep over a wide span (+-16 voxels and more) is seen almost edge-on to its treads: from afar it is a
+    // rock face. Its risers painted in the tread colour read as a veil of the ground above (grass, snow, hypsometric
+    // bands) hung across the rock, and its treads as pale lines ruled across it, so both take the face's rock.
+    float sus = 0.0;
+    if (s.mat == 0 && wf > 0.0 && s.H > SEA + 20.0 && shadows != 2) {
+        float R2 = max(16.0, 2.0 * cs);
+        float2 g2 = float2(groundSmoothL(x.tr, k, p.xz + float2(R2, 0)) - groundSmoothL(x.tr, k, p.xz - float2(R2, 0)),
+                           groundSmoothL(x.tr, k, p.xz + float2(0, R2)) - groundSmoothL(x.tr, k, p.xz - float2(0, R2))) / (2.0 * R2);
+        sus = smoothstep(0.6, 1.1, length(g2));
+        if (h.normal.y == 0) keep = max(keep, sus);
+        // Treads and risers alike light as the face they make up, or every tread is a lit line across it.
+        nl = normalize(mix(nl, normalize(float3(-g2.x, 1.0, -g2.y)), wf * sus));
+    }
     // A riser face only a column wide (a jog in a step edge) is a lone cube face: lit, it is a bright cube; in shade,
     // stone against sand, a dark notch. With the footprint it fades to the tread it stands for, colour and light.
     float lone = 0.0;
@@ -2705,7 +2739,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, int shadows)
                   + float(groundL(x.tr, k, h.voxel.xz - t) > groundL(x.tr, k, h.voxel.xz - t + o) + 0.5);
         lone = (1.0 - 0.5 * run) * smoothstep(0.01, 0.05, fp) * (1.0 - wn) * (1.0 - keep);
     }
-    float3 alb = h.normal.y == 0 ? mix(s.albedo, s.tread, max(wf * (1.0 - keep), lone)) : s.albedo;
+    float3 alb = h.normal.y == 0 ? mix(s.albedo, s.tread, max(wf * (1.0 - keep), lone)) : mix(s.albedo, s.face, wf * sus);
     float deep = x.L.night * smoothstep(0.32, 0.45, -x.L.sun.y);
     // Moonlight drains colour.
     alb = mix(alb, float3(dot(alb, float3(0.3, 0.59, 0.11))), 0.4 * x.L.night + 0.1 * deep);
@@ -2840,6 +2874,9 @@ static inline float3 fogColor(thread const Ctx& x, float3 d, float T) {
     return c * mix(float3(1.0), mix(cool, float3(1.0), away * away), T);
 }
 
+// Share of the lowland air haze left at height y (Sources/Sight.swift ports it).
+static inline float airAloft(float y) { return exp(-max(y - 120.0, 0.0) / 400.0); }
+
 // Exponential height fog plus a slow-drifting noise modulation that pools mist in valleys.
 // mistSamples < 0 takes the quality's count; 0 leaves out the valley mist (the closed-form terms only).
 static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, int mistSamples = -1) {
@@ -2871,6 +2908,11 @@ static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, 
     clear *= mix(1.0, 0.35, x.L.night);
     // The tail eases in, leaving the haze within a few percent of the old quadratic out to ~600.
     float air = K * (1.0 - exp(-c2 * t * t / K)) + lambda * t * t / (t + 1500.0);
+    // The haze thins aloft: a ray climbing to a summit or a tepui's rim leaves most of it below, so tall relief far
+    // off stands solid over a hazy foot instead of hazing to a flat, cloudless cut-out of the sky. Taken at the
+    // height of a point most of the haze lies before, its climb capped, so farther along a ray the haze never comes
+    // out more than ~5% thinner than nearer.
+    air *= airAloft(o.y + min(d.y, 0.2) * 0.75 * min(t, 2000.0));
     return exp(-((heightTerm + air + mist) * clear + 6.0 * smoothstep(x.tr.fadeStart, x.tr.rmax, r)));
 }
 

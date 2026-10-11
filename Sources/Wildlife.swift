@@ -161,10 +161,9 @@ final class Wildlife {
     }
 
     private func ground(_ x: Double, _ z: Double) -> Double { heightAt(x, z) ?? 200 }
-    // Highest a flock flies over ground g: low over the lowland, up with the land among the massifs, and under the
-    // cloud base unless the ground itself rises past it.
+    // Highest a flock flies over ground g: under the cloud base, unless the ground itself rises past it.
     private func topAlt(over g: Double, clearance c: Double) -> Double {
-        min(max(190, g + 120), max(FlightCamera.ceiling - 20, g + 2 * c))
+        max(FlightCamera.ceiling - 20, g + 2 * c)
     }
 
     // Which flocks the hour calls for, one per slot. Gull slots fall back to songbirds away from water.
