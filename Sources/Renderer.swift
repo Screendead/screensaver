@@ -512,8 +512,9 @@ final class World {
         guard done else { cb.commit(); return 0 }
 
         let index = j.index, o = j.origin, t0 = j.t0
-        let finish = { [weak self] (heights: [Float], floors: [Float], top: Float) in
-            guard let self else { return }
+        // Strong captures: a weak reference would give World a side table, which slows every retain of it (the camera
+        // and the birds look heights up thousands of times a frame).
+        let finish = { (heights: [Float], floors: [Float], top: Float) in
             buf.origin = o
             buf.globalMax = top + 1
             buf.siteList = World.readSites(buf.sites)
@@ -564,9 +565,8 @@ final class World {
             finish(r.0, r.1, r.2)
             return (cb.gpuEndTime - cb.gpuStartTime) * 1000
         } else {
-            cb.addCompletedHandler { [weak self] cb in
-                guard cb.status == .completed else { DispatchQueue.main.async { self?.pending = false }; return }
-                guard let self else { return }
+            cb.addCompletedHandler { cb in
+                guard cb.status == .completed else { DispatchQueue.main.async { self.pending = false }; return }
                 let r = World.readBack(self.cpuMips.last!)
                 DispatchQueue.main.async { finish(r.0, r.1, r.2) }
             }
@@ -1058,9 +1058,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         renderScale = battery ? 0.7 : 1.0
         edgeRadius = Clipmap.handoff(battery ? Clipmap.levels - 1 : Clipmap.levels)
         super.init()
-        wildlife.heightAt = { [unowned world] x, z in world.height(x: x, z: z) }
-        wildlife.giantsAt = { [unowned world] in world.giants }
-        camera.towersAt = { [unowned towers] in towers.list }
+        wildlife.heightAt = { [unowned(unsafe) world] x, z in world.height(x: x, z: z) }
+        wildlife.giantsAt = { [unowned(unsafe) world] in world.giants }
+        camera.towersAt = { [unowned(unsafe) towers] in towers.list }
         // VR_START=x,z,yawDeg: the flight starts there (tests).
         if let v = ProcessInfo.processInfo.environment["VR_START"]?.split(separator: ",").compactMap({ Double($0) }), v.count >= 3 {
             camera.start(at: SIMD2(v[0], v[1]), yaw: v[2] * .pi / 180)

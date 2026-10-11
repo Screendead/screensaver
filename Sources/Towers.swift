@@ -82,8 +82,8 @@ final class Towers {
             let n = Towers.grid
             encode(cb, into: buffer, first: c &- Int32(n / 2), n: n)
             // A failed placement keeps the old list and is tried again on the next update.
-            let done = { [weak self] (ok: Bool) in
-                guard let self else { return }
+            // Strong: a weak reference would give Towers a side table, slowing the camera's many reads of the list.
+            let done = { (ok: Bool) in
                 if ok {
                     self.list = Towers.parse(self.buffer, count: n * n * Towers.members)
                     self.cellAt = c
