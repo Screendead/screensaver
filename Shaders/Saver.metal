@@ -784,7 +784,7 @@ kernel void reduceCpu(texture2d<float, access::read> src [[texture(0)]],
 // and lamp of a site lies within 128 of its centre, so a column only needs its own and the 8 neighbouring cells.
 constant int SITE_CELL = 128;
 constant int SITE_GRID = 18;
-constant int MAX_PARTS = 16;
+constant int MAX_PARTS = 32;
 constant int MAX_LAMPS = 8;
 
 // Must match the layout read in Sources/Renderer.swift (World.SiteLayout).
@@ -1227,8 +1227,9 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
 }
 
 // structTex bits: 0-3 material, 4-6 roof plane (1 -x, 2 +x, 3 -z, 4 +z, 5 level ridge), 7 flat top, 8 clearing,
-// 9-12 part, 13-21 site, 22-25 window on side (-x, +x, -z, +z), 26-28 door side + 1, 29 chimney.
-constant uint S_FLAT = 1u << 7, S_CLEAR = 1u << 8, S_CHIMNEY = 1u << 29;
+// 9-13 part, 14-22 site, 23 chimney, 24-27 feature, 28-29 ground mark.
+constant uint S_FLAT = 1u << 7, S_CLEAR = 1u << 8, S_CHIMNEY = 1u << 23;
+constant uint S_PART = 9u, S_SITE = 14u, S_FEAT = 24u;
 
 struct Claim { bool hit; float H, gl, gh, base; uint bits; };
 
@@ -1239,6 +1240,33 @@ static inline Claim solidClaim(float H, float base, uint bits) {
 // Solid below gl and from gh to H: lintels, eaves, decks and hulls over open ground or water.
 static inline Claim gapClaim(float gl, float gh, float H, uint bits) {
     Claim c; c.hit = true; c.H = H; c.gl = gl; c.gh = gh; c.base = gh; c.bits = bits; return c;
+}
+
+// A house's openings on the wall column at q: windows on sides (bit per side -x, +x, -z, +z) and the door side + 1.
+static inline uint2 houseOpenings(Part P, int2 q, int2 c) {
+    int2 r0 = c + P.o;
+    bool axisZ = (P.flags & F_AXISZ) != 0;
+    int i = axisZ ? q.y - r0.y : q.x - r0.x;
+    int j = axisZ ? q.x - r0.x : q.y - r0.y;
+    int L = axisZ ? P.sz.y : P.sz.x, Dt = axisZ ? P.sz.x : P.sz.y;
+    int e = min(j, Dt - 1 - j);
+    uint hh = uint(P.y2);
+    bool flat = (P.flags & F_FLAT) != 0;
+    // Sides 0 -x, 1 +x, 2 -z, 3 +z: the long walls face across, the gables along.
+    uint sLo = axisZ ? 0u : 2u, sHi = axisZ ? 1u : 3u, gLo = axisZ ? 2u : 0u, gHi = axisZ ? 3u : 1u;
+    uint win = 0u, door = 0u;
+    int wallJ0 = flat ? 0 : 1, wallJ1 = flat ? Dt - 1 : Dt - 2;
+    if ((j == wallJ0 || j == wallJ1)) {
+        uint side = j == wallJ0 ? sLo : sHi;
+        int doorI = L / 2;
+        bool doorHi = (hh & 4u) != 0u;
+        bool doorWall = (j == wallJ1) == doorHi;
+        if (i == doorI && doorWall) door = side + 1u;
+        else if ((i == 1 && ((hh >> (doorWall ? 0 : 1)) & 1u) != 0u) || (i == L - 2 && ((hh >> (doorWall ? 1 : 3)) & 1u) != 0u)
+                 || (i == doorI && !doorWall && ((hh >> 6) & 1u) != 0u)) win |= 1u << side;
+    }
+    if ((i == 0 || i == L - 1) && e == (Dt - 1) / 2 && ((hh >> 5) & 1u) != 0u) win |= 1u << (i == 0 ? gLo : gHi);
+    return uint2(win, door);
 }
 
 // One part's column at q (map-local), on ground g; `near` collects the clearing around it.
@@ -1264,21 +1292,7 @@ static Claim stampPart(Part P, int2 q, int2 c, float g, texture2d<float, access:
         int e = min(j, Dt - 1 - j);
         uint hh = uint(P.y2);
         bool flat = (P.flags & F_FLAT) != 0, tent = (P.flags & F_TENT) != 0, stilt = (P.flags & F_STILT) != 0;
-        // Sides 0 -x, 1 +x, 2 -z, 3 +z: the long walls face across, the gables along.
-        uint sLo = axisZ ? 0u : 2u, sHi = axisZ ? 1u : 3u, gLo = axisZ ? 2u : 0u, gHi = axisZ ? 3u : 1u;
-        uint win = 0u, door = 0u;
-        int wallJ0 = flat ? 0 : 1, wallJ1 = flat ? Dt - 1 : Dt - 2;
-        if (!tent && (j == wallJ0 || j == wallJ1)) {
-            uint side = j == wallJ0 ? sLo : sHi;
-            int doorI = L / 2;
-            bool doorHi = (hh & 4u) != 0u;
-            bool doorWall = (j == wallJ1) == doorHi;
-            if (i == doorI && doorWall) door = side + 1u;
-            else if ((i == 1 && ((hh >> (doorWall ? 0 : 1)) & 1u) != 0u) || (i == L - 2 && ((hh >> (doorWall ? 1 : 3)) & 1u) != 0u)
-                     || (i == doorI && !doorWall && ((hh >> 6) & 1u) != 0u)) win |= 1u << side;
-        }
-        if (!tent && (i == 0 || i == L - 1) && e == (Dt - 1) / 2 && ((hh >> 5) & 1u) != 0u) win |= 1u << (i == 0 ? gLo : gHi);
-        uint bits = (win << 22) | (door << 26);
+        uint bits = 0u;
         if (flat) {
             if (g < SEA + 1.0) return noClaim();
             return solidClaim(float(P.y1), g, mat | S_FLAT | bits);
@@ -1441,7 +1455,7 @@ kernel void stampStructures(texture2d<float, access::read> src [[texture(0)]],
                     Claim cl = stampPart(unpackPart(s.parts[k]), q, c, col.r, src, uint(s.head.w), nk);
                     if (cl.hit) {
                         dst.write(float4(cl.H, cl.gl, cl.gh, -cl.base), gid);
-                        st.write(uint4(cl.bits | (uint(k) << 9) | (uint(si) << 13), 0, 0, 0), gid);
+                        st.write(uint4(cl.bits | (uint(k) << S_PART) | (uint(si) << S_SITE), 0, 0, 0), gid);
                         return;
                     }
                     if (nk && !near) { near = true; nearSite = si; }
@@ -1449,7 +1463,7 @@ kernel void stampStructures(texture2d<float, access::read> src [[texture(0)]],
             }
         if (near) {
             dst.write(float4(col.rgb, -col.r), gid);
-            st.write(uint4(S_CLEAR | (uint(nearSite) << 13), 0, 0, 0), gid);
+            st.write(uint4(S_CLEAR | (uint(nearSite) << S_SITE), 0, 0, 0), gid);
             return;
         }
     }
@@ -2609,8 +2623,8 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         uint sb = st.read(uint2(clamp(v.xz, int2(0), int2(tr.size - 1)))).r;
         int mat = int(sb & 15u);
         uint plane = (sb >> 4) & 7u;
-        device const Site& site = sites[(sb >> 13) & 511u];
-        Part P = unpackPart(site.parts[(sb >> 9) & 15u]);
+        device const Site& site = sites[(sb >> S_SITE) & 511u];
+        Part P = unpackPart(site.parts[(sb >> S_PART) & 31u]);
         uint sh = uint(site.head.w);
         float age = site.info.y;
         float Ht = col.x;
@@ -2676,7 +2690,8 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
             uint side = n.x < 0 ? 0u : n.x > 0 ? 1u : n.z < 0 ? 2u : 3u;
             float fy = wy - float(P.y0);
             float e = clamp(fpA * 0.6, 0.03, 0.25);
-            if (((sb >> (22u + side)) & 1u) != 0u) {
+            uint2 op = houseOpenings(P, v.xz, site.head.xy - tr.origin);
+            if (((op.x >> side) & 1u) != 0u) {
                 float mx = smoothstep(0.28 - e, 0.28 + e, uv.x) * smoothstep(0.72 + e, 0.72 - e, uv.x);
                 // The height band is not foreshortened when the wall is seen edge-on, so the glow keeps it and
                 // only the band across the wall fades to its mean.
@@ -2686,7 +2701,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
                 a = mix(a, float3(0.025, 0.025, 0.03), m);
                 winM = mix(mx, 0.44, smoothstep(0.05, 0.3, fpA)) * mix(my, 0.3, smoothstep(0.3, 1.0, fp));
             }
-            if (((sb >> 26) & 7u) == side + 1u) {
+            if (op.y == side + 1u) {
                 float m = smoothstep(0.25 - e, 0.25 + e, uv.x) * smoothstep(0.75 + e, 0.75 - e, uv.x) * smoothstep(1.6 + e, 1.6 - e, fy);
                 a = mix(a, float3(0.045, 0.035, 0.028), mix(m, 0.4, smoothstep(0.05, 0.3, fpA)));
             }
@@ -2694,7 +2709,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         // Lamps: flame on a fire's top course, a lantern atop its post, light in the windows.
         int li = ((P.flags >> 8) & 15) - 1;
         if (li >= 0) {
-            float3 E = lampState[((sb >> 13) & 511u) * uint(MAX_LAMPS) + uint(li)].rgb * LAMP_EMIT[int(site.lamps[li].w) % 16];
+            float3 E = lampState[((sb >> S_SITE) & 511u) * uint(MAX_LAMPS) + uint(li)].rgb * LAMP_EMIT[int(site.lamps[li].w) % 16];
             bool topCourse = float(v.y) >= Ht - 1.0;
             if (P.kind == P_FIRE && topCourse) {
                 float flame = perlin3(float3(wq * 2.5, wy * 1.6 - time * 1.4), seed + 320u) * 0.5 + 0.5;

@@ -100,7 +100,7 @@ final class World {
     static let size = 2048
     static let cpuLevel = 2
     // Must match SITE_GRID, MAX_LAMPS and MAX_PARTS (the Site struct) in Shaders/Saver.metal.
-    static let siteGrid = 18, siteCell = 128, maxLamps = 8, maxParts = 16
+    static let siteGrid = 18, siteCell = 128, maxLamps = 8, maxParts = 32
     static let siteStride = 32 + 16 * maxLamps + 16 * maxParts
     // Recentred once the camera drifts this far from the map centre. The LOD handoff (Renderer.makeFrame) relies
     // on the map reaching 1024 - 8 - (this + the drift while a regeneration is in flight) around the camera.
