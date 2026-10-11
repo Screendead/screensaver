@@ -347,7 +347,7 @@ final class World {
         let cur = shown
         let local = center - SIMD2(Double(cur.origin.x), Double(cur.origin.y))
         let drift = max(abs(local.x - half), abs(local.y - half))
-        let o = SIMD2<Int32>(Int32(floor((center.x - half) / 64)) * 64, Int32(floor((center.y - half) / 64)) * 64)
+        let o = World.mapOrigin(center)
         if cur.origin.x == Int32.min || drift > 340 || (synchronous && drift > World.recentre) {
             if job != nil { advance(pieces: Int.max, wait: true); return }
             if pending { return } // the in-flight job will land momentarily
@@ -420,18 +420,9 @@ final class World {
                     enc.setTexture(scratch, index: 0)
                     enc.setTexture(buf.rawGaps, index: 1)
                 case 1:
-                    if band < 2 {
-                        // The giant table, with the cheap cleanup pass (half in each of its first two pieces): sites and
-                        // trees read it. Centred on the map's middle cell.
-                        let mid = SIMD2<Double>(Double(j.origin.x), Double(j.origin.y)) + Double(World.size / 2)
-                        var gi = SIMD4<Int32>(Int32(floor(mid.x / World.giantCell)) - Int32(World.giantWin / 2),
-                                              Int32(floor(mid.y / World.giantCell)) - Int32(World.giantWin / 2), Int32(band * World.giantWin / 2), Int32(bitPattern: seed))
-                        enc.setComputePipelineState(giantPipeline)
-                        enc.setBuffer(buf.giants, offset: 0, index: 0)
-                        enc.setBytes(&gi, length: MemoryLayout<SIMD4<Int32>>.stride, index: 1)
-                        enc.dispatchThreads(MTLSize(width: World.giantWin, height: World.giantWin / 2, depth: 1),
-                                            threadsPerThreadgroup: MTLSize(width: 8, height: 4, depth: 1))
-                    }
+                    // The giant table, with the cheap cleanup pass (half in each of its first two pieces): sites and
+                    // trees read it.
+                    if band < 2 { encodeGiants(enc, into: buf, origin: j.origin, half: band) }
                     enc.setComputePipelineState(cleanupPipeline)
                     enc.setTexture(scratch, index: 0)
                     enc.setTexture(buf.tex, index: 1)
@@ -600,6 +591,35 @@ final class World {
             cb.commit()
         }
         return 0
+    }
+
+    // Half the giant table round the map at `origin`, centred on its middle cell.
+    private func encodeGiants(_ enc: MTLComputeCommandEncoder, into buf: Buffer, origin: SIMD2<Int32>, half: Int) {
+        let mid = SIMD2<Double>(Double(origin.x), Double(origin.y)) + Double(World.size / 2)
+        var gi = SIMD4<Int32>(Int32(floor(mid.x / World.giantCell)) - Int32(World.giantWin / 2),
+                              Int32(floor(mid.y / World.giantCell)) - Int32(World.giantWin / 2), Int32(half * World.giantWin / 2), Int32(bitPattern: seed))
+        enc.setComputePipelineState(giantPipeline)
+        enc.setBuffer(buf.giants, offset: 0, index: 0)
+        enc.setBytes(&gi, length: MemoryLayout<SIMD4<Int32>>.stride, index: 1)
+        enc.dispatchThreads(MTLSize(width: World.giantWin, height: World.giantWin / 2, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: 8, height: 4, depth: 1))
+    }
+
+    // Before the first map: the giant table (and `giants`) the map centred on `center` would have, so the start can be
+    // chosen by it without building a map there. placeGiants depends on the cells alone; the map keeps the slots it fills.
+    func placeGiants(around center: SIMD2<Double>) {
+        guard shown.origin.x == Int32.min, let cb = genQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return }
+        let buf = shown
+        for half in 0..<2 { encodeGiants(enc, into: buf, origin: World.mapOrigin(center), half: half) }
+        enc.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        buf.giantList = World.readGiants(buf.giants)
+    }
+
+    static func mapOrigin(_ center: SIMD2<Double>) -> SIMD2<Int32> {
+        let half = Double(World.size / 2)
+        return SIMD2<Int32>(Int32(floor((center.x - half) / 64)) * 64, Int32(floor((center.y - half) / 64)) * 64)
     }
 
     static let logSites = ProcessInfo.processInfo.environment["VR_SITES"] != nil
@@ -1088,10 +1108,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         if let v = ProcessInfo.processInfo.environment["VR_START"]?.split(separator: ",").compactMap({ Double($0) }), v.count >= 3 {
             camera.start(at: SIMD2(v[0], v[1]), yaw: v[2] * .pi / 180)
         }
-        world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
-        if ProcessInfo.processInfo.environment["VR_START"] == nil, camera.startNearGiant() {
-            world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
+        if ProcessInfo.processInfo.environment["VR_START"] == nil {
+            world.placeGiants(around: SIMD2(camera.position.x, camera.position.z))
+            _ = camera.startNearGiant()
         }
+        world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
         towers.update(center: SIMD2(camera.position.x, camera.position.z), queue: queue, wait: true)
         // Placing the camera reads only the far heights, which level 3 holds: the CPU waits for that level alone.
         refreshFar(only: 3)
