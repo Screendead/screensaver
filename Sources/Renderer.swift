@@ -975,6 +975,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     private static let lampReach: [Double] = [1, 20, 16, 7, 10, 24, 22, 6]   // LAMP_R in Shaders/Saver.metal
     private var tileMasks = [UInt32](repeating: 0, count: 16 * 16)
     static let ditherCells = 864.0
+    // Without the dither the history is the screen's own pixels and the scene renders at most this many, upsampled:
+    // half a 3456x2234 display's width, about 10-16 ms of GPU on an M2 Max.
+    static let fullResPixels = 0.25 * 3456 * 2234
     private var historyIndex = 0
     private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
     let world: World
@@ -1013,6 +1016,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     // Holds the time of day fixed for snapshots, so exposure and the shot director see the rendered sun.
     var pinnedPhase: Double?
     var renderScale: Double
+    let dither: Bool
     // The screen's size in pixels: the dither grid follows it, while the drawable holds just one pixel per cell.
     private var screenPixels = CGSize.zero
 
@@ -1103,6 +1107,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         birdBuffers = (0..<3).compactMap { _ in device.makeBuffer(length: Wildlife.bufferLength, options: .storageModeShared) }
         guard birdBuffers.count == 3 else { return nil }
         self.battery = battery
+        self.dither = dither
         renderScale = battery ? 0.7 : 1.0
         edgeRadius = Clipmap.handoff(battery ? Clipmap.levels - 1 : Clipmap.levels)
         super.init()
@@ -1168,7 +1173,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         view.autoResizeDrawable = false
         screenPixels = CGSize(width: view.bounds.width * backingScale, height: view.bounds.height * backingScale)
         // postFragment gives every pixel of a cell the cell's colour, so presenting the cell grid and letting the layer
-        // scale it up with nearest filtering shows the same pixels.
+        // scale it up with nearest filtering shows the same pixels (without the dither a cell is one pixel).
         let s = sizes(screenPixels)
         view.drawableSize = CGSize(width: s.ow, height: s.oh)
         (view.layer as? CAMetalLayer)?.magnificationFilter = .nearest
@@ -1231,12 +1236,14 @@ final class Renderer: NSObject, MTKViewDelegate {
                      world: world)
     }
 
-    // Scene and history sizes for an output size: the retro dither shows one flat colour per cell, so the temporal
-    // history only needs the cell grid, and the scene renders at (a fraction of) it.
-    private func sizes(_ outputSize: CGSize) -> (ow: Int, oh: Int, w: Int, h: Int) {
-        let cell = max(1.0, (outputSize.width / Renderer.ditherCells).rounded())
+    // Scene and history sizes for an output size, and the scene's scale: the retro dither shows one flat colour per
+    // cell, so the temporal history only needs the cell grid, and the scene renders at (a fraction of) it. Without the
+    // dither the history is every pixel and the scene is capped at fullResPixels.
+    private func sizes(_ outputSize: CGSize) -> (ow: Int, oh: Int, w: Int, h: Int, scale: Double) {
+        let cell = dither ? max(1.0, (outputSize.width / Renderer.ditherCells).rounded()) : 1
         let ow = max(16, Int((outputSize.width / cell).rounded())), oh = max(16, Int((outputSize.height / cell).rounded()))
-        return (ow, oh, max(16, Int(Double(ow) * renderScale)), max(16, Int(Double(oh) * renderScale)))
+        let scale = renderScale * (dither ? 1 : min(1, (Renderer.fullResPixels / Double(ow * oh)).squareRoot()))
+        return (ow, oh, max(16, Int(Double(ow) * scale)), max(16, Int(Double(oh) * scale)), scale)
     }
 
     // Sets the frustum the simulation sees before the first frame is encoded.
@@ -1246,7 +1253,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         aspect = Float(s.w) / Float(s.h)
     }
 
-    func makeFrame(size: CGSize) -> Frame {
+    func makeFrame(size: CGSize, scale: Double) -> Frame {
         var f = Frame()
         let b = camera.basis
         let o = SIMD3(Double(world.origin.x), 0, Double(world.origin.y))
@@ -1278,7 +1285,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         // Halton(2,3) subpixel jitter, accumulated by the temporal resolve; upsampling needs more phases to
         // cover every output pixel.
-        let phases = min(64, Int((8 / min(renderScale * renderScale, 1)).rounded(.up)))
+        let phases = min(64, Int((8 / min(scale * scale, 1)).rounded(.up)))
         let k = Int(frameIndex) % phases + 1
         func halton(_ i: Int, _ b: Int) -> Double { var f = 1.0, r = 0.0, i = i; while i > 0 { f /= Double(b); r += f * Double(i % b); i /= b }; return r }
         f.jitter = SIMD4(Float((halton(k, 2) - 0.5) * 2 / size.width), Float((halton(k, 3) - 0.5) * 2 / size.height), 0, 0)
@@ -1312,7 +1319,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
 
     func encode(into cb: MTLCommandBuffer, output: MTLTexture, outputSize: CGSize) {
-        let (ow, oh, w, h) = sizes(outputSize)
+        let (ow, oh, w, h, scale) = sizes(outputSize)
         if sceneTex?.width != w || sceneTex?.height != h || history.first?.width != ow || history.first?.height != oh {
             let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: w, height: h, mipmapped: false)
             td.usage = [.renderTarget, .shaderRead]
@@ -1326,7 +1333,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard let sceneTex else { return }
         sceneSize = (w, h)
         aspect = Float(w) / Float(h)
-        var f = makeFrame(size: CGSize(width: w, height: h))
+        var f = makeFrame(size: CGSize(width: w, height: h), scale: scale)
         frameIndex = (frameIndex + 1).truncatingRemainder(dividingBy: 4096)
         bakeClouds(into: cb, frame: &f)
         if Renderer.fullCoarse { clipmap.invalidate() }
