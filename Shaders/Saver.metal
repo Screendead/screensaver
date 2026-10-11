@@ -714,7 +714,10 @@ static inline float towerErosion(Tower T, TowerPlan P, float R, float y, uint se
     float n = perlin3(q / 34.0, seed + 541u) + 0.4 * perlin3(q / 12.0, seed + 542u);
     float corner = smoothstep(0.3, 0.5, abs(P.am) * float(T.N) / 6.2831853);
     float zone = saturate(perlin3(float3(P.dir * 1.6, y / 170.0), seed + 543u) * 2.0 + 0.2);
-    return 16.0 * saturate((n + 0.3 * corner) * 2.0 - 0.5) * zone;
+    float e = 16.0 * saturate((n + 0.3 * corner) * 2.0 - 0.5) * zone;
+    // At least 6 deep wherever the face is worn at all: a depth from zero would follow the jogs of a diagonal face and
+    // carve it in slivers a column wide.
+    return e < 0.5 ? 0.0 : max(e, 6.0);
 }
 
 // The tower's share of column wf: its plinth, stages, shell and openings over the terrain column col. s: the column
@@ -776,8 +779,8 @@ static inline Col towerShape(Col col, Tower T, float2 wf, int s, uint seed) {
             if (hole && !open) { open = true; lo = yc; }
             if (!hole && open) {
                 open = false;
-                // A pocket a single course tall reads as a dark brick: only those of two courses or more stay.
-                if (ne < 4 && yc - lo >= 10.0) { eh[2 * ne] = lo; eh[2 * ne + 1] = yc; ne++; }
+                // Pockets a course or two tall read as dark bricks: only those of three courses or more stay.
+                if (ne < 4 && yc - lo >= 15.0) { eh[2 * ne] = lo; eh[2 * ne + 1] = yc; ne++; }
             }
         }
         if (open) H = lo;
@@ -799,10 +802,8 @@ static inline Col towerShape(Col col, Tower T, float2 wf, int s, uint seed) {
         }
     }
     if (shell && s < 4 && Pm.reff < Rm - 10.0) {
-        // The shell is open: its floor, and a hall under it.
-        float fl = yS + 3.0;
-        H = min(H, fl);
-        if (ng < 3) { gaps[2 * ng] = fl - 24.0; gaps[2 * ng + 1] = fl - 4.0; ng++; }
+        // The shell is open to the sky, its floor a court where a grove can root.
+        H = min(H, yS + 3.0);
     }
     if (s < 4) {
         // A passage through the base under arches, in some towers.
@@ -824,15 +825,14 @@ static inline Col towerShape(Col col, Tower T, float2 wf, int s, uint seed) {
         float dt = abs(Pm.t - bay * T.bw);
         int ns = int((H - y0) / T.Sy);
         // A loggia under each stage's rim: a storey of deep arches round the stage, wherever its top still stands.
-        float galLo = 1e9;
-        if (!shell && wallIn < 9.0 && dt < 0.32 * T.bw && ng < 3) {
+        if (!shell && wallIn < 6.0 && dt < 0.32 * T.bw && ng < 3) {
             float top = tierY(T, Pm, m, seed);
             float hi = top - 4.0 - (dt > 0.25 * T.bw ? 2.0 : dt > 0.18 * T.bw ? 1.0 : 0.0);
             float lo = top - 4.0 - floor(T.Sy * 1.1);
-            if (hi <= H - 3.0 && lo > y0 + 4.0) { gaps[2 * ng] = lo; gaps[2 * ng + 1] = hi; ng++; galLo = lo; }
+            if (hi <= H - 3.0 && lo > y0 + 4.0) { gaps[2 * ng] = lo; gaps[2 * ng + 1] = hi; ng++; }
         }
-        // Arcades through the shell's wall, every bay of every other storey; windows deep in the stage walls below,
-        // a few storeys of each bay.
+        // Arcades through the shell's wall, every bay of every other storey. (Single windows in the stage walls read as
+        // slots punched in a slab, a grid of them as a block of flats: the loggias carry the rhythm.)
         if (through && dt < 3.0) {
             for (int st = 40; st >= 0; st--) {
                 if (ng >= 3) break;
@@ -840,17 +840,6 @@ static inline Col towerShape(Col col, Tower T, float2 wf, int s, uint seed) {
                 float lo = y0 + float(st) * T.Sy + 3.0;
                 float hi = lo + floor(T.Sy * 0.75) - (dt > 2.0 ? 2.0 : dt > 1.0 ? 1.0 : 0.0);
                 if (hi > H - 3.0) continue;
-                gaps[2 * ng] = lo; gaps[2 * ng + 1] = hi; ng++;
-            }
-        } else if (!shell && wallIn < 4.5 && dt < 2.0) {
-            for (int st = 40; st >= 0; st--) {
-                if (ng >= 3) break;
-                if (st >= ns) continue;
-                uint wh = hash3i(int3(Pm.face + 16 * m, int(bay), st), seed + 520u);
-                if (hashf(wh) > (m == 0 ? 0.12 : 0.06)) continue;
-                float lo = y0 + float(st) * T.Sy + 4.0;
-                float hi = lo + floor(T.Sy * 0.55) - (dt > 1.0 ? 1.0 : 0.0);
-                if (hi > H - 3.0 || hi > galLo - 3.0) continue;
                 gaps[2 * ng] = lo; gaps[2 * ng + 1] = hi; ng++;
             }
         }
@@ -2642,6 +2631,7 @@ struct Surface {
     float wall;     // megaWall: among the great walls
     float3 nrm;     // structures: the plane a roof voxel shades as (zero: the face normal)
     float3 emit;    // fire, lanterns and lit windows
+    bool planar;    // a built wall shading as its plane (s.nrm): no corner AO, which would line every jog of a diagonal face
 };
 
 // Autumn foliage: a slow Perlin hue field runs lingering green, gold, orange, scarlet to crimson;
@@ -2793,6 +2783,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     s.face = 0;
     s.nrm = 0;
     s.emit = 0;
+    s.planar = false;
     int2 mapOrigin = tr.origin;
     float cs = tr.lod[k].w;
     float4 col4 = columnL(tr, k, v.xz);
@@ -3541,11 +3532,13 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
             float yk = Hb + Ht * tierTop(th, j, K);
             if (yk >= wy) { ledge = min(ledge, yk); break; }
         }
-        float hang = 80.0 * saturate(perlin2(float2(along / 19.0, ledge / 50.0), seed + 537u) * 1.3
-                                     + 0.15 * perlin2(float2(along / 7.0, 1.7), seed + 538u) + 0.1) * wet;
-        float drop = ledge - wy;
-        float vine = smoothstep(hang + 3.0, hang - 3.0, drop) * step(0.0, drop);
-        float vm = mix(vine, 0.5 * smoothstep(60.0, 0.0, drop) * wet, smoothstep(0.08, 0.4, fpA));
+        // Ivy in mats spilling over from the ledge above, thinning down the face in ragged patches: a pattern in the
+        // face's plane, never strands hanging column by column.
+        float drop = max(ledge - wy, 0.0);
+        float reach = wet * (0.6 - drop / 110.0);
+        float pn = perlin2(float2(along / 23.0, wy / 17.0), seed + 537u) + 0.4 * perlin2(float2(along / 8.0, wy / 6.0), seed + 538u);
+        float vine = smoothstep(-0.05, 0.05, pn + reach - 0.3);
+        float vm = mix(vine, saturate((reach - 0.3) * 1.4 + 0.5) * step(0.0, reach), smoothstep(0.08, 0.4, fpA));
         float tex = fp < 0.2 ? (hashf(hash3i(int3(int(floor(along * 3.0)), int(floor(wy * 3.0)), 7), seed + 539u)) < 0.35 ? 0.7 : 1.05) : 0.92;
         m = mix(m, moss * mix(tex, 0.92, smoothstep(0.05, 0.2, fp)), vm * 0.9);
         // A damp band of moss along the foot.
@@ -3574,6 +3567,16 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
     s.pale = n.y > 0 && wy > snowline ? 1.0 : 0.0;
     s.slope = 0.0;
     s.wall = 1.0;
+    // A face of the plan's polygon is a plane: its voxel jogs shade as that plane (facing in or out), or a diagonal face
+    // is ruled with a line per column. Faces across it (a pier's or a pocket's sides) keep their own.
+    if (n.y == 0) {
+        float2 dc = w + 0.5 * cs - R.a.xy;
+        float seg = 6.2831853 / R.b.z;
+        float fa = R.b.w + seg * (floor((atan2(dc.y, dc.x) - R.b.w) / seg) + 0.5);
+        float3 pn = float3(cos(fa), 0.0, sin(fa));
+        float c = dot(float3(n), pn);
+        if (abs(c) > 0.3) { s.nrm = c > 0.0 ? pn : -pn; s.planar = true; }
+    }
     s.level = n.y > 0 ? 1.0 : 0.0;
     // A few rooms lit at night on some towers: the faces of an opening (back wall, reveals, sill and lintel).
     // Faded out across the 1-voxel map's morph band: the coarser levels light no rooms.
@@ -3682,7 +3685,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // Seen in water (reflections, the bed) the surface is rippled out of focus: no corner AO, a coarse sky visibility.
     bool lite = shadows != 1;
     // A wall under a roof skips corner AO too: every jog of a back wall is a concave corner, a dark line per column.
-    float ao = (s.level < 1.0 ? mix(k == 0 && !lite && !(h.normal.y == 0 && roofW > 0.0) ? mix(cornerAO(x.tr.hm, x.tr.size, h.voxel, h.normal, uv), 0.85, wf) : 0.85, 1.0, s.level) : 1.0) * s.canopy;
+    float ao = (s.level < 1.0 ? mix(k == 0 && !lite && !(h.normal.y == 0 && roofW > 0.0) && !s.planar ? mix(cornerAO(x.tr.hm, x.tr.size, h.voxel, h.normal, uv), 0.85, wf) : 0.85, 1.0, s.level) : 1.0) * s.canopy;
     float drop = s.H - min(min(s.nh.x, s.nh.y), min(s.nh.z, s.nh.w));
     // Cliffs several pixels tall keep their strata; only sub-pixel stairs take the tread colour. Keyed to the
     // column's deepest drop, not this face's: the faces of a wall running diagonal to the grid alternate
@@ -3745,9 +3748,10 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     float hiSun = smoothstep(0.15, 0.45, L.key.y) * (1.0 - L.night);
     float sh = 1.0;
     if (shadows > 0 && ndl > 0.0 && L.shadows && x.shadowMode != 3.0) {
-        // Keep the origin inside the hit voxel's footprint so boundary columns can't self-shadow.
-        float3 so = p + n * 0.02;
-        so.xz = clamp(so.xz, float2(h.voxel.xz) * cs + 0.002, float2(h.voxel.xz) * cs + (cs - 0.002));
+        // Keep the origin inside the hit voxel's footprint so boundary columns can't self-shadow. A planar wall's ray
+        // starts out in front of its plane: from a jog's own face it would cross the next column and stripe the wall.
+        float3 so = p + (s.planar ? s.nrm * 1.5 : float3(n) * 0.02);
+        if (!s.planar) so.xz = clamp(so.xz, float2(h.voxel.xz) * cs + 0.002, float2(h.voxel.xz) * cs + (cs - 0.002));
         // Prefiltered, the ray starts a step above the column, and single steps shade by their expected cover.
         so.y = mix(so.y, max(so.y, s.H) + 1.0, wf2);
         // With the shadow-height maps the ray only reaches SHADOW_NEAR (contact and cliff shadows); the maps hold every
@@ -3789,7 +3793,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     skyFill *= mix(float3(1.0), float3(0.62, 0.58, 0.85), L.gold * L.sunAmt);
     // Under a roof the visibility is taken where the point is, not at its column's centre: column by column it would
     // jump between reaching past the roof's edge and not, striping the wall.
-    float2 svAt = mix((float2(h.voxel.xz + h.normal.xz) + 0.5) * cs, p.xz, max(wf2, ov));
+    float2 svAt = s.planar ? p.xz + s.nrm.xz * 1.5 : mix((float2(h.voxel.xz + h.normal.xz) + 0.5) * cs, p.xz, max(wf2, ov));
     float svY = wf2 > 0.0 ? mix(p.y, groundSmoothL(x.tr, k, p.xz), wf2) : p.y;
     float sv = x.prof & 16 || roofW >= 1.0 ? 1.0 : skyVisibility(x.tr, k, svAt, svY, lite || fp > 5.0 ? 2 : fp > 2.0 ? 1 : 0);
     // Under a roof the sky comes only through the mouth, an even share well under open shade's: the visibility samples
