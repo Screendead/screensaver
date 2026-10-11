@@ -6098,7 +6098,7 @@ static float4 bioSpot(float2 q, int plane, float cell, float pr, float r, float 
     float dd = length(q - c);
     if (dd >= m) return float4(0, 0, 0, 2);
     float rr = r * (0.6 + 0.8 * hashf(h3));
-    float re = max(rr, 0.8 * fp);
+    float re = max(rr, 1.8 * fp);
     float e2 = dd * dd / (re * re);
     float g = (2.0 * exp(-e2) + 0.5 * exp(-e2 / 9.0)) * (rr * rr) / (re * re) * (1.0 - smoothstep(0.6 * m, m, dd));
     float hp = hashf(h4);
@@ -6117,8 +6117,9 @@ static float3 bioGlow(texture2d<float> hm, texture2d<uint> st, texture2d<float> 
     bool multi = col4.a == GIANT_A;
     uint gsb = multi ? st.read(uint2(clamp(v.xz, int2(0), int2(size - 1)))).r : 0u;
     bool giant = multi && ((gsb >> 28) & 7u) != 0u;
-    // Giants carry their glow farther than the scatter elsewhere, which far off would mass into a sprinkled carpet.
-    float far = giant ? 1.0 : 1.0 - smoothstep(0.25, 0.5, fp);
+    // Giants carry their glow farther than the scatter elsewhere, which far off would mass into a sprinkled carpet;
+    // theirs thins with distance one spot at a time (keep, below).
+    float far = giant ? 1.0 - 0.4 * smoothstep(0.3, 0.75, fp) : 1.0 - smoothstep(0.25, 0.5, fp);
     if (far <= 0.0) return 0;
     int3 vw = v + int3(origin.x, 0, origin.y);
     float3 wp = p + float3(float(origin.x), 0.0, float(origin.y));
@@ -6136,7 +6137,7 @@ static float3 bioGlow(texture2d<float> hm, texture2d<uint> st, texture2d<float> 
         k4 = giant ? float4(3.0, 0.6, 0.5, 0) : float4(2.0, 0.45, 0.3, 0);
         hues = float2(0.3, 0.2);
     } else if (mat == 1) {
-        k4 = float4(giant ? 2.5 : 4.0, giant ? (n.y < 0 ? 0.6 : 0.06) : 0.015, 0.35, 1);
+        k4 = float4(giant ? 5.0 : 4.0, giant ? (n.y < 0 ? 0.45 : 0.12) : 0.015, 0.35, 1);
         hues = float2(0.25, 0.6);
     } else if (mat == 0 && n.y > 0) {
         k4 = float4(6.0, 0.1, 0.5, 2);
@@ -6145,7 +6146,10 @@ static float3 bioGlow(texture2d<float> hm, texture2d<uint> st, texture2d<float> 
     } else return 0;
     float4 sp = bioSpot(q, plane, k4.x, k4.y, k4.z, fp, seed + 701u + uint(k4.w), time, hues);
     if (sp.w >= 1.0) return 0;
-    if (giant) return sp.rgb * fade;
+    if (giant) {
+        float keep = 1.15 * (1.0 - smoothstep(0.25, 0.75, fp));
+        return sp.rgb * fade * (1.0 - smoothstep(keep - 0.15, keep, sp.w));
+    }
     Climate c = climateAt(clim, float2(v.xz) + 0.5, pv, origin);
     float prov = smoothstep(0.1, 0.5, provinceAmount(c));
     float wet = k4.w == 2.0 ? prov : max(prov, 0.3 * smoothstep(0.4, 0.65, c.moist));
@@ -6867,7 +6871,7 @@ static float3 hazeAndSmoke(thread const Ctx& x, float3 col, device const Site* s
 // it that its drift and halo never reach a neighbour, so a ray visits only the cubes it crosses. Whether a bug is there
 // is decided at its anchor, so drifting over a column edge never switches it.
 constant float MOTE_CELL = 6.0;
-constant float MOTE_REACH = 50.0;
+constant float MOTE_REACH = 32.0;
 
 static float3 bioMotes(texture2d<float> hm, texture2d<float> hx, texture2d<float> clim, texture2d<float> pv,
                        int2 origin, uint seed, float time, float pixelAngle, float3 o, float3 d, float tEnd) {
@@ -6896,7 +6900,7 @@ static float3 bioMotes(texture2d<float> hm, texture2d<float> hx, texture2d<float
     tMax += t0;
     float3 sum = 0;
     float t = t0;
-    for (int i = 0; i < 24 && t < tEnd; i++) {
+    for (int i = 0; i < 13 && t < tEnd; i++) {
         uint hh = pcg(uint(c.x) * 1597334677u ^ uint(c.y) * 3812015801u ^ uint(c.z) * 2798796415u ^ (seed + 710u));
         if (hashf(hh) < 0.5) {
             uint h1 = pcg(hh), h2 = pcg(h1), h3 = pcg(h2);
