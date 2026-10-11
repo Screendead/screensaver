@@ -730,6 +730,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     // Holds the time of day fixed for snapshots, so exposure and the shot director see the rendered sun.
     var pinnedPhase: Double?
     var renderScale: Double
+    // The screen's size in pixels: the dither grid follows it, while the drawable holds just one pixel per cell.
+    private var screenPixels = CGSize.zero
 
     // Cover drifts between clear and broken skies over tens of minutes.
     var cloudCover: Double {
@@ -847,8 +849,13 @@ final class Renderer: NSObject, MTKViewDelegate {
         view.preferredFramesPerSecond = battery ? 30 : 60
         self.init(device: device, outputFormat: view.colorPixelFormat, seed: seed, screenIndex: screenIndex, battery: battery)
         view.autoResizeDrawable = false
-        view.drawableSize = CGSize(width: view.bounds.width * backingScale, height: view.bounds.height * backingScale)
-        prepare(outputSize: view.drawableSize)
+        screenPixels = CGSize(width: view.bounds.width * backingScale, height: view.bounds.height * backingScale)
+        // postFragment gives every pixel of a cell the cell's colour, so presenting the cell grid and letting the layer
+        // scale it up with nearest filtering shows the same pixels.
+        let s = sizes(screenPixels)
+        view.drawableSize = CGSize(width: s.ow, height: s.oh)
+        (view.layer as? CAMetalLayer)?.magnificationFilter = .nearest
+        prepare(outputSize: screenPixels)
         view.delegate = self
     }
 
@@ -1343,7 +1350,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             if frameIndex == 30 { dlog("EDR headroom now \(headroom), potential \(view.window?.screen?.maximumPotentialExtendedDynamicRangeColorComponentValue ?? 0), format \(view.colorPixelFormat.rawValue)") }
         }
         guard let drawable = view.currentDrawable, let cb = queue.makeCommandBuffer() else { return }
-        encode(into: cb, output: drawable.texture, outputSize: view.drawableSize)
+        encode(into: cb, output: drawable.texture, outputSize: screenPixels)
         if Renderer.logTiming {
             cb.addCompletedHandler { [weak self] cb in
                 guard let self else { return }
