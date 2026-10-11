@@ -791,9 +791,10 @@ static inline float towerErosion(Tower T, TowerPlan P, float R, float y, uint se
 // some ridges that leave the wall together high up and part as they run out over the plinth, thinning. The root mass's
 // height over the plinth's top at plan P (from the base's axis), 0 where there is none. towerSurface takes a column
 // outside the base and above the plinth's top for root.
-// The talus of fallen masonry heaped against the base: its height over the outer plinth's top at plan P (from the
-// base's axis), world wf, deepest and widest on the side the crown fell to, lumpy, gone by 0.4 R0 out.
-static inline float towerTalusH(Tower T, TowerPlan P, float2 wf, uint seed) {
+// The talus of fallen masonry heaped against the base at plan P (from the base's axis), world wf, deepest and widest on
+// the side the crown fell to, lumpy, gone by 0.4 R0 out: x its height over the slope from the outer plinth's top at the
+// wall down to the ground y out, y its share of the way to the wall.
+static inline float2 towerTalus(Tower T, TowerPlan P, float2 wf, uint seed) {
     float e = P.reff - T.R0;
     if (e < 0.0) return 0.0;
     float fall = 0.5 + 0.5 * cos(P.a - T.th0);
@@ -802,7 +803,7 @@ static inline float towerTalusH(Tower T, TowerPlan P, float2 wf, uint seed) {
     if (f <= 0.0) return 0.0;
     float amp = T.R0 * (0.08 + 0.14 * fall) * saturate(0.55 + 0.9 * perlin2(P.dir * 2.3, seed + 517u));
     float lump = 4.0 * perlin2(wf / 8.0, seed + 519u) + 1.5 * perlin2(wf / 3.5, seed + 524u);
-    return max(floor(amp * f * sqrt(f) + lump * saturate(f * 3.0)), 0.0);
+    return float2(max(amp * f * sqrt(f) + lump * saturate(f * 3.0), 0.0), f);
 }
 
 static inline float towerRootH(Tower T, TowerPlan P, uint seed) {
@@ -847,8 +848,9 @@ static inline Col towerShape(Col col, Tower T, float2 wf, int s, uint seed) {
     // The plinth: two broad platforms, cut and filled level, the outer one broken up and gone in places.
     if (P0.reff >= T.R0 * 1.42) return col;
     float inner = T.R0 * (1.2 + 0.08 * perlin2(P0.dir * 3.7, seed + 520u));
-    bool paved = P0.reff < inner || perlin2(wf / 37.0, seed + 521u) > -0.15;
-    col.h = P0.reff < inner ? T.Hb + 6.0 : paved ? T.Hb + 3.0 : col.h;
+    // Where the ground falls away there is no plinth: built out over it, it stood on a sheer pedestal of ground.
+    float ground = col.h;
+    if (ground > T.Hb - 12.0) col.h = P0.reff < inner ? T.Hb + 6.0 : perlin2(wf / 37.0, seed + 521u) > -0.15 ? T.Hb + 3.0 : col.h;
     col.gl = 0; col.gh = 0; col.lo1 = 0; col.hi1 = 0; col.lo2 = 0; col.hi2 = 0; col.carved = false;
     // The highest stage whose plan covers the column, and how far outside each stage's plan it lies.
     int m = -1;
@@ -864,7 +866,8 @@ static inline Col towerShape(Col col, Tower T, float2 wf, int s, uint seed) {
     }
     if (m < 0) {
         float root = s < 4 ? towerRootH(T, P0, seed) : 0.0;
-        col.h = max(col.h + root, T.Hb + 3.0 + towerTalusH(T, P0, wf, seed));
+        float2 tal = towerTalus(T, P0, wf, seed);
+        col.h = max(col.h + root, floor(mix(min(ground, T.Hb + 3.0), T.Hb + 3.0, tal.y) + tal.x));
         return col;
     }
     bool shell = m >= T.K - 2;
@@ -872,19 +875,21 @@ static inline Col towerShape(Col col, Tower T, float2 wf, int s, uint seed) {
     float y0 = m == 0 ? T.Hb + 6.0 : shell ? yS : tierY(T, Pm, m - 1, seed);
     float H = shell ? crownY(T, Pm, yS, T.Hb + T.Ht, seed) : tierY(T, Pm, m, seed);
     float wallIn = Rm - Pm.reff;
-    // Whole sections of a stage's outer wall have fallen from the top, in broad bites, so no two stages share an outline.
+    // Whole sections of a stage's outer wall have fallen from the top, in broad bites, so no two stages share an outline;
+    // each bite a few dozen courses at most (cut down a whole stage, a bite's sides ran down the face as crisp lines).
     float bite = 30.0 * saturate(perlin2(Pm.dir * 2.6 + float(m) * 2.3, seed + 506u) * 1.7 - 0.2) * (m == 0 ? 0.6 : 1.0);
-    if (!shell && bite > 4.0 && wallIn < bite)
-        H = max(y0 + 3.0, H - floor((H - y0) * (0.3 + 0.02 * bite) / 5.0) * 5.0);
-    // Chunks bitten out of the corners, down a stage's height or part of it, their edges ragged. (Stepped down toward
-    // the corner, they drew more setbacks.)
+    if (!shell && bite > 4.0 && wallIn < bite * (0.7 + 0.5 * perlin2(wf / 9.0, seed + 533u)))
+        H = max(y0 + 3.0, H - floor(min((H - y0) * (0.15 + 0.01 * bite), 25.0 + 2.0 * bite) / 5.0) * 5.0);
+    // Chunks bitten out of the corners, part of a stage's height, their edges ragged. (Stepped down toward the corner,
+    // they drew more setbacks.)
     float seg = 6.2831853 / float(T.N);
     uint ch = hash3i(int3((Pm.face + (Pm.am > 0.0 ? 1 : 0)) % T.N, m, int(T.h & 1023u)), seed + 515u);
     if (hashf(ch) < 0.65) {
         float hf = Rm * tan(0.5 * seg);
-        float dc = hf - abs(Pm.t) + 7.0 * perlin2(wf / 7.0, seed + 523u) + 0.15 * (H - y0) * perlin2(wf / 13.0, seed + 530u);
+        float drop = min((H - y0) * (0.25 + 0.5 * hashf(pcg(ch + 1u))), 20.0 + 50.0 * hashf(pcg(ch + 2u)));
+        float dc = hf - abs(Pm.t) + 7.0 * perlin2(wf / 7.0, seed + 523u) + 0.3 * drop * perlin2(wf / 13.0, seed + 530u);
         if (dc < hf * (0.25 + 0.45 * hashf(pcg(ch))))
-            H = max(y0, H - floor((H - y0) * (0.25 + 0.6 * hashf(pcg(ch + 1u))) / 5.0) * 5.0);
+            H = max(y0, H - floor(drop / 5.0) * 5.0);
     }
     // The parapet along each rim broken down a course or three, in runs of a few columns.
     if (!shell && wallIn < 8.0 + 0.05 * T.R0)
@@ -905,10 +910,12 @@ static inline Col towerShape(Col col, Tower T, float2 wf, int s, uint seed) {
             H = min(H, max(yc, T.Hb + 6.0));
         }
     }
-    // Weathering: the top crumbles back course by course where the worn skin has gone. (Pockets cut in the face read as
-    // dark bricks or windows punched in it, so none are.)
+    // Weathering: the top crumbles back course by course where the worn skin has gone, a few courses at most: run down a
+    // whole stage, the worn skin cut grooves down the face, a crisp line each. (Pockets cut in the face read as dark
+    // bricks or windows punched in it, so none are.)
     if (wallIn < 16.0 && s < 8) {
-        for (float yc = y0 + 5.0 * (ceil((H - y0) / 5.0) - 1.0); yc > y0; yc -= 5.0) {
+        float yl = max(y0, H - 25.0);
+        for (float yc = y0 + 5.0 * (ceil((H - y0) / 5.0) - 1.0); yc > yl; yc -= 5.0) {
             if (wallIn >= towerErosion(T, Pm, Rm, yc + 2.5, seed)) break;
             H = yc;
         }
@@ -3772,10 +3779,10 @@ static inline Tower towerFromRec(TowerRec R) {
     return T;
 }
 
-// The plane a side face of tower column wc (normal n) shades as, or 0 where it keeps its own (the cleft's walls). Every
+// The plane a side face of tower column wc (normal n) shades as, or 0 where it keeps its own (broken masonry). Every
 // plane off the grid is a run of voxel jogs; each jog's faces take the plane they make up: the polygon face's (out of
-// the wall, or into the court), or a corner pier's side. A jog's face nearly across the plane would otherwise turn to
-// the light on its own and rule the wall with a line per jog.
+// the wall, or into the court). A jog's face nearly across the plane would otherwise turn to the light on its own and
+// rule the wall with a line per jog.
 static float3 towerWallPlane(Tower T, float2 wc, float3 n) {
     float seg = 6.2831853 / float(T.N);
     float2 d0 = wc - T.c;
@@ -3783,17 +3790,24 @@ static float3 towerWallPlane(Tower T, float2 wc, float3 n) {
     int m = -1;
     float Rm = 0.0;
     TowerPlan Pm = towerPlan(T, d0);
+    float2 ax = T.c;
     for (int k = 0; k < 6; k++) {
         if (k >= T.K) break;
-        TowerPlan Pk = towerPlan(T, wc - towerStageAxis(T, k));
+        float2 a = towerStageAxis(T, k);
+        TowerPlan Pk = towerPlan(T, wc - a);
         float Rk = tierR(T, Pk, k);
-        if (Pk.reff < Rk + 0.75) { m = k; Rm = Rk; Pm = Pk; }
+        if (Pk.reff < Rk + 0.75) { m = k; Rm = Rk; Pm = Pk; ax = a; }
     }
     // Off the stages (plinth, talus, roots) and deep in a stage (the breaks and the rubble on its treads) the masonry is
     // broken, its faces their own.
     if (m < 0 || (m < T.K - 2 && Rm - Pm.reff > 3.0)) return 0.0;
     float fa = T.rot + seg * (float(Pm.face) + 0.5);
     float2 pn = float2(cos(fa), sin(fa));
+    // At a corner a jog's face takes the plane its own centre lies nearer: by the column's centre, or by the plane it is
+    // nearer square to, a line of the corner's faces lit as the other face ran down it.
+    float fb = fa + (Pm.am > 0.0 ? seg : -seg);
+    float2 pb = float2(cos(fb), sin(fb)), q = wc + 0.5 * n.xz - ax;
+    if (dot(q, pb) > dot(q, pn)) pn = pb;
     float cp = dot(n.xz, pn);
     if (cp > 0.1) return float3(pn.x, 0.0, pn.y);
     if (cp < -0.1) return float3(-pn.x, 0.0, -pn.y);
@@ -3865,8 +3879,6 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
     float Hb = R.a.w, Ht = R.b.x, Sy = R.c.z, bw = R.c.w, R0 = R.a.z;
     int K = int(R.b.y);
     uint th = R.d.x;
-    // Below the plinth's foot it is the ground it was cut from.
-    if (float(v.y) < Hb - 1.0) return;
     uint seed = x.seed;
     float2 wq = w + (n.y != 0 ? uv : n.x != 0 ? float2(n.x > 0 ? 1.0 : 0.0, uv.x) : float2(uv.x, n.z > 0 ? 1.0 : 0.0)) * cs;
     float wy = n.y != 0 ? float(v.y + max(n.y, 0)) : float(v.y) + uv.y;
@@ -3886,13 +3898,16 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
     float am = ang - seg * floor(ang / seg) - 0.5 * seg;
     float reff = length(dc0) * cos(am);
     bool off = reff > R0 + 0.5 * cs;
+    // Below the plinth's foot it is the ground it was cut from; the base's walls go down to the ground wherever it falls
+    // away.
+    if (float(v.y) < Hb - 1.0 && off) return;
     bool root = false;
     if (off && k <= 1) {
         // Roots stand over the plinth and over the talus heaped on it.
         Tower T = towerFromRec(R);
         TowerPlan P0 = towerPlan(T, dc0);
         float inner = R0 * (1.2 + 0.08 * perlin2(P0.dir * 3.7, seed + 520u));
-        root = wy > Hb + max(reff < inner ? 6.0 : 3.0, 3.0 + towerTalusH(T, P0, w + 0.5 * cs, seed)) + 0.5;
+        root = wy > Hb + max(reff < inner ? 6.0 : 3.0, 3.0 + towerTalus(T, P0, w + 0.5 * cs, seed).x) + 0.5;
     }
     // A face of the plan's polygon is a plane: its voxel jogs shade as that plane, and every detail fades with the
     // footprint across the plane, not across the jog's own face, or the jogs' two orientations fade apart in stripes.
@@ -3910,9 +3925,10 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
     m *= mix(1.0, 0.72, smoothstep(Hb + 120.0, Hb, wy) * (0.4 + 0.6 * wet));
     m *= mix(0.72, 1.0, smoothstep(-0.35, 0.25, perlin2(float2(along / 47.0, wy / 33.0), seed + 529u) + 0.4 * perlin2(float2(along, wy) / 15.0, seed + 538u)));
     // Courses: each storey a different tone, a voxel block's own tone close up; the fallen masonry off the stages more so.
-    if (fpA < 1.5) {
+    // (Far off, storey bands read as strata.)
+    if (fpA < 0.6) {
         float course = hashf(hash2i(int2(int(floor((wy - Hb) / Sy)), int(th & 1023u)), seed + 532u)) - 0.5;
-        m *= 1.0 + 0.16 * course * (1.0 - smoothstep(0.4, 1.5, fpA));
+        m *= 1.0 + 0.12 * course * (1.0 - smoothstep(0.15, 0.6, fpA));
     }
     if (fp < 0.3) {
         uint bh = hash3i(v, seed + 533u);
@@ -3922,7 +3938,7 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
     // weathered crust spalled off in broad patches of paler, fresher stone. No joints are drawn (a grid of lines reads as
     // toy blocks); both fade to their mean with the footprint.
     if (n.y == 0) {
-        float fade = 1.0 - smoothstep(0.5, 2.0, fpA);
+        float fade = 1.0 - smoothstep(0.3, 1.1, fpA);
         if (fade > 0.0) {
             float ch = max(4.0, floor(Sy / 3.0));
             float row = floor((wy - Hb) / ch);
@@ -4160,7 +4176,8 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // A riser face only a column wide (a jog in a step edge) is a lone cube face: lit, it is a bright cube; in shade,
     // stone against sand, a dark notch. With the footprint it fades to the tread it stands for, colour and light.
     float lone = 0.0;
-    if (h.normal.y == 0 && s.mat == 0 && wn < 1.0 && shadows != 2) {
+    // A planar wall's jogs are its plane's.
+    if (h.normal.y == 0 && s.mat == 0 && wn < 1.0 && shadows != 2 && !s.planar) {
         int2 t = h.normal.x != 0 ? int2(0, 1) : int2(1, 0), o = h.normal.xz;
         float run = float(groundL(x.tr, k, h.voxel.xz + t) > groundL(x.tr, k, h.voxel.xz + t + o) + 0.5)
                   + float(groundL(x.tr, k, h.voxel.xz - t) > groundL(x.tr, k, h.voxel.xz - t + o) + 0.5);
