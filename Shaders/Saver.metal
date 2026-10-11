@@ -1086,6 +1086,58 @@ static void emergentIntervals(float2 w, float2 ctr, float gt, float y0, float R,
     }
 }
 
+// MARK: - Old growth
+
+// Old-growth conifers, redwood and Douglas fir: one to an OLD_CELL cell, straight trunks two or three voxels thick
+// standing 45-80 tall (a veteran in thirty, over 100), a clear bole for the lower half, then a narrow crown of drooping
+// whorls, each a skirt wider at its foot, ragged by branch, so the outer columns of a crown are a stack of shelves with
+// sky between them.
+constant float OLD_CELL = 12.0;
+constant int OLD_TIERS = 5;
+
+// The tree of cell cc, if it has one: trunk (world xz, column centre), height, crown radius, trunk radius.
+static inline bool oldTreeIn(int2 cc, uint seed, float O, thread float2& ctr, thread float& Ht, thread float& R, thread float& tr, thread uint& h) {
+    h = hash2i(cc, seed + 350u);
+    if (hashf(h) > 0.85 * smoothstep(0.2, 0.55, O)) return false;
+    ctr = floor((float2(cc) + 0.2 + 0.6 * float2(hashf(pcg(h + 1u)), hashf(pcg(h + 2u)))) * OLD_CELL) + 0.5;
+    bool vet = hashf(pcg(h + 3u)) < 0.035;
+    Ht = vet ? 100.0 + 25.0 * hashf(pcg(h + 4u)) : 45.0 + 35.0 * hashf(pcg(h + 4u));
+    R = (vet ? 7.5 : 4.5) + 0.03 * Ht * hashf(pcg(h + 5u));
+    tr = vet ? 1.9 : Ht > 62.0 ? 1.2 : 0.8;
+    return true;
+}
+
+// The intervals old-growth tree (trunk ground gt) adds to world column centre w; lod >= 1: crowns only, as a top.
+static float oldTreeIntervals(float2 w, float2 ctr, float gt, float Ht, float R, float tr, uint h, uint seed, bool add, thread GRuns& r) {
+    float2 q = w - ctr;
+    float d = length(q);
+    float top = -1e9;
+    if (d < tr) {
+        if (add) gAdd(r, gt, gt + Ht - 2.0, GM_WOOD);
+        top = gt + Ht - 2.0;
+    }
+    if (d >= R * 1.15) return top;
+    float th = atan2(q.y, q.x);
+    float yb = gt + Ht * (0.42 + 0.12 * hashf(pcg(h + 6u)));
+    float L = gt + Ht - yb;
+    for (int i = 0; i < OLD_TIERS; i++) {
+        float t0 = float(i) / float(OLD_TIERS), t1 = float(i + 1) / float(OLD_TIERS);
+        float ri = R * pow(1.0 - t0, 0.8);
+        // Branches: the skirt's edge ragged by angle, differently in each whorl.
+        ri *= 0.72 + 0.4 * saturate(perlin2(float2(th * 2.2, float(i) * 3.1 + hashf(h) * 40.0), seed + 351u) + 0.5);
+        if (d >= ri) continue;
+        float y0 = yb + L * t0, hT = L * (t1 - t0) * 1.15;
+        float f = min(1.0, (1.0 - d / ri) / 0.6);
+        // A whorl droops: its outer columns start lower.
+        float droop = 1.5 * (d / ri);
+        if (add) gAdd(r, floor(y0 - droop), floor(y0 - droop + max(hT * f, 1.0)) + 1.0, GM_LEAF);
+        top = max(top, floor(y0 - droop + max(hT * f, 1.0)) + 1.0);
+    }
+    // The leader.
+    if (d < 0.8) { if (add) gAdd(r, gt + Ht - 3.0, gt + Ht + 2.0, GM_LEAF); top = max(top, gt + Ht + 2.0); }
+    return top;
+}
+
 // Grove density: a low-frequency Perlin field gated by climate; zero on sand, snow, desert and water.
 static inline float groveDensity(float2 w, float g, uint seed) {
     float2 p = w + seedOffset(seed);
@@ -1275,6 +1327,30 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
                 gAdd(rr, G, G + 1.0 + floor(2.5 * hashf(pcg(hc))), GM_LEAF);
             }
         }
+    } else if (col.r >= SEA + 2.0 && provinces(w + seedOffset(seed), seed).y >= 0.2) {
+        float O = provinces(w + seedOffset(seed), seed).y;
+        int2 c0 = int2(floor(w / OLD_CELL));
+        bool covered = false;
+        for (int j = -1; j <= 1; j++)
+            for (int i = -1; i <= 1; i++) {
+                float2 tc;
+                float Ht, R, tr;
+                uint th;
+                if (!oldTreeIn(c0 + int2(i, j), seed, O, tc, Ht, R, tr, th)) continue;
+                if (length_squared(w - tc) > 1.3 * R * R) continue;
+                int2 tq = int2(floor(tc)) - info.xy;
+                if (any(tq < 3) || any(tq >= int(n) - 3)) continue;
+                float4 t0 = src.read(uint2(tq));
+                // On level ground, clear of water, rock and buildings.
+                float s0 = src.read(uint2(tq + int2(3, 0))).r, s1 = src.read(uint2(tq - int2(3, 0))).r;
+                float s2 = src.read(uint2(tq + int2(0, 3))).r, s3 = src.read(uint2(tq - int2(0, 3))).r;
+                if (t0.r < SEA + 2.0 || t0.b > t0.g || t0.a < 0.0 ||
+                    max(max(s0, s1), max(s2, s3)) - min(min(s0, s1), min(s2, s3)) > 6.0) continue;
+                covered = oldTreeIntervals(w, tc, t0.r, Ht, R, tr, th, seed, true, rr) > G || covered;
+            }
+        // Ferns on the mossy floor.
+        uint hc = hash2i(wc, seed + 352u);
+        if (!covered && !cleared && hashf(hc) < 0.25) gAdd(rr, G, G + 1.0 + floor(1.8 * hashf(pcg(hc))), GM_LEAF);
     } else if (col.r >= SEA + 2.0) {
         int2 home = int2(floor(float2(wc) / float(TREE_CELL)));
         int lo = 100000, hi = 0;
@@ -2245,6 +2321,29 @@ static float2 coarseVeg(int2 cw, int k, float4 hs4, float H, uint seed) {
                         if (!emergentIn(e0 + int2(ii, j), seed, J, ec, y0, R, pads, eh)) continue;
                         if (length_squared(wi - ec) > 4.4 * R * R) continue;
                         t = max(t, emergentTop(wi, ec, g, y0, R, pads, eh, seed));
+                    }
+            }
+            sum += t;
+            leaves += t > g ? 1.0 : 0.0;
+        }
+    } else if (J < 0.15 && provinces(centre + so, seed).y >= 0.2) {
+        float O = provinces(centre + so, seed).y;
+        if (spread >= max(10.0, 0.6 * float(s))) return float2(H, 0);
+        GRuns none;
+        none.n = 0;
+        for (int i = 0; i < 4; i++) {
+            float2 wi = float2(b + o4[i]) + 0.5;
+            float g = hs4[i], t = g;
+            if (g >= SEA + 2.0) {
+                int2 c0 = int2(floor(wi / OLD_CELL));
+                for (int j = -1; j <= 1; j++)
+                    for (int ii = -1; ii <= 1; ii++) {
+                        float2 tc;
+                        float Ht, R, tr;
+                        uint th;
+                        if (!oldTreeIn(c0 + int2(ii, j), seed, O, tc, Ht, R, tr, th)) continue;
+                        if (length_squared(wi - tc) > 1.3 * R * R) continue;
+                        t = max(t, oldTreeIntervals(wi, tc, g, Ht, R, tr, th, seed, false, none));
                     }
             }
             sum += t;
@@ -4649,6 +4748,11 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         // Gaps (overhangs, caves, bridges) in magenta.
         if (k <= GAP_LEVELS) { float2 gp = cg.read(uint2(ci & (COARSE_N - 1)), uint(k - 1)).rg; if (gp.y > gp.x) c = float3(1, 0, 1); }
         float2 wc = cell * cs;
+        // Forest provinces: jungle warm, old growth cool; giants white.
+        float2 pv = provinces(wc + seedOffset(uint(f.mapInfo.w)), uint(f.mapInfo.w));
+        c = mix(c, float3(0.9, 0.5, 0.1), 0.45 * smoothstep(0.15, 0.6, pv.x));
+        c = mix(c, float3(0.2, 0.4, 1.0), 0.45 * smoothstep(0.2, 0.6, pv.y));
+        { Giant gm; if (giantAt(giants, wc, 0.0, gm)) c = float3(1); }
         float px = 1300.0 * cs / f.resolution.y;
         float2 g1 = abs(wc - 2000.0 * floor(wc / 2000.0 + 0.5)), g2 = abs(wc - 10000.0 * floor(wc / 10000.0 + 0.5));
         if (any(g1 < px * 0.6)) c = mix(c, float3(0), 0.35);
