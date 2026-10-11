@@ -815,19 +815,16 @@ final class Wildlife {
     }
 
     // The birds the renderer is given, flock by flock and cluster by cluster, within the bird buffer's caps.
-    func drawList() -> [(flock: Flock, clusters: [[Int]])] {
-        var list: [(flock: Flock, clusters: [[Int]])] = []
+    func drawList() -> [(flock: Flock, clusters: [Range<Int>])] {
+        var list: [(flock: Flock, clusters: [Range<Int>])] = []
         var nc = 0, nb = 0
         for f in flocks where list.count < Wildlife.maxFlocks {
-            var cs: [[Int]] = []
+            var cs: [Range<Int>] = []
             for start in stride(from: 0, to: f.birds.count, by: Wildlife.clusterSize) where nc < Wildlife.maxClusters {
-                var c: [Int] = []
-                for i in start..<min(start + Wildlife.clusterSize, f.birds.count) where nb < Wildlife.maxBirds {
-                    c.append(i)
-                    nb += 1
-                }
-                if c.isEmpty { continue }
-                cs.append(c)
+                let n = min(min(start + Wildlife.clusterSize, f.birds.count) - start, Wildlife.maxBirds - nb)
+                if n <= 0 { continue }
+                cs.append(start..<(start + n))
+                nb += n
                 nc += 1
             }
             if !cs.isEmpty { list.append((f, cs)) }

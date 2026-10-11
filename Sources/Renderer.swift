@@ -32,13 +32,37 @@ struct Frame {
     var slowCloud = SIMD4<Float>()
 }
 
-enum GPU {
-    static func library(device: MTLDevice) -> MTLLibrary? {
-        if let url = Bundle.main.url(forResource: "Saver", withExtension: "metallib"),
-           let lib = try? device.makeLibrary(URL: url) { return lib }
+// The shader library and its pipeline states, shared by the renderers of one activation (a screen each).
+final class GPU {
+    let device: MTLDevice
+    let library: MTLLibrary
+    private var compute: [String: MTLComputePipelineState] = [:]
+    private var render: [String: MTLRenderPipelineState] = [:]
+
+    init?(device: MTLDevice) {
+        self.device = device
+        if let url = Bundle.main.url(forResource: "Saver", withExtension: "metallib"), let lib = try? device.makeLibrary(URL: url) {
+            library = lib
+            return
+        }
         // Loose build: metallib next to the binary.
         let exe = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
-        return try? device.makeLibrary(URL: exe.appendingPathComponent("Saver.metallib"))
+        guard let lib = try? device.makeLibrary(URL: exe.appendingPathComponent("Saver.metallib")) else { return nil }
+        library = lib
+    }
+
+    func pipeline(_ name: String) -> MTLComputePipelineState? {
+        if let p = compute[name] { return p }
+        let p = library.makeFunction(name: name).flatMap { try? device.makeComputePipelineState(function: $0) }
+        compute[name] = p
+        return p
+    }
+
+    func pipeline(_ key: String, _ descriptor: () -> MTLRenderPipelineDescriptor) -> MTLRenderPipelineState? {
+        if let p = render[key] { return p }
+        let p = try? device.makeRenderPipelineState(descriptor: descriptor())
+        render[key] = p
+        return p
     }
 }
 
@@ -156,6 +180,8 @@ final class World {
         var origin = SIMD2<Int32>(Int32.min, Int32.min)
         var globalMax: Float = 255
         var siteList: [SiteInfo] = []
+        // siteList's lamps by Lamp.index.
+        var lamps: [Int: SiteInfo.Lamp] = [:]
         var giantList: [GiantInfo] = []
         // Whether the jungle's roof (Shaders/Saver.metal jungleCanopy) may stand on this map.
         var jungle = false
@@ -255,6 +281,7 @@ final class World {
     var bandTex: MTLTexture { shown.band }
     var giantBuffer: MTLBuffer { shown.giants }
     var sites: [SiteInfo] { shown.siteList }
+    var lamps: [Int: SiteInfo.Lamp] { shown.lamps }
     var giants: [GiantInfo] { shown.giantList }
     // Whether a flagged cell of the active map's band mips (under a giant's crown or the jungle's roof) may lie within r
     // of world xz p.
@@ -272,10 +299,9 @@ final class World {
         return false
     }
 
-    init?(device: MTLDevice, library: MTLLibrary, seed: UInt32) {
-        func pipeline(_ name: String) -> MTLComputePipelineState? {
-            library.makeFunction(name: name).flatMap { try? device.makeComputePipelineState(function: $0) }
-        }
+    init?(gpu: GPU, seed: UInt32) {
+        let device = gpu.device
+        let pipeline = gpu.pipeline as (String) -> MTLComputePipelineState?
         let sd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: World.size, height: World.size, mipmapped: false)
         sd.usage = [.shaderRead, .shaderWrite]
         sd.storageMode = .private
@@ -321,7 +347,7 @@ final class World {
         let cur = shown
         let local = center - SIMD2(Double(cur.origin.x), Double(cur.origin.y))
         let drift = max(abs(local.x - half), abs(local.y - half))
-        let o = SIMD2<Int32>(Int32(floor((center.x - half) / 64)) * 64, Int32(floor((center.y - half) / 64)) * 64)
+        let o = World.mapOrigin(center)
         if cur.origin.x == Int32.min || drift > 340 || (synchronous && drift > World.recentre) {
             if job != nil { advance(pieces: Int.max, wait: true); return }
             if pending { return } // the in-flight job will land momentarily
@@ -394,18 +420,9 @@ final class World {
                     enc.setTexture(scratch, index: 0)
                     enc.setTexture(buf.rawGaps, index: 1)
                 case 1:
-                    if band < 2 {
-                        // The giant table, with the cheap cleanup pass (half in each of its first two pieces): sites and
-                        // trees read it. Centred on the map's middle cell.
-                        let mid = SIMD2<Double>(Double(j.origin.x), Double(j.origin.y)) + Double(World.size / 2)
-                        var gi = SIMD4<Int32>(Int32(floor(mid.x / World.giantCell)) - Int32(World.giantWin / 2),
-                                              Int32(floor(mid.y / World.giantCell)) - Int32(World.giantWin / 2), Int32(band * World.giantWin / 2), Int32(bitPattern: seed))
-                        enc.setComputePipelineState(giantPipeline)
-                        enc.setBuffer(buf.giants, offset: 0, index: 0)
-                        enc.setBytes(&gi, length: MemoryLayout<SIMD4<Int32>>.stride, index: 1)
-                        enc.dispatchThreads(MTLSize(width: World.giantWin, height: World.giantWin / 2, depth: 1),
-                                            threadsPerThreadgroup: MTLSize(width: 8, height: 4, depth: 1))
-                    }
+                    // The giant table, with the cheap cleanup pass (half in each of its first two pieces): sites and
+                    // trees read it.
+                    if band < 2 { encodeGiants(enc, into: buf, origin: j.origin, half: band) }
                     enc.setComputePipelineState(cleanupPipeline)
                     enc.setTexture(scratch, index: 0)
                     enc.setTexture(buf.tex, index: 1)
@@ -512,11 +529,13 @@ final class World {
         guard done else { cb.commit(); return 0 }
 
         let index = j.index, o = j.origin, t0 = j.t0
-        let finish = { [weak self] (heights: [Float], floors: [Float], top: Float) in
-            guard let self else { return }
+        // Strong captures: a weak reference would give World a side table, which slows every retain of it (the camera
+        // and the birds look heights up thousands of times a frame).
+        let finish = { (heights: [Float], floors: [Float], top: Float) in
             buf.origin = o
             buf.globalMax = top + 1
             buf.siteList = World.readSites(buf.sites)
+            buf.lamps = Dictionary(buf.siteList.flatMap { $0.lamps.map { ($0.index, $0) } }, uniquingKeysWith: { $1 })
             buf.giantList = World.readGiants(buf.giants)
             buf.jungleGrid = stride(from: 0, through: World.size, by: 64).flatMap { z in
                 stride(from: 0, through: World.size, by: 64).map { x in
@@ -564,15 +583,43 @@ final class World {
             finish(r.0, r.1, r.2)
             return (cb.gpuEndTime - cb.gpuStartTime) * 1000
         } else {
-            cb.addCompletedHandler { [weak self] cb in
-                guard cb.status == .completed else { DispatchQueue.main.async { self?.pending = false }; return }
-                guard let self else { return }
+            cb.addCompletedHandler { cb in
+                guard cb.status == .completed else { DispatchQueue.main.async { self.pending = false }; return }
                 let r = World.readBack(self.cpuMips.last!)
                 DispatchQueue.main.async { finish(r.0, r.1, r.2) }
             }
             cb.commit()
         }
         return 0
+    }
+
+    // Half the giant table round the map at `origin`, centred on its middle cell.
+    private func encodeGiants(_ enc: MTLComputeCommandEncoder, into buf: Buffer, origin: SIMD2<Int32>, half: Int) {
+        let mid = SIMD2<Double>(Double(origin.x), Double(origin.y)) + Double(World.size / 2)
+        var gi = SIMD4<Int32>(Int32(floor(mid.x / World.giantCell)) - Int32(World.giantWin / 2),
+                              Int32(floor(mid.y / World.giantCell)) - Int32(World.giantWin / 2), Int32(half * World.giantWin / 2), Int32(bitPattern: seed))
+        enc.setComputePipelineState(giantPipeline)
+        enc.setBuffer(buf.giants, offset: 0, index: 0)
+        enc.setBytes(&gi, length: MemoryLayout<SIMD4<Int32>>.stride, index: 1)
+        enc.dispatchThreads(MTLSize(width: World.giantWin, height: World.giantWin / 2, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: 8, height: 4, depth: 1))
+    }
+
+    // Before the first map: the giant table (and `giants`) the map centred on `center` would have, so the start can be
+    // chosen by it without building a map there. placeGiants depends on the cells alone; the map keeps the slots it fills.
+    func placeGiants(around center: SIMD2<Double>) {
+        guard shown.origin.x == Int32.min, let cb = genQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return }
+        let buf = shown
+        for half in 0..<2 { encodeGiants(enc, into: buf, origin: World.mapOrigin(center), half: half) }
+        enc.endEncoding()
+        cb.commit()
+        cb.waitUntilCompleted()
+        buf.giantList = World.readGiants(buf.giants)
+    }
+
+    static func mapOrigin(_ center: SIMD2<Double>) -> SIMD2<Int32> {
+        let half = Double(World.size / 2)
+        return SIMD2<Int32>(Int32(floor((center.x - half) / 64)) * 64, Int32(floor((center.y - half) / 64)) * 64)
     }
 
     static let logSites = ProcessInfo.processInfo.environment["VR_SITES"] != nil
@@ -688,10 +735,9 @@ final class Clipmap {
     private var job: Job?
     private var completed = [Int](repeating: 0, count: Clipmap.levels)
 
-    init?(device: MTLDevice, library: MTLLibrary, seed: UInt32) {
-        func pipeline(_ name: String) -> MTLComputePipelineState? {
-            library.makeFunction(name: name).flatMap { try? device.makeComputePipelineState(function: $0) }
-        }
+    init?(gpu: GPU, seed: UInt32) {
+        let device = gpu.device
+        let pipeline = gpu.pipeline as (String) -> MTLComputePipelineState?
         func array(_ format: MTLPixelFormat, _ n: Int, mips: Bool, slices: Int = Clipmap.levels) -> MTLTexture? {
             let d = MTLTextureDescriptor()
             d.textureType = .type2DArray
@@ -975,45 +1021,42 @@ final class Renderer: NSObject, MTKViewDelegate {
         0.52 + 0.12 * sin(simTime * 0.0021 + 1.0) + 0.06 * sin(simTime * 0.0057 + 4.0)
     }
 
-    init?(device: MTLDevice, outputFormat: MTLPixelFormat, seed: UInt32, screenIndex: Int, battery: Bool) {
-        guard let queue = device.makeCommandQueue(), let lib = GPU.library(device: device) else { return nil }
-        let scene = MTLRenderPipelineDescriptor()
-        scene.vertexFunction = lib.makeFunction(name: "fullscreenVertex")
-        scene.colorAttachments[0].pixelFormat = .rgba16Float
-        let post = MTLRenderPipelineDescriptor()
-        post.vertexFunction = lib.makeFunction(name: "fullscreenVertex")
-        post.fragmentFunction = lib.makeFunction(name: "postFragment")
-        post.colorAttachments[0].pixelFormat = outputFormat
-        let taa = MTLRenderPipelineDescriptor()
-        taa.vertexFunction = lib.makeFunction(name: "fullscreenVertex")
-        taa.fragmentFunction = lib.makeFunction(name: "taaFragment")
-        taa.colorAttachments[0].pixelFormat = .rgba16Float
-        func sceneVariant(towers: Bool, bands: Bool) -> MTLRenderPipelineDescriptor {
-            let fc = MTLFunctionConstantValues()
-            var b = bands, t = towers
-            fc.setConstantValue(&b, type: .bool, index: 0)
-            fc.setConstantValue(&t, type: .bool, index: 1)
-            let d = scene.copy() as! MTLRenderPipelineDescriptor
-            d.fragmentFunction = try? lib.makeFunction(name: "sceneFragment", constantValues: fc)
+    init?(gpu: GPU, outputFormat: MTLPixelFormat, seed: UInt32, screenIndex: Int, battery: Bool) {
+        let device = gpu.device, lib = gpu.library
+        guard let queue = device.makeCommandQueue() else { return nil }
+        func fullscreen(_ fragment: MTLFunction?, _ format: MTLPixelFormat) -> MTLRenderPipelineDescriptor {
+            let d = MTLRenderPipelineDescriptor()
+            d.vertexFunction = lib.makeFunction(name: "fullscreenVertex")
+            d.fragmentFunction = fragment
+            d.colorAttachments[0].pixelFormat = format
             return d
         }
-        let sceneStates = [false, true].map { t in [false, true].compactMap { b in try? device.makeRenderPipelineState(descriptor: sceneVariant(towers: t, bands: b)) } }
+        func sceneVariant(towers: Bool, bands: Bool) -> MTLRenderPipelineState? {
+            gpu.pipeline("scene \(towers) \(bands)") {
+                let fc = MTLFunctionConstantValues()
+                var b = bands, t = towers
+                fc.setConstantValue(&b, type: .bool, index: 0)
+                fc.setConstantValue(&t, type: .bool, index: 1)
+                return fullscreen(try? lib.makeFunction(name: "sceneFragment", constantValues: fc), .rgba16Float)
+            }
+        }
+        let sceneStates = [false, true].map { t in [false, true].compactMap { b in sceneVariant(towers: t, bands: b) } }
         guard sceneStates.allSatisfy({ $0.count == 2 }),
-              let tp = try? device.makeRenderPipelineState(descriptor: taa),
-              let pp = try? device.makeRenderPipelineState(descriptor: post),
-              let cf = lib.makeFunction(name: "cloudField").flatMap({ try? device.makeComputePipelineState(function: $0) }),
-              let csf = lib.makeFunction(name: "cloudSlowField").flatMap({ try? device.makeComputePipelineState(function: $0) }),
-              let shP = lib.makeFunction(name: "bakeShadowHeight").flatMap({ try? device.makeComputePipelineState(function: $0) }),
-              let hzP = lib.makeFunction(name: "bakeHorizon").flatMap({ try? device.makeComputePipelineState(function: $0) }),
+              let tp = gpu.pipeline("taa", { fullscreen(lib.makeFunction(name: "taaFragment"), .rgba16Float) }),
+              let pp = gpu.pipeline("post \(outputFormat.rawValue)", { fullscreen(lib.makeFunction(name: "postFragment"), outputFormat) }),
+              let cf = gpu.pipeline("cloudField"),
+              let csf = gpu.pipeline("cloudSlowField"),
+              let shP = gpu.pipeline("bakeShadowHeight"),
+              let hzP = gpu.pipeline("bakeHorizon"),
               let hzB = device.makeBuffer(length: 1024 * 4, options: .storageModePrivate),
-              let pvP = lib.makeFunction(name: "bakeProvinces").flatMap({ try? device.makeComputePipelineState(function: $0) }),
-              let lampP = lib.makeFunction(name: "updateLamps").flatMap({ try? device.makeComputePipelineState(function: $0) }),
-              let lightP = lib.makeFunction(name: "bakeLights").flatMap({ try? device.makeComputePipelineState(function: $0) }),
+              let pvP = gpu.pipeline("bakeProvinces"),
+              let lampP = gpu.pipeline("updateLamps"),
+              let lightP = gpu.pipeline("bakeLights"),
               let lpos = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.maxLamps * 16, options: .storageModePrivate),
               let lstate = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.maxLamps * 16, options: .storageModePrivate),
-              let world = World(device: device, library: lib, seed: seed),
-              let clipmap = Clipmap(device: device, library: lib, seed: seed),
-              let towers = Towers(device: device, library: lib, seed: seed) else { return nil }
+              let world = World(gpu: gpu, seed: seed),
+              let clipmap = Clipmap(gpu: gpu, seed: seed),
+              let towers = Towers(gpu: gpu, seed: seed) else { return nil }
         self.device = device
         self.queue = queue
         scenePipelines = sceneStates
@@ -1058,23 +1101,33 @@ final class Renderer: NSObject, MTKViewDelegate {
         renderScale = battery ? 0.7 : 1.0
         edgeRadius = Clipmap.handoff(battery ? Clipmap.levels - 1 : Clipmap.levels)
         super.init()
-        wildlife.heightAt = { [unowned world] x, z in world.height(x: x, z: z) }
-        wildlife.giantsAt = { [unowned world] in world.giants }
-        camera.towersAt = { [unowned towers] in towers.list }
+        wildlife.heightAt = { [unowned(unsafe) world] x, z in world.height(x: x, z: z) }
+        wildlife.giantsAt = { [unowned(unsafe) world] in world.giants }
+        camera.towersAt = { [unowned(unsafe) towers] in towers.list }
         // VR_START=x,z,yawDeg: the flight starts there (tests).
         if let v = ProcessInfo.processInfo.environment["VR_START"]?.split(separator: ",").compactMap({ Double($0) }), v.count >= 3 {
             camera.start(at: SIMD2(v[0], v[1]), yaw: v[2] * .pi / 180)
         }
-        world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
+        world.placeGiants(around: SIMD2(camera.position.x, camera.position.z))
         if ProcessInfo.processInfo.environment["VR_START"] == nil, camera.startNearGiant() {
-            world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
+            world.placeGiants(around: SIMD2(camera.position.x, camera.position.z))
         }
-        towers.update(center: SIMD2(camera.position.x, camera.position.z), queue: queue, wait: true)
+        let pre = SIMD2(camera.position.x, camera.position.z)
+        towers.update(center: pre, queue: queue, wait: true)
         // Placing the camera reads only the far heights, which level 3 holds: the CPU waits for that level alone.
         refreshFar(only: 3)
-        camera.placeAtStart()
+        camera.moveToOpenGround()
+        let post = SIMD2(camera.position.x, camera.position.z)
+        // The lift reads the map centred on `pre` where it reaches round `post`, else the far heights: that map is built only
+        // if it reaches.
+        let o = World.mapOrigin(pre), r = FlightCamera.liftRadius
+        if post == pre || (post.x + r >= Double(o.x) && post.x - r < Double(o.x) + Double(World.size)
+                           && post.y + r >= Double(o.y) && post.y - r < Double(o.y) + Double(World.size)) {
+            world.ensureCentered(on: pre)
+        }
+        camera.liftOverGround()
         // A start moved off the massifs needs its own map now: on the first frame it would wait behind the coarse rings.
-        world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
+        world.ensureCentered(on: post)
         // The other rings are built ahead of the first frame on the same queue, which orders that frame after them;
         // nothing waits on the CPU. Afterwards only strips are rewritten.
         if let cb = queue.makeCommandBuffer() {
@@ -1094,9 +1147,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         battery && edgeRadius <= Clipmap.handoff(Clipmap.levels - 1) ? Clipmap.levels - 1 : Clipmap.levels
     }
 
-    convenience init?(view: MTKView, screen: NSScreen, seed: UInt32, screenIndex: Int, battery: Bool) {
+    convenience init?(view: MTKView, gpu: GPU, screen: NSScreen, seed: UInt32, screenIndex: Int, battery: Bool) {
         let backingScale = screen.backingScaleFactor
-        guard let device = view.device else { return nil }
         let edr = screen.maximumPotentialExtendedDynamicRangeColorComponentValue > 1
         if edr {
             view.colorPixelFormat = .rgba16Float
@@ -1107,7 +1159,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         view.framebufferOnly = true
         view.preferredFramesPerSecond = battery ? 30 : 60
-        self.init(device: device, outputFormat: view.colorPixelFormat, seed: seed, screenIndex: screenIndex, battery: battery)
+        self.init(gpu: gpu, outputFormat: view.colorPixelFormat, seed: seed, screenIndex: screenIndex, battery: battery)
         view.autoResizeDrawable = false
         screenPixels = CGSize(width: view.bounds.width * backingScale, height: view.bounds.height * backingScale)
         // postFragment gives every pixel of a cell the cell's colour, so presenting the cell grid and letting the layer
@@ -1448,8 +1500,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
             for ty in y0...y1 { for tx in x0...x1 { tileMasks[ty * n + tx] |= bit } }
         }
-        var lamps: [Int: SiteInfo.Lamp] = [:]
-        for site in world.sites { for l in site.lamps { lamps[l.index] = l } }
+        let lamps = world.lamps
         for i in 0..<Int(f.refs.x) {
             guard let l = lamps[Int(hazeRefs[i])] else { continue }
             mark(l.pos, 3 * Renderer.lampReach[min(l.kind, 7)] + 0.5, 1 << UInt32(i))
@@ -1673,8 +1724,8 @@ final class Renderer: NSObject, MTKViewDelegate {
 // Offscreen render to PNG, for checking visuals without a display.
 enum Snapshot {
     static func run(settings: Settings, path: String) {
-        guard let device = MTLCreateSystemDefaultDevice(),
-              let r = Renderer(device: device, outputFormat: .rgba8Unorm, seed: settings.seed == 0 ? 1 : settings.seed,
+        guard let device = MTLCreateSystemDefaultDevice(), let gpu = GPU(device: device),
+              let r = Renderer(gpu: gpu, outputFormat: .rgba8Unorm, seed: settings.seed == 0 ? 1 : settings.seed,
                                screenIndex: 0, battery: settings.forceBattery) else {
             FileHandle.standardError.write("renderer init failed\n".data(using: .utf8)!)
             return

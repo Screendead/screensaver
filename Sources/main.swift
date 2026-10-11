@@ -132,7 +132,7 @@ final class SaverController {
         battery = settings.forceBattery || SystemState.onBattery()
         // A different seed per session keeps the world non-repeating across activations.
         let sessionSeed = settings.seed != 0 ? settings.seed : UInt32.random(in: 1...UInt32.max)
-        let device = MTLCreateSystemDefaultDevice()
+        let gpu = MTLCreateSystemDefaultDevice().flatMap { GPU(device: $0) }
 
         screenFrames = screens.map(\.frame)
         for (index, screen) in screens.enumerated() {
@@ -148,9 +148,9 @@ final class SaverController {
             window.onInput = { [weak self] in self?.dismiss() }
 
             // A screen whose renderer can't start still gets covered, in black.
-            if let device {
-                let view = MTKView(frame: CGRect(origin: .zero, size: screen.frame.size), device: device)
-                if let renderer = Renderer(view: view, screen: screen, seed: sessionSeed, screenIndex: index, battery: battery) {
+            if let gpu {
+                let view = MTKView(frame: CGRect(origin: .zero, size: screen.frame.size), device: gpu.device)
+                if let renderer = Renderer(view: view, gpu: gpu, screen: screen, seed: sessionSeed, screenIndex: index, battery: battery) {
                     renderer.timeScale = settings.timeScale
                     window.contentView = view
                     renderers.append((renderer, view))
@@ -251,6 +251,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for name in [NSWorkspace.screensDidSleepNotification, NSWorkspace.sessionDidResignActiveNotification, NSWorkspace.willSleepNotification] {
             ws.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.saver.dismiss(animated: false) }
         }
+        // Asleep or locked, the poll backs off: these bring the next check forward.
+        for name in [NSWorkspace.screensDidWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification, NSWorkspace.didWakeNotification] {
+            ws.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.schedule(after: 0) }
+        }
         let dnc = DistributedNotificationCenter.default()
         // If the system screensaver starts anyway, it owns the screen until it stops.
         dnc.addObserver(forName: NSNotification.Name("com.apple.screensaver.didstart"), object: nil, queue: .main) { [weak self] _ in
@@ -259,9 +263,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         dnc.addObserver(forName: NSNotification.Name("com.apple.screensaver.didstop"), object: nil, queue: .main) { [weak self] _ in
             self?.systemSaverRunning = false
+            self?.schedule(after: 0)
         }
         dnc.addObserver(forName: NSNotification.Name("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
             self?.saver.dismiss(animated: false)
+        }
+        dnc.addObserver(forName: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil, queue: .main) { [weak self] _ in
+            self?.schedule(after: 0)
         }
         // Hiding the menu bar also posts this; only a real display change (frames differ) needs a rebuild.
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
@@ -269,18 +277,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.saver.dismiss(animated: false)
         }
 
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.tick() }
+        saver.onDismiss = { [weak self] in self?.schedule(after: 0) }
+        schedule(after: 1)
+    }
+
+    private func schedule(after delay: Double) {
+        pollTimer?.invalidate()
+        pollTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in self?.tick() }
         pollTimer?.tolerance = 0.2
     }
 
+    // Idle time grows no faster than the clock, so nothing can start before it could reach the threshold: the poll
+    // sleeps until then rather than waking every second.
     private func tick() {
         dlog(String(format: "tick idle=%.1f wantsAwake=%d locked=%d asleep=%d showing=%d sys=%d", SystemState.idleSeconds(),
                      SystemState.somethingWantsDisplayAwake() ? 1 : 0, SystemState.screenIsLockedOrInactive() ? 1 : 0,
                      SystemState.displaysAsleep() ? 1 : 0, saver.isShowing ? 1 : 0, systemSaverRunning ? 1 : 0))
-        guard !saver.isShowing, !systemSaverRunning else { return }
-        guard SystemState.idleSeconds() >= settings.idleThreshold else { return }
-        if SystemState.somethingWantsDisplayAwake() || SystemState.screenIsLockedOrInactive() || SystemState.displaysAsleep() { return }
+        if saver.isShowing { return }
+        if systemSaverRunning { schedule(after: 10); return }
+        let idle = SystemState.idleSeconds()
+        if idle < settings.idleThreshold { schedule(after: max(0.25, settings.idleThreshold - idle)); return }
+        if SystemState.screenIsLockedOrInactive() || SystemState.displaysAsleep() { schedule(after: 10); return }
+        if SystemState.somethingWantsDisplayAwake() { schedule(after: 1); return }
         saver.show()
+        if !saver.isShowing { schedule(after: 1) }
     }
 }
 

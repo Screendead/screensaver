@@ -316,8 +316,9 @@ final class FlightCamera {
         return true
     }
 
-    func placeAtStart() {
-        // A start among or beside the massifs moves to the nearest open low ground, so the flight begins under the ceiling.
+    // A start among or beside the massifs moves to the nearest open low ground, so the flight begins under the ceiling.
+    // Reads only the far heights.
+    func moveToOpenGround() {
         if (0..<12).contains(where: { (far.height(x: position.x + sin(Double($0) * .pi / 6) * 500, z: position.z + cos(Double($0) * .pi / 6) * 500) ?? 0) > 260 })
             || hFar(position.x, position.z) > 200 {
             search: for r in stride(from: 200.0, through: 6000.0, by: 200.0) {
@@ -334,7 +335,12 @@ final class FlightCamera {
                 }
             }
         }
-        position.y = max(position.y, footprintMax(position.x, position.z, radius: 24) + 30)
+    }
+
+    static let liftRadius = 24.0
+
+    func liftOverGround() {
+        position.y = max(position.y, footprintMax(position.x, position.z, radius: FlightCamera.liftRadius) + 30)
     }
 
     func step(dt: Double) {
