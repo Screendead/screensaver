@@ -1108,17 +1108,26 @@ final class Renderer: NSObject, MTKViewDelegate {
         if let v = ProcessInfo.processInfo.environment["VR_START"]?.split(separator: ",").compactMap({ Double($0) }), v.count >= 3 {
             camera.start(at: SIMD2(v[0], v[1]), yaw: v[2] * .pi / 180)
         }
-        if ProcessInfo.processInfo.environment["VR_START"] == nil {
+        world.placeGiants(around: SIMD2(camera.position.x, camera.position.z))
+        if ProcessInfo.processInfo.environment["VR_START"] == nil, camera.startNearGiant() {
             world.placeGiants(around: SIMD2(camera.position.x, camera.position.z))
-            _ = camera.startNearGiant()
         }
-        world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
-        towers.update(center: SIMD2(camera.position.x, camera.position.z), queue: queue, wait: true)
+        let pre = SIMD2(camera.position.x, camera.position.z)
+        towers.update(center: pre, queue: queue, wait: true)
         // Placing the camera reads only the far heights, which level 3 holds: the CPU waits for that level alone.
         refreshFar(only: 3)
-        camera.placeAtStart()
+        camera.moveToOpenGround()
+        let post = SIMD2(camera.position.x, camera.position.z)
+        // The lift reads the map centred on `pre` where it reaches round `post`, else the far heights: that map is built only
+        // if it reaches.
+        let o = World.mapOrigin(pre), r = FlightCamera.liftRadius
+        if post == pre || (post.x + r >= Double(o.x) && post.x - r < Double(o.x) + Double(World.size)
+                           && post.y + r >= Double(o.y) && post.y - r < Double(o.y) + Double(World.size)) {
+            world.ensureCentered(on: pre)
+        }
+        camera.liftOverGround()
         // A start moved off the massifs needs its own map now: on the first frame it would wait behind the coarse rings.
-        world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
+        world.ensureCentered(on: post)
         // The other rings are built ahead of the first frame on the same queue, which orders that frame after them;
         // nothing waits on the CPU. Afterwards only strips are rewritten.
         if let cb = queue.makeCommandBuffer() {
