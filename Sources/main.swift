@@ -211,7 +211,9 @@ final class SaverController {
         NSCursor.unhide()
         let finish = { [weak self] in
             guard let self else { return }
-            for w in closing { w.orderOut(nil); w.contentView = nil }
+            for (_, v) in self.renderers { v.isPaused = true; v.delegate = nil }
+            for w in closing { w.orderOut(nil); w.contentView = nil; w.close() }
+            for (r, _) in self.renderers { r.drain() }
             self.windows.removeAll()
             self.renderers.removeAll()
             NSApp.presentationOptions = []
@@ -277,7 +279,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.saver.dismiss(animated: false)
         }
 
-        saver.onDismiss = { [weak self] in self?.schedule(after: 0) }
+        // A session leaves ~20 MB of freed malloc pages dirty that nothing returns to the system, so the agent exits and
+        // launchd's KeepAlive starts it afresh. Run by hand, it carries on instead.
+        if let label = Bundle.main.bundleIdentifier, ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"] == label {
+            saver.onDismiss = { DispatchQueue.main.async { exit(0) } }
+        } else {
+            saver.onDismiss = { [weak self] in self?.schedule(after: 0) }
+        }
+        systemSaverRunning = !NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.ScreenSaver.Engine").isEmpty
         schedule(after: 1)
     }
 

@@ -237,7 +237,7 @@ final class World {
     let device: MTLDevice
     let seed: UInt32
     // Regeneration runs on its own queue so frames never wait behind it.
-    private let genQueue: MTLCommandQueue
+    let genQueue: MTLCommandQueue
     private let genPipeline: MTLComputePipelineState
     private let reducePipeline: MTLComputePipelineState
     private let reduceBasePipeline: MTLComputePipelineState
@@ -1687,6 +1687,15 @@ final class Renderer: NSObject, MTKViewDelegate {
         enc.dispatchThreads(MTLSize(width: sn, height: sn, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
         enc.endEncoding()
         f.slowCloud = info
+    }
+
+    // A queue runs its command buffers in order, so an empty one completing means all committed before it have.
+    func drain() {
+        for q in [queue, world.genQueue] {
+            guard let cb = q.makeCommandBuffer() else { continue }
+            cb.commit()
+            cb.waitUntilCompleted()
+        }
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
