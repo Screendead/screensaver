@@ -656,6 +656,11 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var hazeRefs = [Int32](repeating: 0, count: 32)
     static let smokePlumes = 12
     private var smokeCount = 0
+    // Per screen tile (LAMP_TILES x LAMP_TILES in Shaders/Saver.metal), the haze lamps (bits 0-15) and smoke plumes
+    // (bits 16-27) whose bounding spheres the tile's rays may cross; the shader loops only over those.
+    static let lampTiles = 16
+    private static let lampReach: [Double] = [1, 20, 16, 8, 10, 24, 22]   // LAMP_R in Shaders/Saver.metal
+    private var tileMasks = [UInt32](repeating: 0, count: 16 * 16)
     static let ditherCells = 864.0
     private var historyIndex = 0
     private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
@@ -972,6 +977,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         clipmap.encode(into: cb, center: SIMD2(camera.position.x, camera.position.z), drain: world.synchronous && !Renderer.chunkedCoarse,
                        active: activeLevels)
         bakeLamps(into: cb, frame: &f)
+        fillLampTiles(frame: f, width: w, height: h)
         // The shadow maps and the horizon share no data: one concurrent pass, so their short dispatches overlap.
         let bakes = cb.makeComputeCommandEncoder(dispatchType: .concurrent)
         if let bakes { bakeShadows(into: bakes, frame: &f) }
@@ -1025,6 +1031,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentBuffer(lampPos, offset: 0, index: 2)
             enc.setFragmentBuffer(lampState, offset: 0, index: 3)
             enc.setFragmentBytes(&hazeRefs, length: 128, index: 4)
+            enc.setFragmentBytes(&tileMasks, length: tileMasks.count * 4, index: 7)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
         }
@@ -1086,6 +1093,45 @@ final class Renderer: NSObject, MTKViewDelegate {
         near.sort { $0.0 < $1.0 }
         smokeCount = min(near.count, Renderer.smokePlumes)
         for i in 0..<smokeCount { hazeRefs[16 + i] = Int32(near[i].1) }
+    }
+
+    // Marks the tiles a sphere's projection may touch: its bounding box's corners bound the projection, padded by a few
+    // pixels for the subpixel jitter. A sphere reaching behind the near plane marks every tile.
+    private func fillLampTiles(frame f: Frame, width: Int, height: Int) {
+        let n = Renderer.lampTiles
+        for i in 0..<tileMasks.count { tileMasks[i] = 0 }
+        let b = camera.basis, cam = camera.position
+        let tanV = tan(25.0 * .pi / 180), aspect = Double(width) / Double(height)
+        let padX = 6.0 / Double(width), padY = 6.0 / Double(height)
+        func mark(_ c: SIMD3<Double>, _ r: Double, _ bit: UInt32) {
+            let v = c - cam
+            let x = simd_dot(v, b.right), y = simd_dot(v, b.up), z = simd_dot(v, b.fwd)
+            var x0 = 0, x1 = n - 1, y0 = 0, y1 = n - 1
+            if z - r > 0.5 {
+                var nx0 = Double.infinity, nx1 = -Double.infinity, ny0 = Double.infinity, ny1 = -Double.infinity
+                for zz in [z - r, z + r] {
+                    for xx in [x - r, x + r] { let q = xx / (zz * tanV * aspect); nx0 = min(nx0, q); nx1 = max(nx1, q) }
+                    for yy in [y - r, y + r] { let q = yy / (zz * tanV); ny0 = min(ny0, q); ny1 = max(ny1, q) }
+                }
+                nx0 -= padX; nx1 += padX; ny0 -= padY; ny1 += padY
+                if nx1 < -1 || nx0 > 1 || ny1 < -1 || ny0 > 1 { return }
+                x0 = max(0, Int(floor((nx0 + 1) / 2 * Double(n)))); x1 = min(n - 1, Int(floor((nx1 + 1) / 2 * Double(n))))
+                // Tile rows run down the screen, NDC y up.
+                y0 = max(0, Int(floor((1 - ny1) / 2 * Double(n)))); y1 = min(n - 1, Int(floor((1 - ny0) / 2 * Double(n))))
+            }
+            for ty in y0...y1 { for tx in x0...x1 { tileMasks[ty * n + tx] |= bit } }
+        }
+        var lamps: [Int: SiteInfo.Lamp] = [:]
+        for site in world.sites { for l in site.lamps { lamps[l.index] = l } }
+        for i in 0..<Int(f.refs.x) {
+            guard let l = lamps[Int(hazeRefs[i])] else { continue }
+            mark(l.pos, 3 * Renderer.lampReach[min(l.kind, 6)] + 0.5, 1 << UInt32(i))
+        }
+        let wind = SIMD2(0.825336, 0.564642)
+        for i in 0..<Int(f.refs.y) {
+            guard let l = lamps[Int(hazeRefs[16 + i])] else { continue }
+            mark(l.pos + SIMD3(wind.x * 6, l.rise + 14, wind.y * 6), 16.5, 1 << UInt32(16 + i))
+        }
     }
 
     private func bakeLamps(into cb: MTLCommandBuffer, frame f: inout Frame) {

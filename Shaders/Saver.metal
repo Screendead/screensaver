@@ -2532,6 +2532,7 @@ struct Ctx {
     int prof;
     texture2d<float> slowTex;
     float4 slowInfo;
+    uint tiles;                   // haze lamps (bits 0-15) and smoke plumes (16-27) that may touch this pixel's screen tile
 };
 
 // Baked fine cloud field where it covers q, else evaluated.
@@ -2946,7 +2947,8 @@ static float3 applyFog(thread const Ctx& x, float3 col, float3 o, float3 d, floa
 static float3 lampHaze(thread const Ctx& x, device const float4* pos, device const float4* state, constant int4* refs, int count,
                        float3 o, float3 d, float tEnd) {
     float3 sum = 0;
-    for (int i = 0; i < count; i++) {
+    for (uint m = x.tiles & ((1u << uint(count)) - 1u); m != 0u; m &= m - 1u) {
+        int i = int(ctz(m));
         int li = refs[i / 4][i % 4];
         float4 ls = state[li];
         if (all(ls.rgb == 0.0)) continue;
@@ -3097,7 +3099,8 @@ static float4 smoke(thread const Ctx& x, device const Site* sites, device const 
     const float2 wind = float2(0.825336, 0.564642);
     float3 acc = 0;
     float a = 0;
-    for (int i = 0; i < count; i++) {
+    for (uint m = (x.tiles >> 16) & ((1u << uint(count)) - 1u); m != 0u; m &= m - 1u) {
+        int i = int(ctz(m));
         int li = refs[4 + i / 4][i % 4];
         float4 lp = pos[li];
         float rise = floor(sites[li / MAX_LAMPS].lamps[li % MAX_LAMPS].w / 16.0);
@@ -3145,6 +3148,9 @@ static float4 smoke(thread const Ctx& x, device const Site* sites, device const 
 // Bird buffer (Sources/Wildlife.swift): MAX_FLOCKS pairs (bounding sphere; first cluster, cluster count), then
 // MAX_CLUSTERS pairs (bounding sphere; first bird, count), then four float4s per bird: (map-local position, wingspan),
 // (unit heading, arm angle up from level), (bank, kind, tint, wing extension), (hand angle, hand sweep, -, -).
+// Screen tiles for the lamp haze and smoke lists (Renderer.lampTiles): a LAMP_TILES x LAMP_TILES grid over the frame.
+constant int LAMP_TILES = 16;
+
 constant int MAX_FLOCKS = 8;
 constant int MAX_CLUSTERS = 48;
 constant int BIRD_STRIDE = 4;
@@ -3314,7 +3320,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
                               texture2d<float> slowTex [[texture(11)]], texture2d<float> hx [[texture(12)]],
                               device const Site* sites [[buffer(1)]], device const float4* lampPos [[buffer(2)]],
                               device const float4* lampState [[buffer(3)]], constant int4* refs [[buffer(4)]],
-                              device const float4* birds [[buffer(5)]], device const float* horizon [[buffer(6)]]) {
+                              device const float4* birds [[buffer(5)]], device const float* horizon [[buffer(6)]],
+                              constant uint* tiles [[buffer(7)]]) {
     float2 ndc = in.uv * 2.0 - 1.0;
     ndc.y = -ndc.y;
     ndc += f.jitter.xy;
@@ -3332,7 +3339,11 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
             cloudTex, f.cloud.xyz, st, sites, lampPos, lampState, lightMap, lightDir, f.lights, shadowNear, shadowFar,
             f.misc2.z == 14 ? 2.0 : f.shadow.x, (int(f.shadow.y) & 1) != 0, int(f.shadow.y), slowTex,
-            f.slowCloud.w == f.camRight.w ? f.slowCloud : float4(0) };
+            f.slowCloud.w == f.camRight.w ? f.slowCloud : float4(0), 0u };
+    {
+        int2 ti = clamp(int2(in.uv * float(LAMP_TILES)), int2(0), int2(LAMP_TILES - 1));
+        x.tiles = tiles[ti.y * LAMP_TILES + ti.x];
+    }
 
     // Debug map view: 11 level 4 (+-10k tall, +-16k wide), 12 level 2, 13 level 1; hillshade, height ramp, 100-voxel
     // contours, 2k grid, yellow 10k lines, magenta world origin, red camera.
