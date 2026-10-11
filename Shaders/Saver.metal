@@ -796,10 +796,13 @@ struct Site {
 };
 
 constant int T_HENGE = 1, T_CAIRN = 2, T_RUINS = 3, T_HAMLET = 4, T_JETTY = 5, T_CAMP = 6;
-constant int P_BOX = 1, P_HOUSE = 2, P_DECK = 3, P_BOAT = 4, P_HENGE = 5, P_WALL = 6, P_RING = 7, P_FIRE = 8, P_CLEAR = 9;
+constant int P_BOX = 1, P_HOUSE = 2, P_DECK = 3, P_BOAT = 4, P_HENGE = 5, P_WALL = 6, P_RING = 7, P_FIRE = 8, P_CLEAR = 9, P_ROUND = 10;
 // Part flags; bits 8-11 hold a lamp index + 1, bits 12-15 the dwelling style.
 constant int F_REL = 1, F_AXISZ = 2, F_FLAT = 4, F_STILT = 8, F_TENT = 16, F_CHIMNEY = 32, F_WATER = 64;
 constant int M_STONE = 4, M_TIMBER = 5, M_ROOF = 6, M_PLASTER = 7, M_PLANK = 8, M_CLOTH = 9, M_FIRE = 10;
+constant int M_THATCH = 11, M_SHINGLE = 12, M_LOG = 13, M_FELT = 14, M_ADOBE = 15;
+// Column features (structTex bits 24-27): pieces whose material differs from their part's.
+constant int FT_VIGA = 1, FT_POST = 2, FT_DECK = 3, FT_CROWN = 4, FT_POLE = 5;
 // Dwelling styles by biome: hamlets 0-7, camps 8-12.
 constant int ST_MEADOW = 0, ST_TIMBER = 1, ST_CABIN = 2, ST_CROFT = 3, ST_ADOBE = 4, ST_PUEBLO = 5, ST_STILT = 6, ST_YURT = 7;
 constant int ST_AFRAME = 8, ST_LEANTO = 9, ST_TIPI = 10, ST_CARAVAN = 11, ST_PALM = 12;
@@ -916,55 +919,218 @@ static bool buildJetty(texture2d<float, access::read> hm, thread SiteGen& G, int
     return true;
 }
 
-// Low houses on flat treads around a central hearth, in the local style.
+// A style's house: wall height over the floor, roof pitch (rise per column), the eave lip's depth, and the overhangs
+// past the walls across the ridge (lo, hi side) and beyond the gables. The door side's overhang is a porch or deck.
+struct HouseForm { int ovLo, ovHi, ovG; float wall, pitch, lip; bool round, hip, flat; };
+
+static inline HouseForm houseForm(int style, uint hh) {
+    HouseForm f;
+    f.ovLo = 1; f.ovHi = 1; f.ovG = 1; f.wall = 2.5; f.pitch = 1.0; f.lip = 1.0; f.round = false; f.hip = false; f.flat = false;
+    bool doorHi = (hh & 4u) != 0u;
+    if (style == ST_MEADOW) { f.round = true; f.hip = true; f.pitch = 1.1; }
+    else if (style == ST_TIMBER) { f.wall = 3.0; f.pitch = 1.25; f.lip = 0.75; }
+    else if (style == ST_CABIN || style == ST_STILT) {
+        f.pitch = 1.5; f.lip = style == ST_CABIN ? 0.75 : 1.0;
+        if (doorHi) f.ovHi = 2; else f.ovLo = 2;
+    }
+    else if (style == ST_CROFT) { f.ovLo = 0; f.ovHi = 0; f.ovG = 0; f.wall = 2.0; f.pitch = 0.8; f.round = true; f.hip = true; }
+    else if (style == ST_ADOBE || style == ST_PUEBLO) { f.flat = true; f.ovLo = 1; f.ovHi = 0; f.ovG = 0; f.wall = 3.0; }
+    return f;
+}
+
+// A house column in wall coordinates: iw along the ridge, jw across it (0 at the first wall), and its distance in
+// from the nearest long wall (dA) and gable wall (dG); negative over the overhangs.
+struct HouseAt { int iw, jw, Lw, Dw, dA, dG; bool axisZ; HouseForm f; };
+
+static inline int4 partIJ(Part P, int2 q, int2 c) {
+    int2 r0 = c + P.o;
+    bool axisZ = (P.flags & F_AXISZ) != 0;
+    return axisZ ? int4(q.y - r0.y, q.x - r0.x, P.sz.y, P.sz.x) : int4(q.x - r0.x, q.y - r0.y, P.sz.x, P.sz.y);
+}
+
+static inline void houseAt(Part P, int2 q, int2 c, thread HouseAt& h) {
+    int4 ij = partIJ(P, q, c);
+    h.axisZ = (P.flags & F_AXISZ) != 0;
+    h.f = houseForm((P.flags >> 12) & 15, uint(P.y2));
+    h.Lw = ij.z - 2 * h.f.ovG; h.Dw = ij.w - h.f.ovLo - h.f.ovHi;
+    h.iw = ij.x - h.f.ovG; h.jw = ij.y - h.f.ovLo;
+    h.dA = min(h.jw, h.Dw - 1 - h.jw); h.dG = min(h.iw, h.Lw - 1 - h.iw);
+}
+
+// Roof top over the floor (before quantizing) and its rise per column there, from the eave line half a voxel over
+// the wall top: straight, or rounded (steep at the eaves, a full crown); hipped roofs slope toward the gables too.
+static inline float2 roofProfile(thread const HouseAt& h) {
+    int ridge = (h.Dw - 1) / 2;
+    int d = h.f.hip ? min(h.dA, h.dG) : h.dA;
+    float tMax = float(ridge + 1);
+    float t = max(float(d + 1), 0.0);
+    float x = t / tMax;
+    float r = h.f.round ? h.f.pitch * tMax * (1.0 - (1.0 - x) * (1.0 - x)) : h.f.pitch * t;
+    float sl = d >= ridge ? 0.0 : h.f.round ? h.f.pitch * 2.0 * (1.0 - x + 0.5 / tMax) : h.f.pitch;
+    return float2(h.f.wall + 0.5 + r, sl);
+}
+
+// The tallest step between neighbouring roof columns: the roof course is at least this deep.
+static inline float roofStep(thread const HouseAt& h) {
+    float tMax = float((h.Dw - 1) / 2 + 1);
+    return h.f.round ? h.f.pitch * (2.0 - 1.0 / tMax) : h.f.pitch;
+}
+
+static inline float ridgeTop(thread const HouseAt& h) {
+    return round((h.f.wall + 0.5 + h.f.pitch * float((h.Dw - 1) / 2 + 1)) * 4.0) * 0.25;
+}
+
+// A pitched house's top over the floor at a column, in quarter voxels.
+static inline float houseTop(thread const HouseAt& h) {
+    if (h.dA < -1) return h.f.wall;
+    float rel = roofProfile(h).x;
+    // A croft's corners are rounded down.
+    if (h.f.ovG == 0 && h.dA == 0 && h.dG == 0) rel -= 0.5;
+    return round(rel * 4.0) * 0.25;
+}
+
+// The along-ridge column of a house's chimney: in the gable wall, outside it (a cabin's stack) or through the hip.
+static inline int chimneyAt(int style, int Lw, uint hh) {
+    int i = style == ST_CABIN ? -1 : style == ST_MEADOW ? 1 : style == ST_TIMBER ? 0 : -100;
+    return ((hh >> 12) & 1u) != 0u ? Lw - 1 - i : i;
+}
+
+// Height over the floor of an adobe house's mass (wings round a courtyard, U or L) or a pueblo's (a block with a
+// second tier set back on its back half); a low wall closes the courtyard, with a gate. 0 outside the mass.
+static inline float flatMass(int style, uint hh, int iw, int jw, int Lw, int Dw) {
+    if (iw < 0 || jw < 0 || iw >= Lw || jw >= Dw) return 0.0;
+    if (style == ST_PUEBLO) return jw < Dw / 2 && iw >= 1 && iw < Lw - 1 - int((hh >> 7) & 1u) ? 5.5 : 3.0;
+    bool uPlan = ((hh >> 7) & 1u) != 0u;
+    bool court = jw >= 3 && iw >= 3 && (!uPlan || iw <= Lw - 4);
+    if (court) {
+        int gate = uPlan ? Lw / 2 : (Lw + 2) / 2;
+        return jw == Dw - 1 && iw != gate ? 1.5 : 0.0;
+    }
+    return jw < 3 && ((hh >> 8) & 1u) != 0u ? 4.0 : 3.0;
+}
+
+// The mass with a parapet round its roof edges, lower at the corners.
+static inline float flatTop(int style, uint hh, int iw, int jw, int Lw, int Dw) {
+    float m = flatMass(style, hh, iw, jw, Lw, Dw);
+    if (m < 2.0) return m;
+    bool ex = flatMass(style, hh, iw - 1, jw, Lw, Dw) < m || flatMass(style, hh, iw + 1, jw, Lw, Dw) < m;
+    bool ez = flatMass(style, hh, iw, jw - 1, Lw, Dw) < m || flatMass(style, hh, iw, jw + 1, Lw, Dw) < m;
+    return m + (ex && ez ? 0.25 : ex || ez ? 0.5 : 0.0);
+}
+
+// What a house wall column shows on its face toward `side` (0 -x, 1 +x, 2 -z, 3 +z): 0 plain wall, 1 a window, 2 the
+// door, 3 a window on a pueblo's upper tier.
+static inline int houseOpening(Part P, thread const HouseAt& h, uint side) {
+    uint hh = uint(P.y2);
+    int style = (P.flags >> 12) & 15;
+    uint sLo = h.axisZ ? 0u : 2u, sHi = h.axisZ ? 1u : 3u, gLo = h.axisZ ? 2u : 0u, gHi = h.axisZ ? 3u : 1u;
+    int di = side == gLo ? -1 : side == gHi ? 1 : 0, dj = side == sLo ? -1 : side == sHi ? 1 : 0;
+    float k = hashf(pcg(hh * 131u + uint(h.iw + 8) * 17u + uint(h.jw + 8) * 5u + side));
+    if (h.f.flat) {
+        float m = flatMass(style, hh, h.iw, h.jw, h.Lw, h.Dw);
+        float o = flatMass(style, hh, h.iw + di, h.jw + dj, h.Lw, h.Dw);
+        if (m < 2.0 || o >= m) return 0;
+        if (o >= 2.0) return k < 0.5 ? 3 : 0;
+        bool doorCol = style == ST_PUEBLO ? h.iw == h.Lw / 2 && h.jw == h.Dw - 1 : h.iw == h.Lw / 2 && h.jw == 2;
+        if (doorCol && dj == 1) return 2;
+        // Corners stay plain.
+        if (flatMass(style, hh, h.iw + dj, h.jw + di, h.Lw, h.Dw) < 2.0 || flatMass(style, hh, h.iw - dj, h.jw - di, h.Lw, h.Dw) < 2.0) return 0;
+        return k < 0.3 ? 1 : 0;
+    }
+    if (h.iw < 0 || h.jw < 0 || h.iw >= h.Lw || h.jw >= h.Dw) return 0;
+    if (dj != 0) {
+        if (!(dj < 0 ? h.jw == 0 : h.jw == h.Dw - 1) || h.iw == 0 || h.iw == h.Lw - 1) return 0;
+        bool doorWall = (dj > 0) == ((hh & 4u) != 0u);
+        if (doorWall && h.iw == h.Lw / 2) return 2;
+        if (((h.iw - h.Lw / 2) & 1) != 0) return 0;
+        return k < 0.7 ? 1 : 0;
+    }
+    if (!(di < 0 ? h.iw == 0 : h.iw == h.Lw - 1)) return 0;
+    return h.jw == (h.Dw - 1) / 2 && k < 0.6 ? 1 : 0;
+}
+
+static inline bool rectFree(thread const int4* rects, int nr, int2 r0, int2 sz, int gap) {
+    for (int m = 0; m < nr; m++)
+        if (all(r0 < rects[m].zw + gap) && all(r0 + sz + gap > rects[m].xy)) return false;
+    return true;
+}
+
+// Lowest and highest ground over a rect; false where an arch stands in it.
+static inline bool rectGround(texture2d<float, access::read> hm, int2 r0, int2 sz, thread float& lo, thread float& hi, thread int& wet) {
+    lo = 1e9; hi = -1e9; wet = 0;
+    for (int j = 0; j < sz.y; j++)
+        for (int i = 0; i < sz.x; i++) {
+            float4 col = hm.read(uint2(r0 + int2(i, j)));
+            if (col.b > col.g) return false;
+            lo = min(lo, col.r); hi = max(hi, col.r);
+            if (col.r < SEA) wet++;
+        }
+    return true;
+}
+
+// Houses on flat treads around a central hearth, in the local style: cottages, timber frames, cabins, crofts,
+// adobe courtyards, pueblos, stilt longhouses or yurts.
 static bool buildHamlet(texture2d<float, access::read> hm, thread SiteGen& G, int2 c, uint h, int style) {
-    int variant = style == ST_STILT ? 3 : style == ST_ADOBE || style == ST_PUEBLO ? 1 : style == ST_CROFT ? 2 : 0;
     int n = int(hm.get_width());
     int4 rects[8];
     int nr = 0;
     rects[nr++] = int4(c - 2, c + 3);
     int houses = 0, want = 3 + int(h % 3u);
     float a0 = hashf(pcg(h + 1u)) * 6.2831853;
-    bool flat = variant == 1, stilt = variant == 3;
-    for (int k = 0; k < 56 && houses < want && G.np < MAX_PARTS - 4 && G.nl < MAX_LAMPS - 3; k++) {
-        float r = (stilt ? 4.0 : 7.0) + 24.0 * sqrt(float(k) / 56.0);
+    bool stilt = style == ST_STILT, pueblo = style == ST_PUEBLO, yurt = style == ST_YURT;
+    float rIn = stilt || pueblo ? 5.0 : 8.0, rSpan = pueblo ? 12.0 : 26.0;
+    for (int k = 0; k < 64 && houses < want && G.np < MAX_PARTS - 8 && G.nl < MAX_LAMPS - 3; k++) {
+        float r = rIn + rSpan * sqrt(float(k) / 64.0);
         float a = a0 + float(k) * 2.39996;
         int2 pos = c + int2(round(r * float2(cos(a), sin(a))));
-        uint hh = pcg(h + 17u * uint(k) + 3u);
+        uint hh = pcg(h + 17u * uint(k) + 3u) & 0x7fffu;
         bool axisZ = (hh & 1u) != 0u;
-        int L = 4 + int((hh >> 1) & 1u);
-        int D = 3 + int((hh >> 2) & 1u);
-        int Dt = flat ? D : D + 2;
+        int b9 = int((hh >> 9) % 3u), b11 = int((hh >> 11) & 1u);
+        if (yurt) {
+            int R2 = 5 + b9, rad = (R2 + 1) / 2;
+            int2 r0 = pos - rad, sz = int2(2 * rad + 1);
+            if (any(r0 < 2) || any(r0 + sz >= n - 2) || !rectFree(rects, nr, r0, sz, 2)) continue;
+            float lo, hi;
+            int wet;
+            if (!rectGround(hm, r0, sz, lo, hi, wet) || hi - lo > 1.0 || lo < SEA + 2.2) continue;
+            int floorY = int(hi);
+            int lamp = addLamp(G, float3(float(pos.x - c.x) + 0.5, float(floorY) + 1.2, float(pos.y - c.y) + 0.5), L_WINDOW, 2.4);
+            Part yp = makePart(P_ROUND, M_FELT, pos - c, int2(R2, 0), floorY, 8, 14, F_CHIMNEY | ((lamp + 1) << 8) | (style << 12));
+            addPart(G, yp, length(float2(pos - c)) + float(rad) + 2.0);
+            rects[nr++] = int4(r0, r0 + sz);
+            houses++;
+            continue;
+        }
+        HouseForm f = houseForm(style, hh);
+        int Lw = 6 + (b9 & 1), Dw = 4 + b11;
+        if (style == ST_TIMBER) { Lw = 7 + (b9 & 1); Dw = 5; }
+        else if (style == ST_CABIN) Dw = 5;
+        else if (style == ST_CROFT) Lw = 7 + b9;
+        else if (stilt) Lw = 8 + b9;
+        else if (style == ST_ADOBE) { Lw = 7 + b9; Dw = 7 + b11; }
+        else if (pueblo) { Lw = 6 + b9; Dw = 5 + b11; }
+        int L = Lw + 2 * f.ovG, Dt = Dw + f.ovLo + f.ovHi;
         int2 sz = axisZ ? int2(Dt, L) : int2(L, Dt);
         int2 r0 = pos - sz / 2;
-        if (any(r0 < 2) || any(r0 + sz >= n - 2)) continue;
-        bool ok = true;
-        for (int m = 0; m < nr; m++)
-            if (all(r0 < rects[m].zw + 2) && all(r0 + sz + 2 > rects[m].xy)) ok = false;
-        if (!ok) continue;
-        float lo = 1e9, hi = -1e9;
-        int wet = 0;
-        for (int j = 0; j < sz.y && ok; j++)
-            for (int i = 0; i < sz.x; i++) {
-                float4 col = hm.read(uint2(r0 + int2(i, j)));
-                if (col.b > col.g) { ok = false; break; }
-                lo = min(lo, col.r); hi = max(hi, col.r);
-                if (col.r < SEA) wet++;
-            }
-        if (!ok) continue;
-        if (stilt) { if (hi > SEA + 1.2 || lo < SEA - 6.0 || wet * 3 < sz.x * sz.y) continue; }
-        else if (hi - lo > 1.0 || lo < SEA + 2.2) continue;
+        if (any(r0 < 2) || any(r0 + sz >= n - 2) || !rectFree(rects, nr, r0, sz, pueblo ? 1 : 2)) continue;
+        int2 w0 = r0 + (axisZ ? int2(f.ovLo, f.ovG) : int2(f.ovG, f.ovLo));
+        int2 wsz = axisZ ? int2(Dw, Lw) : int2(Lw, Dw);
+        float lo, hi, alo, ahi;
+        int wet, awet;
+        if (!rectGround(hm, r0, sz, alo, ahi, awet) || !rectGround(hm, w0, wsz, lo, hi, wet)) continue;
+        if (stilt) { if (ahi > SEA + 1.2 || alo < SEA - 6.0 || awet * 3 < sz.x * sz.y) continue; }
+        else if (hi - lo > (f.flat ? 1.5 : 2.0) || ahi > hi + 1.0 || lo < SEA + 2.2) continue;
         int floorY = stilt ? 22 : int(hi);
-        int eave = floorY + (variant == 2 ? 3 : 2);
-        int ridge = flat ? floorY + 3 : eave + (Dt - 1) / 2 + 1;
-        bool chim = !flat && ((hh >> 3) & 1u) != 0u;
+        HouseAt ha;
+        ha.f = f; ha.Lw = Lw; ha.Dw = Dw;
+        bool chim = !f.flat && !stilt && (style == ST_CABIN || style == ST_CROFT || ((hh >> 3) & 1u) != 0u);
+        float top = f.flat ? (pueblo ? 6.0 : 4.5) : ridgeTop(ha);
         int lamp = addLamp(G, float3(float(pos.x - c.x) + 0.5, float(floorY) + 1.2, float(pos.y - c.y) + 0.5), L_WINDOW,
-                           chim ? float(ridge) + 1.0 - (float(floorY) + 1.2) : 0.0);
-        int flags = (axisZ ? F_AXISZ : 0) | (flat ? F_FLAT : 0) | (stilt ? F_STILT | F_WATER : 0) | (chim ? F_CHIMNEY : 0)
+                           chim ? top + 1.0 - 1.2 : 0.0);
+        int flags = (axisZ ? F_AXISZ : 0) | (stilt ? F_STILT | F_WATER : 0) | (chim ? F_CHIMNEY : 0)
                   | ((lamp + 1) << 8) | (style << 12);
-        int wall = variant == 2 ? M_STONE : flat ? M_PLASTER : ((hh >> 4) & 3u) == 0u ? M_TIMBER : M_PLASTER;
-        if (stilt) wall = M_TIMBER;
-        Part hp = makePart(P_HOUSE, wall, r0 - c, sz, floorY, flat ? ridge : eave, int(hh & 0x7fffu), flags);
+        int wall = style == ST_CROFT ? M_STONE : f.flat ? M_ADOBE : style == ST_CABIN || stilt ? M_LOG : M_PLASTER;
+        Part hp = makePart(P_HOUSE, wall, r0 - c, sz, floorY, 0, int(hh), flags);
         addPart(G, hp, float(partReach(hp)));
         rects[nr++] = int4(r0, r0 + sz);
         houses++;
@@ -1128,7 +1294,7 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
     int2 c = cw - info.xy;
     G.s.head.xy = cw;
     Lie L = survey(hm, c, cw, seed);
-    float g = L.g, desert = L.desert, painted = L.painted, lagoon = L.lagoon, cold = L.cold, snowline = L.snowline, waterR = L.waterR;
+    float g = L.g, snowline = L.snowline, waterR = L.waterR;
     int2 waterDir = L.waterDir;
     bool flat5 = L.flat5;
 
@@ -1189,7 +1355,7 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
         ok = buildHamlet(hm, G, c, hb, style);
         if (ok && float(flat5) > 0.0 && g < snowline) {
             int lamp = addLamp(G, float3(0.5, g + 1.5, 0.5), L_HEARTH, 1.0);
-            addPart(G, makePart(P_FIRE, M_FIRE, int2(0), int2(1), 0, 0, 0, F_REL | ((lamp + 1) << 8)), 2.0);
+            addPart(G, makePart(P_FIRE, M_FIRE, int2(-1), int2(3), 0, 0, 0, F_REL | ((lamp + 1) << 8)), 3.0);
         }
         if (ok && waterR <= 40.0 && style != ST_STILT) buildJetty(hm, G, c, pcg(hb + 5u), waterDir, 48);
         if (ok && ((hb >> 20) & 3u) == 0u && G.nl < MAX_LAMPS) {
@@ -1215,20 +1381,50 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
         ok = buildJetty(hm, G, c, hb, waterDir, 24);
         age = 0.3;
     } else if (type == T_CAMP) {
+        int cst = campStyle(L);
         int lamp = addLamp(G, float3(0.5, g + 1.5, 0.5), L_FIRE, 1.0);
-        addPart(G, makePart(P_FIRE, M_FIRE, int2(0), int2(1), 0, 0, 0, F_REL | ((lamp + 1) << 8)), 2.0);
+        addPart(G, makePart(P_FIRE, M_FIRE, int2(-1), int2(3), 0, 0, 0, F_REL | ((lamp + 1) << 8)), 3.0);
         int tents = 1 + int(hb % 2u);
         float a0 = hashf(hb >> 4) * 6.2831853;
-        for (int i = 0; i < tents; i++) {
-            float a = a0 + float(i) * 2.3;
-            int2 tc = int2(round(float2(cos(a), sin(a)) * 4.5));
-            float tl, th;
-            if (!flatPatch(hm, c + tc, 1, 1.0, tl, th) || tl < SEA + 2.0) continue;
-            int axis = ((hb >> (8 + i)) & 1u) != 0u ? F_AXISZ : 0;
-            addPart(G, makePart(P_HOUSE, M_CLOTH, tc - 1, int2(3), int(tl), int(tl), int(pcg(hb + uint(i)) & 0x7fffu), F_TENT | axis | (campStyle(L) << 12)),
-                    length(float2(tc)) + 3.0);
+        int4 rects[4];
+        int nr = 0;
+        rects[nr++] = int4(c - 1, c + 2);
+        for (int i = 0; i < 10 && nr <= tents; i++) {
+            float a = a0 + float(i) * 2.39996;
+            float2 dir = float2(cos(a), sin(a));
+            float rad = 5.0 + float(i / 5);
+            int2 tc = c + int2(round(dir * rad));
+            // The camp's first shelter is its style's; a lean-to camp adds an A-frame, a caravan an awning.
+            int ks = cst;
+            if (nr > 1 && cst == ST_LEANTO) ks = ST_AFRAME;
+            bool roundT = ks == ST_TIPI || (ks == ST_CARAVAN && nr == 1);
+            int2 sz;
+            bool axisZ = false;
+            if (roundT) {
+                sz = int2(5);
+            } else {
+                // A-frames point a gable at the fire; lean-tos and shelters face it.
+                bool radialX = abs(dir.x) >= abs(dir.y);
+                axisZ = ks == ST_AFRAME ? !radialX : radialX;
+                int L = ks == ST_AFRAME ? 7 : 4, D = ks == ST_PALM ? 4 : 3;
+                sz = axisZ ? int2(D, L) : int2(L, D);
+            }
+            int2 r0 = tc - sz / 2;
+            if (!rectFree(rects, nr, r0, sz, 1)) continue;
+            float lo, hi;
+            int wet;
+            if (!rectGround(hm, r0, sz, lo, hi, wet) || hi - lo > 1.0 || lo < SEA + 2.0) continue;
+            float reach = length(float2(tc - c)) + 5.0;
+            if (roundT) {
+                bool tipi = ks == ST_TIPI;
+                addPart(G, makePart(P_ROUND, M_FELT, tc - c, int2(tipi ? 4 : 5, 0), int(hi), tipi ? 0 : 6, tipi ? 18 : 10, ks << 12), reach);
+            } else {
+                addPart(G, makePart(P_HOUSE, ks == ST_PALM ? M_THATCH : M_FELT, r0 - c, sz, int(hi), 0,
+                                    int(pcg(hb + uint(i)) & 0x7fffu), F_TENT | (axisZ ? F_AXISZ : 0) | (ks << 12)), reach);
+            }
+            rects[nr++] = int4(r0, r0 + sz);
         }
-        addPart(G, makePart(P_CLEAR, 0, int2(0), int2(8, 0), 0, 0, 0, 0), 9.0);
+        addPart(G, makePart(P_CLEAR, 0, int2(0), int2(10, 0), 0, 0, 0, 0), 11.0);
         age = 0.1;
         ok = true;
     }
@@ -1273,31 +1469,15 @@ static inline Claim gapClaim(float gl, float gh, float H, uint bits) {
     Claim c; c.hit = true; c.H = H; c.gl = gl; c.gh = gh; c.base = gh; c.bits = bits; return c;
 }
 
-// A house's openings on the wall column at q: windows on sides (bit per side -x, +x, -z, +z) and the door side + 1.
-static inline uint2 houseOpenings(Part P, int2 q, int2 c) {
-    int2 r0 = c + P.o;
-    bool axisZ = (P.flags & F_AXISZ) != 0;
-    int i = axisZ ? q.y - r0.y : q.x - r0.x;
-    int j = axisZ ? q.x - r0.x : q.y - r0.y;
-    int L = axisZ ? P.sz.y : P.sz.x, Dt = axisZ ? P.sz.x : P.sz.y;
-    int e = min(j, Dt - 1 - j);
-    uint hh = uint(P.y2);
-    bool flat = (P.flags & F_FLAT) != 0;
-    // Sides 0 -x, 1 +x, 2 -z, 3 +z: the long walls face across, the gables along.
-    uint sLo = axisZ ? 0u : 2u, sHi = axisZ ? 1u : 3u, gLo = axisZ ? 2u : 0u, gHi = axisZ ? 3u : 1u;
-    uint win = 0u, door = 0u;
-    int wallJ0 = flat ? 0 : 1, wallJ1 = flat ? Dt - 1 : Dt - 2;
-    if ((j == wallJ0 || j == wallJ1)) {
-        uint side = j == wallJ0 ? sLo : sHi;
-        int doorI = L / 2;
-        bool doorHi = (hh & 4u) != 0u;
-        bool doorWall = (j == wallJ1) == doorHi;
-        if (i == doorI && doorWall) door = side + 1u;
-        else if ((i == 1 && ((hh >> (doorWall ? 0 : 1)) & 1u) != 0u) || (i == L - 2 && ((hh >> (doorWall ? 1 : 3)) & 1u) != 0u)
-                 || (i == doorI && !doorWall && ((hh >> 6) & 1u) != 0u)) win |= 1u << side;
+// A round dwelling's top over its floor at distance r from its centre, and the outward fall per voxel there.
+static inline float2 roundProfile(Part P, float r) {
+    float R = float(P.sz.x) * 0.5, crown = float(P.y2) * 0.25, wall = float(P.y1) * 0.25;
+    if (((P.flags >> 12) & 15) == ST_TIPI) {
+        float Re = R + 0.5;
+        return float2(max(crown * (1.0 - r / Re), 0.5), crown / Re);
     }
-    if ((i == 0 || i == L - 1) && e == (Dt - 1) / 2 && ((hh >> 5) & 1u) != 0u) win |= 1u << (i == 0 ? gLo : gHi);
-    return uint2(win, door);
+    float x = min(r / R, 1.0);
+    return float2(r > R - 0.9 ? wall : wall + (crown - wall) * (1.0 - x * x), (crown - wall) * 2.0 * x / R);
 }
 
 // One part's column at q (map-local), on ground g; `near` collects the clearing around it.
@@ -1309,43 +1489,106 @@ static Claim stampPart(Part P, int2 q, int2 c, float g, texture2d<float, access:
     if (P.kind == P_BOX || P.kind == P_FIRE) {
         if (all(q >= r0 - 2) && all(q < r1 + 2)) near = true;
         if (!inRect || (!wetOK && g < SEA + 1.0)) return noClaim();
+        // A hearth's ring of stones round its flame.
+        if (P.kind == P_FIRE && P.sz.x == 3 && any(q != r0 + 1)) return solidClaim(g + 0.5, g, uint(M_STONE) | S_FLAT);
         float top = P.kind == P_FIRE ? g + 1.0 + float(P.y0) : (P.flags & F_REL) != 0 ? g + float(P.y0) : float(P.y0);
         if (top <= g) return noClaim();
         return solidClaim(top, g, mat | S_FLAT);
     }
     if (P.kind == P_HOUSE) {
-        if (all(q >= r0 - 2) && all(q < r1 + 2)) near = true;
+        if (all(q >= r0 - 3) && all(q < r1 + 3)) near = true;
         if (!inRect) return noClaim();
-        bool axisZ = (P.flags & F_AXISZ) != 0;
-        int i = axisZ ? q.y - r0.y : q.x - r0.x;   // along the ridge
-        int j = axisZ ? q.x - r0.x : q.y - r0.y;   // across it
-        int L = axisZ ? P.sz.y : P.sz.x, Dt = axisZ ? P.sz.x : P.sz.y;
-        int e = min(j, Dt - 1 - j);
+        int style = (P.flags >> 12) & 15;
+        uint post = uint(M_TIMBER) | (uint(FT_POST) << S_FEAT);
+        if ((P.flags & F_TENT) != 0) {
+            // Camp shelters, in half voxels over each column's own ground.
+            if (g < SEA + 1.0) return noClaim();
+            int4 ij = partIJ(P, q, c);
+            int i = ij.x, j = ij.y, L = ij.z, D = ij.w;
+            bool endI = i == 0 || i == L - 1, endJ = j == 0 || j == D - 1;
+            if (style == ST_AFRAME) {
+                // Ridge-pole ends past each gable; the ridge sags mid-span.
+                if (endI) return j == 1 ? gapClaim(g, g + 2.0, g + 2.5, post) : noClaim();
+                if (j != 1) return solidClaim(g + 1.0, g, mat);
+                return solidClaim(g + 2.5 - 0.5 * round(sin(3.14159265 * (float(i) - 0.5) / float(L - 2))), g, mat);
+            }
+            if (style == ST_LEANTO) {
+                float2 mid = float2(r0 - c) + float2(P.sz) * 0.5;
+                bool frontLo = ((P.flags & F_AXISZ) != 0 ? mid.x : mid.y) > 0.0;
+                int jf = frontLo ? j : D - 1 - j;
+                if (jf == 0) return endI ? solidClaim(g + 2.5, g, post) : gapClaim(g, g + 2.0, g + 2.5, mat);
+                if (jf == 1) return gapClaim(g, g + 1.0, g + 1.5, mat);
+                return solidClaim(g + 1.0, g, mat);
+            }
+            // Palm shelters and caravan awnings: a roof on four posts.
+            if (endI && endJ) return solidClaim(g + 2.5, g, post);
+            bool inner = !endI && !endJ;
+            return gapClaim(g, g + 2.0, g + (style == ST_PALM && inner ? 3.0 : 2.5), mat);
+        }
+        HouseAt h;
+        houseAt(P, q, c, h);
         uint hh = uint(P.y2);
-        bool flat = (P.flags & F_FLAT) != 0, tent = (P.flags & F_TENT) != 0, stilt = (P.flags & F_STILT) != 0;
-        uint bits = 0u;
-        if (flat) {
+        float fl = float(P.y0);
+        if (h.f.flat) {
             if (g < SEA + 1.0) return noClaim();
-            return solidClaim(float(P.y1), g, mat | S_FLAT | bits);
+            if (h.jw < 0) {
+                // Vigas: roof beams poking out of the back wall.
+                bool viga = (h.iw & 1) == 1 && h.iw < h.Lw - 1 && flatMass(style, hh, h.iw, 0, h.Lw, h.Dw) >= 2.0;
+                if (!viga || fl + 2.25 < g + 1.0) return noClaim();
+                return gapClaim(g, fl + 2.25, fl + 2.75, uint(M_TIMBER) | (uint(FT_VIGA) << S_FEAT));
+            }
+            float top = flatTop(style, hh, h.iw, h.jw, h.Lw, h.Dw);
+            if (top <= 0.0 || fl + top <= g) return noClaim();
+            return solidClaim(fl + top, g, mat | S_FLAT);
         }
-        uint plane = j * 2 < Dt - 1 ? (axisZ ? 1u : 3u) : j * 2 > Dt - 1 ? (axisZ ? 2u : 4u) : 5u;
-        if (tent) {
-            if (g < SEA + 1.0) return noClaim();
-            return solidClaim(g + (e == 0 ? 1.0 : 2.0), g, mat | (plane << 4));
+        bool stilt = style == ST_STILT;
+        bool inWall = h.iw >= 0 && h.jw >= 0 && h.iw < h.Lw && h.jw < h.Dw;
+        int ridge = (h.Dw - 1) / 2;
+        if ((P.flags & F_CHIMNEY) != 0 && h.jw == ridge && h.iw == chimneyAt(style, h.Lw, hh))
+            return solidClaim(fl + ridgeTop(h) + 1.0, g, uint(M_STONE) | S_FLAT | S_CHIMNEY);
+        if (h.dA < -1) {
+            bool endPost = h.iw == 0 || h.iw == h.Lw - 1;
+            if (stilt) {
+                // The deck in front of the door, on its piles.
+                if (h.iw < 0 || h.iw >= h.Lw || g >= fl) return noClaim();
+                if (endPost) return solidClaim(fl, g, post);
+                uint deck = uint(M_PLANK) | S_FLAT | (uint(FT_DECK) << S_FEAT);
+                return g < fl - 1.0 ? gapClaim(g, fl - 0.5, fl, deck) : solidClaim(fl, g, deck);
+            }
+            // A cabin's porch roof on posts.
+            float Hp = fl + houseTop(h);
+            if (endPost) return solidClaim(Hp, g, post);
+            if (Hp - 0.5 > g + 1.0) return gapClaim(g, Hp - 0.5, Hp, mat);
+            return g < Hp ? solidClaim(Hp, g, mat) : noClaim();
         }
-        float floorY = float(P.y0), eave = float(P.y1);
-        if (e == 0) {
-            // Eave overhang: a roof course on air.
-            if (eave > g + 0.5) return gapClaim(g, eave, eave + 1.0, uint(M_ROOF) | (plane << 4));
-            return solidClaim(max(eave, g) + 1.0, g, uint(M_ROOF) | (plane << 4));
+        float H = fl + houseTop(h);
+        if (!inWall) {
+            // Eaves and rakes: the roof's edge on air; a longhouse's ridge ends rise in horns.
+            if (stilt && h.jw == ridge && h.dG < 0) H += 1.0;
+            float under = H - h.f.lip;
+            if (under > g + 1.0) return gapClaim(g, under, H, mat);
+            return g < H ? solidClaim(H, g, mat) : noClaim();
         }
-        float H = eave + float(e) + 1.0;
-        if ((P.flags & F_CHIMNEY) != 0 && i == 1 && e == (Dt - 1) / 2) { H += 1.0; bits |= S_CHIMNEY; }
-        bits |= mat | (plane << 4);
-        bool pile = (i == 0 || i == L - 1) && e == 1;
-        if (stilt && g < floorY - 0.5 && !pile) return gapClaim(g, floorY, H, bits);
-        if (!stilt && g < SEA + 1.0) return noClaim();
-        return solidClaim(H, g, bits);
+        if (stilt) {
+            bool pile = (h.iw == 0 || h.iw == h.Lw - 1 || h.iw == h.Lw / 2) && (h.jw == 0 || h.jw == h.Dw - 1);
+            if (g < fl - 0.5 && !pile) return gapClaim(g, fl, H, mat);
+            return solidClaim(H, g, mat);
+        }
+        if (g < SEA + 1.0) return noClaim();
+        return solidClaim(H, g, mat);
+    }
+    if (P.kind == P_ROUND) {
+        // Yurts (a wall ring under a dome) and tipis (a cone), in half voxels.
+        float2 dq = float2(q - c - P.o);
+        float r = length(dq), R = float(P.sz.x) * 0.5;
+        if (r < R + 3.0) near = true;
+        if (r > R + 0.2 || g < SEA + 1.0) return noClaim();
+        float2 pr = roundProfile(P, r);
+        float H = float(P.y0) + round(pr.x * 2.0) * 0.5;
+        uint ft = 0u;
+        if (r < 0.5) { H += 0.5; ft = uint(((P.flags >> 12) & 15) == ST_TIPI ? FT_POLE : FT_CROWN); }
+        if (H <= g) return noClaim();
+        return solidClaim(H, g, mat | (ft << S_FEAT));
     }
     if (P.kind == P_DECK) {
         if (all(q >= r0 - 2) && all(q < r1 + 2)) near = true;
@@ -2653,25 +2896,84 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     if (built && float(v.y) >= base) {
         uint sb = st.read(uint2(clamp(v.xz, int2(0), int2(tr.size - 1)))).r;
         int mat = int(sb & 15u);
-        uint plane = (sb >> 4) & 7u;
+        uint pk = (sb >> S_PART) & 31u;
         device const Site& site = sites[(sb >> S_SITE) & 511u];
-        Part P = unpackPart(site.parts[(sb >> S_PART) & 31u]);
+        Part P = unpackPart(site.parts[pk]);
         uint sh = uint(site.head.w);
         float age = site.info.y;
         float Ht = col.x;
         int style = (P.flags >> 12) & 15;
-        int variant = style == ST_STILT ? 3 : style == ST_ADOBE || style == ST_PUEBLO ? 1 : style == ST_CROFT ? 2 : 0;
+        int feat = int((sb >> S_FEAT) & 15u);
         bool chim = (sb & S_CHIMNEY) != 0u;
-        bool house = P.kind == P_HOUSE && (P.flags & F_TENT) == 0;
-        // This voxel's material: a house column is wall below its top roof course, plinth (or stilts) below the floor.
+        bool tent = P.kind == P_HOUSE && (P.flags & F_TENT) != 0;
+        bool house = P.kind == P_HOUSE && !tent;
+        int2 sc = site.head.xy - mapOrigin;
+        float floorY = float(P.y0);
+        float k = hashf(pcg(sh + pk * 7919u + uint(P.y2)));
+        // Fine pattern fades to its mean before it nears a pixel.
+        float fade = 1.0 - smoothstep(0.02, 0.07, fp);
+        // This voxel's material, and the plane a roof or a round wall shades as (zero: its own face).
         int vm = mat;
-        bool roof = (mat == M_ROOF || mat == M_CLOTH) && plane != 0u;
-        if (house && mat != M_ROOF) {
-            if (chim && float(v.y) >= Ht - 1.0) vm = M_STONE;
-            else if (plane != 0u && float(v.y) >= Ht - (chim ? 2.0 : 1.0)) { roof = true; vm = M_ROOF; }
-            else if (float(v.y) < float(P.y0)) vm = (P.flags & F_STILT) != 0 ? M_TIMBER : M_STONE;
+        bool roof = false;
+        float3 rn = 0;
+        // Roof coordinates: along the fall line, and along the eave.
+        float2 ra = wq;
+        HouseAt ha;
+        if (house) {
+            houseAt(P, v.xz, sc, ha);
+            if (chim) vm = M_STONE;
+            else if (feat == FT_VIGA || feat == FT_POST) vm = M_TIMBER;
+            else if (feat == FT_DECK) vm = M_PLANK;
+            else if (float(v.y) < floorY) vm = style == ST_STILT ? M_TIMBER : M_STONE;
+            else if (!ha.f.flat) {
+                bool inWall = ha.iw >= 0 && ha.jw >= 0 && ha.iw < ha.Lw && ha.jw < ha.Dw;
+                // The roof course is as deep as the steepest step, so every riser of the roof is roof.
+                float thick = max(1.0, roofStep(ha)) + 0.3;
+                bool gableWall = !ha.f.hip && ha.dG == 0;
+                float under = gableWall ? Ht - thick : min(floorY + ha.f.wall, Ht - thick);
+                if (!inWall || wy >= under) {
+                    roof = true;
+                    vm = style == ST_TIMBER || style == ST_CABIN ? M_SHINGLE : M_THATCH;
+                    bool along = ha.f.hip && ha.dG < ha.dA;
+                    float side = along ? (ha.iw * 2 < ha.Lw - 1 ? -1.0 : 1.0)
+                                       : (ha.jw * 2 < ha.Dw - 1 ? -1.0 : ha.jw * 2 > ha.Dw - 1 ? 1.0 : 0.0);
+                    float slope = ha.dA < -1 ? 0.5 : roofProfile(ha).y;
+                    bool useX = ha.axisZ != along;
+                    rn = normalize(float3(useX ? side * slope : 0.0, 1.0, useX ? 0.0 : side * slope));
+                    ra = useX ? wq : wq.yx;
+                }
+            }
+        } else if (tent) {
+            int4 ij = partIJ(P, v.xz, sc);
+            // Posts show as timber under the roof they carry.
+            if (feat == FT_POST && (style == ST_AFRAME || wy < Ht - 0.5)) vm = M_TIMBER;
+            else {
+                if (feat == FT_POST) vm = style == ST_PALM ? M_THATCH : M_FELT;
+                roof = true;
+                bool axisZ = (P.flags & F_AXISZ) != 0;
+                float side = 0.0, slope = 0.0;
+                if (style == ST_AFRAME) { side = ij.y == 0 ? -1.0 : ij.y == ij.w - 1 ? 1.0 : 0.0; slope = 1.5; }
+                else if (style == ST_LEANTO) {
+                    float2 mid = float2(P.o) + float2(P.sz) * 0.5;
+                    side = (axisZ ? mid.x : mid.y) > 0.0 ? 1.0 : -1.0;
+                    slope = 0.6;
+                }
+                rn = normalize(float3(axisZ ? side * slope : 0.0, 1.0, axisZ ? 0.0 : side * slope));
+                ra = axisZ ? wq : wq.yx;
+            }
+        } else if (P.kind == P_ROUND) {
+            float2 dq = wq - float2(mapOrigin) - float2(sc + P.o) - 0.5;
+            float r = length(dq);
+            float2 rd = dq / max(r, 1e-3);
+            float2 pr = roundProfile(P, r);
+            if (feat == FT_POLE && wy >= Ht - 0.75) vm = M_TIMBER;
+            // The wall ring shades as a drum, the roof as a dome or cone.
+            bool wallFace = n.y == 0 && wy < floorY + float(P.y1) * 0.25;
+            rn = wallFace ? float3(rd.x, 0.0, rd.y) : normalize(float3(rd.x * pr.y, 1.0, rd.y * pr.y));
+            roof = !wallFace;
         }
-        if (P.kind == P_FIRE && float(v.y) < Ht - 1.0) vm = M_STONE;
+        if (P.kind == P_FIRE && (float(v.y) < Ht - 1.0 || mat == M_STONE)) vm = M_STONE;
+        float fy = wy - floorY;
         float3 a;
         if (vm == M_STONE) {
             // The hill's own rock, lichened with age.
@@ -2691,21 +2993,79 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
             a *= P.kind == P_HENGE || P.kind == P_BOX ? 1.0 : 0.85;
         } else if (vm == M_TIMBER) {
             a = float3(0.10, 0.075, 0.055) * (1.0 + 0.15 * sin(wy * 9.0 + perlin2(wq * 3.0, seed + 311u) * 3.0) * (1.0 - smoothstep(0.02, 0.06, fp)));
-        } else if (vm == M_ROOF) {
-            float k = hashf(pcg(sh + uint(P.y2)));
-            if (variant == 2) a = float3(0.13, 0.135, 0.15) * (0.9 + 0.2 * k);
-            else if (variant == 3) a = float3(0.27, 0.23, 0.14) * (0.9 + 0.15 * k);
-            else {
-                a = mix(float3(0.22, 0.17, 0.09), float3(0.15, 0.14, 0.10), k);
-                a = mix(a, float3(0.13, 0.13, 0.07), 0.5 * autumn);
+        } else if (vm == M_THATCH) {
+            if (style == ST_STILT || style == ST_PALM) a = mix(float3(0.27, 0.23, 0.14), float3(0.19, 0.18, 0.15), 0.5 * age + 0.4 * k);
+            else if (style == ST_CROFT) a = mix(float3(0.12, 0.15, 0.08), float3(0.14, 0.12, 0.08), saturate(0.4 * k + 0.25 * cold));
+            else a = mix(mix(float3(0.24, 0.18, 0.09), float3(0.16, 0.15, 0.11), 0.7 * k + 0.4 * age), float3(0.15, 0.12, 0.07), 0.4 * autumn);
+            // Bundles laid in courses up the slope, combed down it.
+            float course = hashf(hash2i(int2(int(floor((n.y != 0 ? ra.x : wy) * 2.0)), int(floor(ra.y * 0.8))), seed + 330u));
+            a *= 1.0 + fade * (0.14 * (course - 0.5) + 0.10 * perlin2(float2(ra.y * 4.0, wy * 0.7), seed + 312u));
+        } else if (vm == M_SHINGLE) {
+            a = (style == ST_CABIN ? float3(0.16, 0.145, 0.13) : float3(0.20, 0.12, 0.075)) * (0.9 + 0.2 * k);
+            float moss = saturate(perlin2(wq / 2.5, seed + 331u) + 0.5) * age;
+            a = mix(a, float3(0.09, 0.11, 0.05), 0.5 * mix(moss, 0.5 * age, 1.0 - fade));
+            // Rows of shingles, each row's joints offset half a shingle.
+            float rw = (n.y != 0 ? ra.x : wy) * 2.0;
+            float u = ra.y * 1.5 + 0.5 * float(int(floor(rw)) & 1);
+            float seam = max(smoothstep(0.40, 0.48, abs(fract(rw) - 0.5)), smoothstep(0.44, 0.49, abs(fract(u) - 0.5)));
+            a *= 1.0 - 0.3 * seam * (1.0 - smoothstep(0.03, 0.08, fp));
+        } else if (vm == M_LOG) {
+            float along = n.x != 0 ? wq.y : wq.x;
+            if (style == ST_STILT) {
+                // Bamboo: pale canes standing side by side.
+                a = float3(0.20, 0.16, 0.10) * (0.9 + 0.15 * k);
+                a *= 1.0 - 0.18 * fade * smoothstep(0.36, 0.48, abs(fract(along * 3.0) - 0.5));
+            } else {
+                // Log courses with dark chinking between them.
+                float lc = fract(wy * 2.0);
+                a = float3(0.21, 0.14, 0.085) * (0.9 + 0.2 * k);
+                a *= mix(1.0, 0.8 + 0.25 * sin(lc * 3.14159265) - 0.3 * smoothstep(0.38, 0.5, abs(lc - 0.5)), fade);
             }
-            // Straw and slate courses run down the slope.
-            float along = plane == 1u || plane == 2u ? wq.y : wq.x;
-            a *= 1.0 + 0.12 * perlin2(float2(along * 3.0, wy * 0.7), seed + 312u) * (1.0 - smoothstep(0.02, 0.07, fp));
-            if (float(v.y + 1) > snowline) a = float3(0.29, 0.30, 0.33);
         } else if (vm == M_PLASTER) {
-            float3 lime = float3(0.22, 0.205, 0.18), adobe = float3(0.44, 0.28, 0.16);
-            a = mix(lime, adobe, max(desert, painted)) * (0.95 + 0.08 * perlin2(wq / 3.0 + wy, seed + 313u));
+            a = float3(0.24, 0.22, 0.19) * (0.95 + 0.08 * perlin2(wq / 3.0 + wy, seed + 313u));
+            float3 beam = float3(0.08, 0.055, 0.04);
+            // A dark timber sill; timber-framed houses show their posts and rails over the infill.
+            float frame = smoothstep(0.25, 0.2, fy);
+            if (style == ST_TIMBER) {
+                float along = n.x != 0 ? wq.y : wq.x;
+                frame = max(frame, max(smoothstep(0.42, 0.36, abs(fract(along * 0.5) - 0.5)) , smoothstep(2.8, 2.85, fy)));
+                frame = max(frame, smoothstep(0.08, 0.03, abs(fy - 1.6)));
+            }
+            a = mix(a, beam, n.y == 0 ? mix(frame, 0.2, 1.0 - fade) : 0.0);
+        } else if (vm == M_ADOBE) {
+            a = mix(float3(0.44, 0.28, 0.16), float3(0.50, 0.36, 0.22), smoothstep(0.5, 2.5, fy));
+            if (style == ST_PUEBLO) a = mix(a, paintedTone(wy, paintedLateral(w, seed), seed, fpA), 0.35);
+            a *= (0.94 + 0.08 * perlin2(wq / 2.0 + wy * 0.5, seed + 313u)) * mix(0.82, 1.0, smoothstep(0.2, 0.5, fy));
+        } else if (vm == M_FELT) {
+            float3 band = 0;
+            bool banded = false;
+            if (P.kind == P_ROUND && style == ST_TIPI) {
+                a = float3(0.32, 0.25, 0.17) * (0.9 + 0.15 * k);
+                band = k < 0.5 ? float3(0.22, 0.06, 0.03) : float3(0.05, 0.07, 0.12);
+                banded = fy > 0.75 && fy < 1.25;
+            } else if (P.kind == P_ROUND) {
+                a = float3(0.28, 0.26, 0.22) * (0.92 + 0.1 * k);
+                band = k < 0.5 ? float3(0.24, 0.05, 0.04) : float3(0.06, 0.07, 0.18);
+                banded = n.y == 0 && fy > float(P.y1) * 0.25 - 0.5 && fy < float(P.y1) * 0.25;
+                if (feat == FT_CROWN && wy >= Ht - 0.5) a *= 0.5;
+            } else if (style == ST_CARAVAN) {
+                a = k < 0.5 ? float3(0.24, 0.06, 0.04) : float3(0.07, 0.08, 0.18);
+            } else {
+                a = k < 0.4 ? float3(0.30, 0.27, 0.21) : k < 0.75 ? float3(0.15, 0.18, 0.12) : float3(0.26, 0.17, 0.08);
+            }
+            if (banded) a = mix(a, band, fade * 0.85 + 0.15);
+            // A painted door in a yurt's wall.
+            if (P.kind == P_ROUND && style != ST_TIPI && n.y == 0) {
+                float2 dq = wq - float2(mapOrigin) - float2(sc + P.o) - 0.5;
+                float da = hashf(pcg(sh + pk)) * 6.2831853;
+                if (dot(normalize(dq), float2(cos(da), sin(da))) > 0.93 && fy < 1.6) a = float3(0.30, 0.12, 0.03);
+            }
+            // An A-frame's gable flap stands open.
+            if (style == ST_AFRAME && n.y == 0) {
+                int4 ij = partIJ(P, v.xz, sc);
+                bool gable = (P.flags & F_AXISZ) != 0 ? n.z != 0 : n.x != 0;
+                if (gable && ij.y == 1 && wy - base < 1.6) a = float3(0.03, 0.025, 0.02);
+            }
         } else if (vm == M_PLANK) {
             float seam = n.y > 0 ? 1.0 - smoothstep(0.0, 0.08, abs(fract(((P.flags & F_AXISZ) != 0 ? wq.y : wq.x) * 3.0) - 0.5) - 0.42) : 0.0;
             a = float3(0.12, 0.10, 0.08) * (1.0 - 0.3 * seam * (1.0 - smoothstep(0.02, 0.06, fp)));
@@ -2715,26 +3075,27 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         } else {
             a = float3(0.05, 0.04, 0.03);
         }
+        if (roof && (vm == M_THATCH || vm == M_SHINGLE || vm == M_FELT) && float(v.y + 1) > snowline) a = float3(0.29, 0.30, 0.33);
         if (P.kind == P_BOAT && n.y > 0) a *= 0.55;
         // Windows and doors on the wall faces of houses.
         float winM = 0.0;
-        if (house && n.y == 0 && !roof) {
+        if (house && n.y == 0 && !roof && !chim && float(v.y) >= floorY && feat == 0) {
             uint side = n.x < 0 ? 0u : n.x > 0 ? 1u : n.z < 0 ? 2u : 3u;
-            float fy = wy - float(P.y0);
+            int op = houseOpening(P, ha, side);
+            float wfy = fy - (op == 3 ? 3.0 : 0.0) - (ha.f.wall >= 3.0 ? 0.2 : 0.0);
             float e = clamp(fpA * 0.6, 0.03, 0.25);
-            uint2 op = houseOpenings(P, v.xz, site.head.xy - tr.origin);
-            if (((op.x >> side) & 1u) != 0u) {
+            if (op == 1 || op == 3) {
                 float mx = smoothstep(0.28 - e, 0.28 + e, uv.x) * smoothstep(0.72 + e, 0.72 - e, uv.x);
                 // The height band is not foreshortened when the wall is seen edge-on, so the glow keeps it and
                 // only the band across the wall fades to its mean.
                 float ey = clamp(fp * 0.6, 0.03, 0.25);
-                float my = smoothstep(0.55 - ey, 0.55 + ey, fy) * smoothstep(1.45 + ey, 1.45 - ey, fy);
+                float my = smoothstep(0.55 - ey, 0.55 + ey, wfy) * smoothstep(1.45 + ey, 1.45 - ey, wfy);
                 float m = mix(mx * my, 0.2, smoothstep(0.05, 0.3, fpA));
                 a = mix(a, float3(0.025, 0.025, 0.03), m);
                 winM = mix(mx, 0.44, smoothstep(0.05, 0.3, fpA)) * mix(my, 0.3, smoothstep(0.3, 1.0, fp));
             }
-            if (op.y == side + 1u) {
-                float m = smoothstep(0.25 - e, 0.25 + e, uv.x) * smoothstep(0.75 + e, 0.75 - e, uv.x) * smoothstep(1.6 + e, 1.6 - e, fy);
+            if (op == 2) {
+                float m = smoothstep(0.25 - e, 0.25 + e, uv.x) * smoothstep(0.75 + e, 0.75 - e, uv.x) * smoothstep(1.8 + e, 1.8 - e, wfy);
                 a = mix(a, float3(0.045, 0.035, 0.028), mix(m, 0.4, smoothstep(0.05, 0.3, fpA)));
             }
         }
@@ -2743,7 +3104,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         if (li >= 0) {
             float3 E = lampState[((sb >> S_SITE) & 511u) * uint(MAX_LAMPS) + uint(li)].rgb * LAMP_EMIT[int(site.lamps[li].w) % 16];
             bool topCourse = float(v.y) >= Ht - 1.0;
-            if (P.kind == P_FIRE && topCourse) {
+            if (P.kind == P_FIRE && topCourse && mat == M_FIRE) {
                 float flame = perlin3(float3(wq * 2.5, wy * 1.6 - time * 1.4), seed + 320u) * 0.5 + 0.5;
                 flame = mix(flame, 0.5, smoothstep(0.05, 0.3, fpA));
                 // Per-channel tonemapping bleaches a hot core to white; held this low, the core stays orange and
@@ -2764,10 +3125,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         s.slope = 0;
         s.riser = n.y == 0 ? Ht - nb : 0.0;
         s.level = (sb & S_FLAT) != 0u && n.y > 0 ? 1.0 : 0.0;
-        if (roof) {
-            s.nrm = plane == 1u ? float3(-0.7071, 0.7071, 0) : plane == 2u ? float3(0.7071, 0.7071, 0)
-                  : plane == 3u ? float3(0, 0.7071, -0.7071) : plane == 4u ? float3(0, 0.7071, 0.7071) : float3(0, 1, 0);
-        }
+        if (any(rn != 0.0)) s.nrm = rn;
     }
     return s;
 }
@@ -3307,7 +3665,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
             // Hills above a fire and valleys below it stay dark.
             float dy = (p.y - lp.y) / 5.0;
             float face = 0.3 + 0.7 * saturate(dot(nl, normalize(lp - p + float3(0, 0.3, 0))));
-            float glow = s.mat == M_CLOTH ? 0.2 : 0.0;
+            float glow = s.mat == M_CLOTH || s.mat == M_FELT ? 0.2 : 0.0;
             col += s.albedo * Lm * ((face * mix(1.0, ao, 0.5)) / (1.0 + dy * dy) + glow) * x.lights.w;
         }
     }
