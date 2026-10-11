@@ -360,7 +360,7 @@ final class FlightCamera {
 
         // Steer toward the lower side of a look-ahead point, so the flight follows valleys.
         var steer = 0.0, steerRidge = 0.0
-        // Ridges are run only where they are below the flight: a pillar or massif above it is not a ridge to turn onto.
+        // Ridge running reads side heights no higher than 20 under the flight, so land above it does not pull the heading in.
         let ridgeTop = position.y - 20
         for (dist, weight) in [(90.0, 0.5), (180.0, 0.35), (280.0, 0.15)] {
             let a = p + fwdFlat * dist
