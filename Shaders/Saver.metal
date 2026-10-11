@@ -2721,7 +2721,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, int shadows)
         sHit.hit = false; sHit.t = 1e9; sHit.iters = 0;
         // Past the 1-voxel map a pixel spans columns: the maps alone, with occluders from two texels out.
         // Under the moon, whose shadows are soft and faint, only near ground keeps the traced ray.
-        bool mapOnly = maps && (shadows == 2 || k >= 1 || (x.L.night > 0.5 && h.t > 250.0));
+        bool mapOnly = maps && (shadows == 2 || k >= 1 || h.t > (x.L.night > 0.5 ? 120.0 : 500.0));
         if (!mapOnly) sHit = trace(x.tr, so, x.L.key, brute ? 6000.0 : maps ? SHADOW_NEAR : 700.0, shadowIters, k);
         // A ray that runs out of steps is still threading terrain toward the sun: count it as blocked there, so a
         // shaded spot never comes out lit.
