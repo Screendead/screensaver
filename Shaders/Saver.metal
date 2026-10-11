@@ -1042,15 +1042,17 @@ static JCan jungleCanopy(float2 w, float gs, float J, uint seed, float keep = 1.
     o.lo = 0.0; o.hi = 0.0; o.trunk = false;
     if (J < 0.15) return o;
     float2 so = seedOffset(seed), p = w + so;
-    float rise0 = 14.0 + 5.0 * perlin2(p / 110.0, seed + 321u);
-    // Clearings: about one part in eight deep in the province, most of the land at its edge.
+    // Clearings: about one part in eight deep in the province, most of the land at its edge. Crowns stand only where
+    // the roof does: one of the forest's reaching over a clearing would stand there on its own.
     float thr = mix(0.45, -0.38, smoothstep(0.15, 0.8, J));
-    float lump = 1.2 * perlin2(p / 2.6, seed + 325u) + 1.0 * perlin2(p / 6.0, seed + 327u);
-    keep *= smoothstep(SEA + 2.0, SEA + 10.0, gs);
+    float openW = perlin2(p / 52.0, seed + 323u) - thr;
+    if (openW < 0.0) return o;
     // e: how far in from the margin (over roughly a dozen voxels), here rather than at each crown's centre, so the roof
     // and its crowns step down together as one slope of leaves.
-    float openW = perlin2(p / 52.0, seed + 323u) - thr;
+    keep *= smoothstep(SEA + 2.0, SEA + 10.0, gs);
     float e = smoothstep(0.0, 0.3, openW) * keep;
+    float rise0 = 14.0 + 5.0 * perlin2(p / 110.0, seed + 321u);
+    float lump = 1.2 * perlin2(p / 2.6, seed + 325u) + 1.0 * perlin2(p / 6.0, seed + 327u);
     float hi = -1e9, lo = 1e9;
     int2 c0 = int2(floor(w / JUNGLE_CELL));
     for (int j = -1; j <= 1; j++)
@@ -1062,8 +1064,6 @@ static JCan jungleCanopy(float2 w, float gs, float J, uint seed, float keep = 1.
             float2 dq = w - ctr;
             float d2 = dot(dq, dq);
             if (d2 >= R * R) continue;
-            float open = perlin2((ctr + so) / 52.0, seed + 323u) - thr;
-            if (open < 0.0) continue;
             float dome = sqrt(1.0 - d2 / (R * R));
             float lift = 5.0 * hashf(pcg(h + 2u)) - 1.0;
             float rise = mix(0.5, rise0 + lift, e * e);
@@ -1072,11 +1072,9 @@ static JCan jungleCanopy(float2 w, float gs, float J, uint seed, float keep = 1.
             lo = min(lo, bot < 3.0 ? -1e9 : gs + bot);
             if (bot >= 3.0 && d2 < 0.5 && hashf(pcg(h + 3u)) < 0.3) o.trunk = true;
         }
-    if (openW >= 0.0) {
-        float rise = mix(0.0, rise0 - 0.5, e * e);
-        hi = max(hi, gs + rise + 1.5 * perlin2(p / 5.0, seed + 324u));
-        lo = min(lo, rise < 7.5 ? -1e9 : gs + rise - 4.0);
-    }
+    float rise = mix(0.0, rise0 - 0.5, e * e);
+    hi = max(hi, gs + rise + 1.5 * perlin2(p / 5.0, seed + 324u));
+    lo = min(lo, rise < 7.5 ? -1e9 : gs + rise - 4.0);
     if (hi < max(lo, gs) + 1.0) return o;
     o.lo = max(floor(lo + 0.5), -1.0);
     o.hi = max(floor(hi + 0.5), o.lo + 1.0);
@@ -1118,6 +1116,7 @@ static void emergentIntervals(float2 w, float2 ctr, float gt, float y0, float R,
     float tr = R > 9.0 ? 1.2 : 0.75;
     if (d < tr + (lod > 0 ? 0.0 : 0.0)) gAdd(r, gt, gt + y0, GM_WOOD);
     float2 p = w + seedOffset(seed);
+    float lumps = 1.6 * perlin2(p / 3.2, seed + 332u) + 1.2 * perlin2(p / 7.0, seed + 333u);
     for (int j = 0; j < pads; j++) {
         float T;
         float4 P = emergentPad(h, j, R, y0, T);
@@ -1129,7 +1128,6 @@ static void emergentIntervals(float2 w, float2 ctr, float gt, float y0, float R,
         if (dd >= edge) continue;
         float u = dd / edge;
         // Domed and lumpy on top, a sagging, ragged underside: a cloud of leaves, not a plate.
-        float lumps = 1.6 * perlin2(p / 3.2, seed + 332u) + 1.2 * perlin2(p / 7.0, seed + 333u);
         float top = gt + P.y + T * 0.6 * sqrt(1.0 - u * u) + lumps * sqrt(1.0 - u * u);
         float bot = gt + P.y - T * 0.55 * pow(1.0 - u * u, 0.7) + 1.2 * perlin2(p / 4.5, seed + 334u);
         if (top > bot + 1.0) gAdd(r, floor(bot), floor(top) + 1.0, GM_LEAF);
@@ -2349,6 +2347,7 @@ static inline float coarseCombine(float a, float b, float c, float d, float s) {
 static float emergentTop(float2 w, float2 ctr, float gt, float y0, float R, int pads, uint h, uint seed) {
     float2 q = w - ctr, p = w + seedOffset(seed);
     float top = -1e9;
+    float lumps = 1.6 * perlin2(p / 3.2, seed + 332u) + 1.2 * perlin2(p / 7.0, seed + 333u);
     for (int j = 0; j < pads; j++) {
         float T;
         float4 P = emergentPad(h, j, R, y0, T);
@@ -2359,7 +2358,6 @@ static float emergentTop(float2 w, float2 ctr, float gt, float y0, float R, int 
         float edge = P.w * (1.0 + 0.30 * perlin2(u2 * 1.7 + float(j) * 4.1 + hashf(h) * 50.0, seed + 331u));
         if (dd >= edge) continue;
         float u = dd / edge;
-        float lumps = 1.6 * perlin2(p / 3.2, seed + 332u) + 1.2 * perlin2(p / 7.0, seed + 333u);
         top = max(top, floor(gt + P.y + T * 0.6 * sqrt(1.0 - u * u) + lumps * sqrt(1.0 - u * u)) + 1.0);
     }
     return top;
@@ -2483,8 +2481,8 @@ kernel void reduceMaxBase(texture2d<float, access::read> src [[texture(0)]],
     int2 cw = (int2(s) + info.xy) >> 1;
     // The level-1 column's forest (coarseVeg from the same raw heights) as well.
     parent = max(parent, coarseVeg(cw, 1, r4, parent, uint(info.w)).x);
-    Giant gi;
-    if (giantAt(giants, float2(cw * 2) + 1.0, 2.0, gi)) parent = max(parent, coarseColumn(cw, 1, uint(info.w), giants).x);
+    // A giant's level-1 column needs nothing more: its samples are these four columns, and its top their tops' mean
+    // (coarseColumn), which m bounds (working it out cost several ms a band).
     dst.write(float4(max(m, parent), 0, 0, 0), gid);
 }
 

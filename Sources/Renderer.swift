@@ -325,7 +325,7 @@ final class World {
                 while let j = job {
                     let k = j.next
                     let t = advance(pieces: 1, wait: true, timed: true)
-                    print(String(format: "regen piece %d (pass %d) gpu %.2f ms", k, k / (World.size / World.bandRows), t))
+                    print(String(format: "regen piece %d (pass %d) gpu %.2f ms", k, World.piece(k).pass, t))
                 }
                 return
             }
@@ -342,7 +342,18 @@ final class World {
     }
 
     private static let passes = 5
-    private static var pieceCount: Int { passes * (size / bandRows) + 1 }
+    // Bands per pass: planting (giants, the jungle) runs in half bands, the costliest columns of any pass.
+    private static let passBands = [size / bandRows, size / bandRows, size / bandRows, 2 * size / bandRows, size / bandRows]
+    private static var pieceCount: Int { passBands.reduce(0, +) + 1 }
+    // Piece k's pass, band and rows per band (the max mips' piece is pass `passes`).
+    static func piece(_ k: Int) -> (pass: Int, band: Int, rows: Int) {
+        var k = k
+        for (p, n) in passBands.enumerated() {
+            if k < n { return (p, k, size / n) }
+            k -= n
+        }
+        return (passes, 0, 0)
+    }
 
     // Encodes the next `pieces` pieces of the job: each pass (heights, cleanup, structures, trees, climate) a band of
     // rows at a time, finishing every band of a pass before the next pass reads its neighbours, then the max mips.
@@ -354,12 +365,12 @@ final class World {
         guard var j = job, let cb = genQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return 0 }
         let buf = buffers[j.index]
         var info = SIMD4<Int32>(j.origin.x, j.origin.y, Int32(World.size), Int32(bitPattern: seed))
-        let bands = World.size / World.bandRows, tg = MTLSize(width: 16, height: 16, depth: 1)
+        let tg = MTLSize(width: 16, height: 16, depth: 1)
         var n = pieces
         while n > 0 && j.next < World.pieceCount {
-            let pass = j.next / bands, band = j.next % bands
+            let (pass, band, rows) = World.piece(j.next)
             if pass < World.passes {
-                var row0 = UInt32(band * World.bandRows)
+                var row0 = UInt32(band * rows)
                 switch pass {
                 case 0:
                     enc.setComputePipelineState(genPipeline)
@@ -404,7 +415,7 @@ final class World {
                     enc.setBuffer(buf.sites, offset: 0, index: 0)
                     enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 1)
                     enc.setBytes(&row0, length: MemoryLayout<UInt32>.stride, index: 2)
-                    enc.dispatchThreads(MTLSize(width: World.size, height: World.bandRows, depth: 1), threadsPerThreadgroup: tg)
+                    enc.dispatchThreads(MTLSize(width: World.size, height: rows, depth: 1), threadsPerThreadgroup: tg)
                     j.next += 1
                     n -= 1
                     continue
@@ -418,7 +429,7 @@ final class World {
                 default:
                     // Mip 1 of the finished columns, a band of its rows per climate piece (it builds the level-1 forest
                     // it bounds, too costly for one piece). Scratch 0 still holds the raw columns that level 1 averages.
-                    var rows1 = UInt32(band * World.bandRows / 2)
+                    var rows1 = UInt32(band * rows / 2)
                     enc.setComputePipelineState(reduceBasePipeline)
                     enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
                     enc.setBuffer(buf.giants, offset: 0, index: 1)
@@ -426,13 +437,13 @@ final class World {
                     enc.setTexture(buf.levels[0], index: 0)
                     enc.setTexture(scratch[0], index: 1)
                     enc.setTexture(buf.levels[1], index: 2)
-                    enc.dispatchThreads(MTLSize(width: World.size >> 1, height: World.bandRows / 2, depth: 1), threadsPerThreadgroup: tg)
+                    enc.dispatchThreads(MTLSize(width: World.size >> 1, height: rows / 2, depth: 1), threadsPerThreadgroup: tg)
                     enc.setComputePipelineState(climatePipeline)
                     enc.setTexture(buf.climate, index: 0)
                 }
                 enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
                 enc.setBytes(&row0, length: MemoryLayout<UInt32>.stride, index: 1)
-                enc.dispatchThreads(MTLSize(width: World.size, height: World.bandRows, depth: 1), threadsPerThreadgroup: tg)
+                enc.dispatchThreads(MTLSize(width: World.size, height: rows, depth: 1), threadsPerThreadgroup: tg)
             } else {
                 enc.setComputePipelineState(cpuReducePipeline)
                 enc.setTexture(buf.gx, index: 2)
