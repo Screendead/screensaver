@@ -892,7 +892,7 @@ static void giantIntervals(thread const Giant& g, float2 wq, float gl, int lod, 
         // Aerial roots: dropped from the limb, leaning out as they fall, thickening where they root.
         for (int k = 0; k < 3; k++) {
             uint hp = pcg(g.h + uint(i) * 97u + uint(k) * 13u + 400u);
-            if (hashf(hp) > (g.kind == 1 ? 0.0 : g.kind == 2 ? 0.25 : 0.45) || lod >= 2) continue;
+            if (hashf(hp) > (g.kind == 1 ? 0.0 : g.kind == 2 ? 0.25 : 0.45) || lod >= 1) continue;
             float t = 0.35 + 0.2 * float(k) + 0.1 * hashf(pcg(hp));
             float3 top = bez(l, t);
             float2 out = normalize(top.xz + 1e-3) * (4.0 + 10.0 * hashf(pcg(hp + 2u)));
@@ -1085,11 +1085,11 @@ static inline float4 emergentPad(uint h, int j, float R, float y0, thread float&
 // and pad count.
 static inline bool emergentIn(int2 cc, uint seed, float J, thread float2& ctr, thread float& y0, thread float& R, thread int& pads, thread uint& h) {
     h = hash2i(cc, seed + 330u);
-    if (hashf(h) > 0.22 * smoothstep(0.6, 0.85, J)) return false;
+    if (hashf(h) > 0.13 * smoothstep(0.6, 0.85, J)) return false;
     ctr = floor((float2(cc) + 0.25 + 0.5 * float2(hashf(pcg(h + 1u)), hashf(pcg(h + 2u)))) * EMERGENT_CELL) + 0.5;
     // Only out of a closed roof: alone in a clearing it would be a crown on a pole.
     if (perlin2((ctr + seedOffset(seed)) / 52.0, seed + 323u) < mix(0.45, -0.38, smoothstep(0.15, 0.8, J)) + 0.25) return false;
-    y0 = 25.0 + 15.0 * hashf(pcg(h + 3u));
+    y0 = 23.0 + 11.0 * hashf(pcg(h + 3u));
     R = 8.0 + 6.0 * hashf(pcg(h + 4u));
     pads = 1 + int(hashf(pcg(h + 5u)) * 2.99);
     return true;
@@ -2520,7 +2520,12 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
             if (k > GAP_LEVELS || nS >= 2.0 || sLow.z < 1.0) return float3(max(top, H), 0, 0);
             float2 lowG = floor(sLow.xy / sLow.z + 0.5);
             lowG.x = max(lowG.x, H);
-            if (lowG.y - lowG.x < 2.0 || top - lowG.y < 1.0) return float3(max(top, H), 0, 0);
+            if (lowG.y - lowG.x < 2.0 || top - lowG.y < 1.0) {
+                // The lowest gaps disagree (a drooping skirt): the gap between tiers alone, if the samples share one.
+                float2 upA = sUp.z >= 2.0 ? floor(sUp.xy / sUp.z + 0.5) : float2(0);
+                if (upA.y - upA.x >= 2.0 && top - upA.y >= 1.0 && upA.x > H) return float3(top, upA);
+                return float3(max(top, H), 0, 0);
+            }
             float2 upG = sUp.z >= max(1.0, 0.5 * sLow.z) ? floor(sUp.xy / sUp.z + 0.5) : float2(0);
             if (k <= GAP2_LEVELS && upG.y - upG.x >= 2.0 && upG.x >= lowG.y + 2.0 && top - upG.y >= 1.0) { g2 = lowG; return float3(top, upG); }
             return float3(top, lowG);
@@ -2725,6 +2730,20 @@ static inline float parentH(thread const Terrain& tr, int k, int2 c) {
 }
 
 // Gap (lo, hi) of the next level's column over level-k cell c.
+// The next level's second gap over level-k cell c (a giant crown's air under it; zero elsewhere).
+static inline float2 parentGap2(thread const Terrain& tr, int k, int2 c) {
+    if (k + 1 > GAP2_LEVELS) return float2(0);
+    int2 w = c + (k == 0 ? tr.origin : tr.origin >> k);
+    return tr.cg.read(uint2((w >> 1) & (COARSE_N - 1)), uint(k)).ba;
+}
+
+// A lower gap across the morph band: toward the parent's second gap where it has one (opening from its floor where
+// this column has none), else closing from the top. A crown's air would otherwise fill in across the band.
+static inline float2 morphGap2(float2 g, float2 p2, float w) {
+    if (p2.y > p2.x) return mix(g.y > g.x ? g : p2.xx, p2, w);
+    return float2(g.x, mix(g.y, g.x, w));
+}
+
 static inline float2 parentGap(thread const Terrain& tr, int k, int2 c) {
     if (k + 1 > GAP_LEVELS) return float2(0);
     int2 w = c + (k == 0 ? tr.origin : tr.origin >> k);
@@ -2745,7 +2764,7 @@ static inline float morphAt(thread const Terrain& tr, int k, float2 p) {
 // w: the morph weight (columnMorphW).
 static inline float3 columnMorphWE(thread const Terrain& tr, int k, int2 c, float w, thread float2& e2) {
     float3 col = columnLE(tr, k, c, e2).rgb;
-    e2.y = mix(e2.y, e2.x, w);
+    if (w > 0.0) e2 = morphGap2(e2, parentGap2(tr, k, c), w);
     if (w > 0.0) {
         col.x = mix(col.x, parentH(tr, k, c), w);
         float2 pg = parentGap(tr, k, c);
@@ -2770,7 +2789,7 @@ static inline float3 columnMorph(thread const Terrain& tr, int k, int2 c) {
 static inline float4 extraGapsMorph(thread const Terrain& tr, int2 c) {
     float4 e = extraGaps(tr.gx.read(uint2(clamp(c, int2(0), int2(tr.size - 1)))));
     float w = morphAt(tr, 0, float2(c) + 0.5);
-    if (w > 0.0) e.yw = mix(e.yw, e.xz, w);
+    if (w > 0.0) { e.xy = morphGap2(e.xy, parentGap2(tr, 0, c), w); e.w = mix(e.w, e.z, w); }
     return e;
 }
 
@@ -2857,7 +2876,9 @@ static Hit trace(thread const Terrain& tr, float3 o, float3 d, float tMax, int m
             // On the 1-voxel map a negative max flags a cell with an open band under a giant's crown (bandFlag).
             float mx = k == 0 ? tr.hx.read(uint2(clamp(mc, int2(0), int2((tr.size >> level) - 1))), level).r : maxAt(tr, k, mc, level);
             bool clear = min(yA, yB) >= abs(mx);
-            if (!clear && mx < 0.0 && BAND_SKIP) {
+            // The bands are the columns' unmorphed gaps, which close across the morph band: only a cell wholly inside
+            // its start may skip through one.
+            if (!clear && mx < 0.0 && BAND_SKIP && length(0.5 * (cLo + cHi) - tr.cam) + 0.71 * (cHi.x - cLo.x) < tr.lod[0].x) {
                 float2 bd = tr.hb.read(uint2(clamp(mc, int2(0), int2((tr.size >> level) - 1))), level - 1).rg;
                 clear = min(yA, yB) >= bd.x && max(yA, yB) < bd.y;
             }
@@ -2884,7 +2905,7 @@ static Hit trace(thread const Terrain& tr, float3 o, float3 d, float tMax, int m
         if (yA >= e2.x && yA < e2.y) { inGap = true; gl = e2.x; gh = e2.y; }
         if (!inGap && k == 0 && gh > gl && yA < gl) {
             float4 e = extraGaps(tr.gx.read(uint2(lc)));
-            e.yw = mix(e.yw, e.xz, wm);
+            if (wm > 0.0) { e.xy = morphGap2(e.xy, parentGap2(tr, 0, lc), wm); e.w = mix(e.w, e.z, wm); }
             bool g1 = yA >= e.x && yA < e.y, g2 = yA >= e.z && yA < e.w;
             inGap = g1 || g2;
             gl = g1 ? e.x : e.z;
@@ -3355,6 +3376,14 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         float4 a2 = columnL(tr, 0, v.xz + int2(0, -1)), a3 = columnL(tr, 0, v.xz + int2(0, 1));
         hx0 = a0.a > 0.0 ? a0.g : a0.r; hx1 = a1.a > 0.0 ? a1.g : a1.r;
         hz0 = a2.a > 0.0 ? a2.g : a2.r; hz1 = a3.a > 0.0 ? a3.g : a3.r;
+        // Beside a multi-run column (a giant's, an emergent's) the ground does not see its top as a wall: it would
+        // light and paint a ring round every crown's footprint as a cliff foot.
+        if (!giant) {
+            if (a0.a == GIANT_A) hx0 = H;
+            if (a1.a == GIANT_A) hx1 = H;
+            if (a2.a == GIANT_A) hz0 = H;
+            if (a3.a == GIANT_A) hz1 = H;
+        }
         // Rock gaps only: canopies and buildings hold theirs with a non-zero alpha.
         s.gapSpan = float2(1e9, -1e9);
         float4 cs5[5] = { col4, a0, a1, a2, a3 };
@@ -3598,7 +3627,8 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         } else {
             float2 q = float2(v.xz * int(cs) + mapOrigin) + 0.5 * cs - gi.c;
             bool above = col.z > col.y && y >= col.z;
-            gm = above || (y - gi.G > gi.yT * 0.55 && length(q) > 24.0) ? GM_LEAF : GM_WOOD;
+            // Bark only on the trunk; elsewhere a solid coarse column is the crown's skirt of leaves and vines.
+            gm = above || length(q) > 40.0 || (y - gi.G > gi.yT * 0.55 && length(q) > 24.0) ? GM_LEAF : GM_WOOD;
             runLo = above ? col.z : gLoc;
         }
         float3 a;
