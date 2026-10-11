@@ -430,7 +430,7 @@ final class World {
                         enc.dispatchThreads(MTLSize(width: World.giantWin, height: World.giantWin / 2, depth: 1),
                                             threadsPerThreadgroup: MTLSize(width: 8, height: 4, depth: 1))
                     } else {
-                        var ii = SIMD4<Int32>(Int32(floor(mid.x)), Int32(floor(mid.y)), Islands.field ? 1 : 0, Int32(bitPattern: seed))
+                        var ii = SIMD4<Int32>(Int32(floor(mid.x)), Int32(floor(mid.y)), Islands.field, Int32(bitPattern: seed))
                         enc.setComputePipelineState(islePipeline)
                         enc.setBuffer(buf.isles, offset: 0, index: 0)
                         enc.setBytes(&ii, length: MemoryLayout<SIMD4<Int32>>.stride, index: 1)
@@ -1459,7 +1459,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             let isles = world.islesNear(cam2, radius: edgeRadius)
             let bands = isles || world.bandsNear(cam2, radius: Clipmap.handoff(0) + 40)
             f.shadow.w = isles ? 1 : 0
-            var isleTable = Islands.table(world.isles, near: cam2, within: 6000)
+            var isleTable = Islands.table(world.isles, near: cam2, within: 3000)
             let tb = camera.basis, tanV = tan(25.0 * .pi / 180) * 1.05
             towers.frameTable(eye: camera.position, fwd: tb.fwd, right: tb.right, up: tb.up, tanH: tanV * Double(aspect), tanV: tanV)
             enc.setRenderPipelineState(scenePipelines[towers.tableCount > 0 ? 1 : 0][bands && Renderer.profile != "noband" ? 1 : 0])
@@ -1894,7 +1894,7 @@ enum Snapshot {
             var towersMet = Set<SIMD2<Int>>()
             // Islands: the closest the flight came to one's rock (from the CPU cells within 24), the seconds it was nearer
             // than 25, the seconds it spent beneath one, and the islands it passed under.
-            var isleClear = Double.infinity, isleScrape = 0, isleUnder = 0
+            var isleClear = Double.infinity, isleScrape = 0, isleUnder = 0, birdsInRock = 0, birdChecks = 0
             var islesUnder = Set<SIMD2<Int>>()
             for i in 1...Int(mins * 60) {
                 for _ in 0..<4 { r.simulate(0.25) }
@@ -1911,6 +1911,13 @@ enum Snapshot {
                     near = min(near, (dx * dx + dz * dz + v * v).squareRoot())
                 }
                 isleClear = min(isleClear, near)
+                // Birds inside an island's rock (its cell's span), which Sight cannot see as hidden.
+                for f in r.wildlife.flocks {
+                    for b in f.birds {
+                        birdChecks += 1
+                        if let c = r.world.column(x: b.pos.x, z: b.pos.z), let u = c.under, b.pos.y >= u, b.pos.y < c.top { birdsInRock += 1 }
+                    }
+                }
                 if near < 25 { isleScrape += 1; print(String(format: "flight island scrape t=%d pos=(%.0f,%.0f) y=%.0f clearance %.0f", i, p.x, p.z, p.y, near)) }
                 if let u = col?.under, p.y < u {
                     isleUnder += 1
@@ -1964,8 +1971,8 @@ enum Snapshot {
                 }
             }
             print(String(format: "flight towers: closest plinth edge %.0f, seconds with a tower ahead within 9k %d, tower-seconds within 1.5k %d", towerEdge, towerSeen, towerClose))
-            print(String(format: "flight islands: closest %.0f, seconds nearer than 25 %d, seconds beneath one %d, islands passed under %d, on the table %d",
-                         isleClear, isleScrape, isleUnder, islesUnder.count, r.world.isles.count))
+            print(String(format: "flight islands: closest %.0f, seconds nearer than 25 %d, seconds beneath one %d, islands passed under %d, on the table %d, bird-seconds in island cells %d of %d",
+                         isleClear, isleScrape, isleUnder, islesUnder.count, r.world.isles.count, birdsInRock, birdChecks))
             print(String(format: "flight done: max climb %.2f/s, min clearance %.1f, max y %.0f (ceiling %.0f), low seconds %d, walled seconds %d (longest %d), seconds climbing over 6/s %d, seconds under a crown %d, giants passed within 1500 %d", maxClimb, minClear, maxY, FlightCamera.ceiling, lows, walled, maxWalledRun, fastClimb, underCrown, giantsSeen.count))
             if let log = r.popLog { print(log.summary(r.wildlife)) }
             return

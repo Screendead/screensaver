@@ -39,8 +39,8 @@ enum Islands {
     // Must match ISLE_TABLE and IsleShade in Shaders/Saver.metal: the islands the shading reads, nearest the camera first.
     static let tableSize = 16
     static let tableBytes = 16 + tableSize * 32
-    // VR_ISLE_FIELD=1: the test field round (-3500, -2500) in place of island country.
-    static let field = ProcessInfo.processInfo.environment["VR_ISLE_FIELD"] == "1"
+    // VR_ISLE_FIELD=1: the test field round (-3500, -2500) in place of island country; 2: no islands (tests).
+    static let field = Int32(ProcessInfo.processInfo.environment["VR_ISLE_FIELD"] ?? "") ?? 0
 
     static func stretch(_ r: Double, _ h: UInt32) -> Double {
         (r > 40 && (r <= 210 || r >= 420) && Provinces.hashf(Provinces.pcg(h &+ 10)) < 0.33) ? 1.5 : 1.0

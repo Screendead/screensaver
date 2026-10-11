@@ -1556,7 +1556,7 @@ constant float2 ISLE_FIELD_C = float2(-3500.0, -2500.0);
 constant float ISLE_FIELD_R = 5200.0;
 
 // One thread per slot: the candidate of its cell in the window round the map's middle (info.xy, world), unless the slot
-// holds that cell already. info.z bit 0: the test field. A candidate stands where island country is deep enough at its
+// holds that cell already. info.z bit 0: the test field; bit 1: none (island country without its islands). A candidate stands where island country is deep enough at its
 // centre (a massif deeper still), clear of the mega relief's provinces, the tepuis, the towers and the giants, over
 // ground low across its whole reach. Big islands ride low and small ones high; a big keel clears the ground by 100, a
 // small one by 60.
@@ -1575,6 +1575,7 @@ kernel void placeIslands(device IsleRec* out [[buffer(0)]],
     if (all(out[slot].cell == cell)) return;
     IsleRec r;
     r.cell = cell; r.c = 0; r.R = 0; r.A = 0; r.D = 0; r.B = 0; r.K = 0; r.h = 0; r.pad = 0;
+    if ((info.z & 2) != 0) { out[slot] = r; return; }
     if ((info.z & 1) != 0) {
         if (massif) {
             float2 bc = ISLE_FIELD_C + float2(600.0, 900.0);
@@ -6123,6 +6124,7 @@ kernel void bakeShadowHeight(texture2d<float, access::write> out [[texture(0)]],
     float S = -1e4, Sa = -1e4, Ilo = 1e4, Ihi = -1e4;
     float d = 2.0 * cell;
     float step = cell;
+    float iA = 1e9, iB = -1e9;
     for (int i = 0; i < 96; i++) {
         float2 X = P + dir * d;
         float r = length(X - b.cam.xy);
@@ -6149,15 +6151,38 @@ kernel void bakeShadowHeight(texture2d<float, access::write> out [[texture(0)]],
         float hs = hm - max(d - 0.7 * w, cell) * tanE;
         Sa = max(Sa, hs);
         if (d >= b.key.w) S = max(S, hm - max(d - 0.7 * w, b.key.w) * tanE);
-        // From the near ray's reach on, as S: nearer, a cell's max over an island's rolling top would shade the top itself.
-        if (isl.y > isl.x && d >= b.key.w) {
-            Ilo = min(Ilo, isl.x - (d + 0.7 * w) * tanE);
-            Ihi = max(Ihi, isl.y - max(d - 0.7 * w, b.key.w) * tanE);
-        }
+        if (isl.y > isl.x) { iA = min(iA, d - w); iB = max(iB, d + w); }
         if ((d - w) * tanE > 2100.0) break;
         d += step;
         if (d > 5.0 * step) step *= 2.0;
         if (d > 7000.0) break;
+    }
+    // The islands' shade, marched again over their stretch of the ray in cells at most 16 voxels wide (the coarse
+    // steps' cells would cut its edge into blocks), from the near ray's reach on, as S: nearer, a cell's max over an
+    // island's rolling top would shade the top itself.
+    float st = max(cell, 16.0);
+    d = max(iA, b.key.w);
+    for (int i = 0; i < 160 && d <= iB; i++) {
+        float2 X = P + dir * d;
+        float r = length(X - b.cam.xy);
+        int k = 1;
+        while (k <= levels && r > 900.0 * float(1 << k)) k++;
+        if (k > levels) break;
+        int m = max(int(round(log2(st))) - k, 0);
+        int2 mc = int2(floor(X / float(1 << k))) >> m;
+        float hm = ch.read(uint2(mc & ((2048 >> m) - 1)), uint(k - 1), uint(m)).r;
+        float w = float(1 << (k + m));
+        float2 isl = float2(1e4, -1e4);
+        if (hm < 0.0) isl = float2(cb.read(uint2(mc & ((1024 >> (m - 1)) - 1)), uint(k - 1), uint(m - 1)).g, -hm);
+        else if (m == 0 && k <= GAP_LEVELS) {
+            float2 gp = cg.read(uint2(mc & 2047), uint(k - 1)).rg;
+            if (gp.x < 0.0) isl = float2(gp.y, hm);
+        }
+        if (isl.y > isl.x) {
+            Ilo = min(Ilo, isl.x - (d + 0.7 * w) * tanE);
+            Ihi = max(Ihi, isl.y - max(d - 0.7 * w, b.key.w) * tanE);
+        }
+        d += st;
     }
     out.write(float4(S, Sa, Ilo, Ihi), uint2(t));
 }
@@ -6631,7 +6656,7 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
 // shadows: 0 none, 1 traced near ray and maps, 2 maps only (reflections: ripples hide contact shadows).
 // L: the light (the bed under water takes it refracted); inWater: seen in rippled water.
 // The share of the sky the islands overhead hide from a point at map-local p: each a disc of its radius at its
-// underside's mean height (the view factor of a disc to a level patch), out to 4-6k from the camera.
+// underside's mean height (the view factor of a disc to a level patch), out to 2-3k from the camera.
 static float isleSkyOcc(thread const Ctx& x, float3 p) {
     int n = min(x.isles->n.x, ISLE_TABLE);
     float2 w = p.xz + float2(x.origin), cam = x.tr.cam + float2(x.origin);
@@ -6645,7 +6670,7 @@ static float isleSkyOcc(thread const Ctx& x, float3 p) {
         float R2 = s.b.x * s.b.x, h2 = hh * hh;
         float q = h2 + r2 + R2;
         float F = 0.5 * (1.0 - (h2 + r2 - R2) / sqrt(max(q * q - 4.0 * r2 * R2, 1e-3)));
-        occ += F * (1.0 - smoothstep(4000.0, 6000.0, length(s.a.xy - cam)));
+        occ += F * (1.0 - smoothstep(2000.0, 3000.0, length(s.a.xy - cam)));
     }
     return saturate(occ);
 }

@@ -81,12 +81,18 @@ final class FlightCamera {
         return (f, r, u)
     }
 
-    // The flight passes beneath an island it is well under (by isleMargin, with room under the keel), and steers by the
-    // ground there; any other island is terrain to its top. Kept under isleCap below the underside, so the margin holds.
-    private static let isleMargin = 30.0, isleCap = 45.0
+    // The flight passes beneath an island it is under by isleMargin, or can sink to that by the time it gets there (at
+    // most isleSink a second), with room under the keel; it steers by the ground there. Any other island is terrain to
+    // its top. Kept under isleCap below the underside, so the margin holds.
+    private static let isleMargin = 30.0, isleCap = 45.0, isleSink = 3.0
+    private var speed = 10.0
+    private func beneath(_ x: Double, _ z: Double, under u: Double) -> Bool {
+        let d = simd_length(SIMD2(x - position.x, z - position.z))
+        return position.y < u - FlightCamera.isleMargin + FlightCamera.isleSink * d / speed
+    }
     private func h(_ x: Double, _ z: Double) -> Double {
         if let c = world.column(x: x, z: z) {
-            if let u = c.under, u - c.ground >= 90, position.y < u - FlightCamera.isleMargin { return c.ground }
+            if let u = c.under, u - c.ground >= 90, beneath(x, z, under: u) { return c.ground }
             return c.top
         }
         return isleFloor(x, z) ?? far.height(x: x, z: z) ?? 20
@@ -94,14 +100,14 @@ final class FlightCamera {
     // Beyond the loaded map: inside the reach of an island the flight could pass beneath, the ground under it.
     private func isleFloor(_ x: Double, _ z: Double) -> Double? {
         let q = SIMD2(x, z)
-        for s in islesAt() where s.passable && position.y < s.keel - FlightCamera.isleMargin && simd_length_squared(q - s.pos) < s.reach * s.reach {
+        for s in islesAt() where s.passable && simd_length_squared(q - s.pos) < s.reach * s.reach && beneath(x, z, under: s.keel) {
             return s.base
         }
         return nil
     }
     // The highest the flight may climb near (x, z) while it passes under an island there.
     private func isleCeiling(_ x: Double, _ z: Double) -> Double {
-        guard let c = world.column(x: x, z: z), let u = c.under, u - c.ground >= 90, position.y < u - FlightCamera.isleMargin else { return .infinity }
+        guard let c = world.column(x: x, z: z), let u = c.under, u - c.ground >= 90, beneath(x, z, under: u) else { return .infinity }
         return u - FlightCamera.isleCap
     }
 
@@ -538,6 +544,7 @@ final class FlightCamera {
         // Constant angular ground flow: faster when high, slower when skimming.
         let agl = position.y - h(position.x, position.z)
         let v = min(15, max(5.5, 3.5 + agl * 0.17))
+        speed = v
         position.x += sin(yaw) * v * dt
         position.z += cos(yaw) * v * dt
 
@@ -612,7 +619,7 @@ final class FlightCamera {
         target = max(target, min(regional, FlightCamera.ceiling))
         // Under an island: below its underside all the way through, the keel's deepest ahead included.
         var under = Double.infinity
-        for dist in [0.0, 30.0, 60.0, 100.0, 140.0, 180.0] {
+        for dist in [0.0, 30.0, 60.0, 100.0, 140.0, 180.0, 260.0, 360.0] {
             for side in [-16.0, 0.0, 16.0] {
                 let q = p + fwdFlat * dist + left * side
                 under = min(under, isleCeiling(q.x, q.y))
