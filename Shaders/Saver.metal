@@ -6203,6 +6203,13 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // its sand tread.
     float kn = 4.5 * L.night;
     alb *= (1.0 + 0.1 * kn) / (1.0 + kn * dot(alb, float3(0.3, 0.59, 0.11)));
+    // Low light: leaves this dark under a warm key and a violet dome go to brown mud. Light passed and scattered through
+    // a crown takes the leaf's own hue, so the lift saturates as it brightens (autumn crowns are bright already).
+    float dusk = s.mat == 1 ? L.gold * (1.0 - L.night) * mix(0.5, 1.0, L.sunAmt) : 0.0;
+    if (dusk > 0.0) {
+        float la = max(dot(alb, float3(0.3, 0.59, 0.11)), 1e-4);
+        alb *= mix(float3(1.0), clamp(1.5 * sqrt(alb / la), 0.7, 2.0), dusk * (1.0 - 0.6 * s.autumn));
+    }
     float ndl = mix(max(dot(nl, L.key), 0.0), max(L.key.y, 0.0), lone);
     // A low moon lights a step's riser several times brighter than its tread, drawing a highlight line along
     // every step; under the moon only cliffs outshine the ground they stand in.
@@ -6292,6 +6299,15 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         float back = pow(saturate(dot(d, L.key)), 4.0) * (1.0 - smoothstep(0.08, 0.45, L.key.y)) * (1.0 - L.night);
         float graze = 1.0 - abs(dot(n, d));
         col += alb * mix(float3(0.9, 1.3, 0.3), float3(1.3, 0.9, 0.4), s.autumn) * L.keyCol * back * (1.0 - ndl) * (1.0 - abs(n.y)) * graze * graze * sh;
+    }
+    // Waxy crown tops mirror the low sky: amber toward the sun, lavender away from it. Tops only: on side faces the
+    // grazing sheen would rule a pale line along every step.
+    if (dusk > 0.0) {
+        float3 rv = reflect(d, nl);
+        float tw = 0.5 + 0.5 * dot(normalize(rv.xz + 1e-5), normalize(L.sun.xz + 1e-5));
+        float3 env = mix(L.skyHor * mix(float3(0.72, 0.66, 1.0), float3(1.0, 0.8, 0.55), tw * tw), L.skyZen, saturate(rv.y * 3.0));
+        float fr = min(0.02 + 0.3 * pow(1.0 - saturate(-dot(d, nl)), 5.0), 0.08);
+        col += env * fr * saturate(nl.y) * sv * (0.6 + 0.4 * sh) * dusk;
     }
     // Lamplight is added in absolute terms, outside the moonlight grade, so firelit ground stays warm in a blue night.
     if (x.lights.w > 0.0) {
