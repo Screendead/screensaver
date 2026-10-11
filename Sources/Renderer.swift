@@ -156,6 +156,8 @@ final class World {
         var origin = SIMD2<Int32>(Int32.min, Int32.min)
         var globalMax: Float = 255
         var siteList: [SiteInfo] = []
+        // siteList's lamps by Lamp.index.
+        var lamps: [Int: SiteInfo.Lamp] = [:]
         var giantList: [GiantInfo] = []
         // Whether the jungle's roof (Shaders/Saver.metal jungleCanopy) may stand on this map.
         var jungle = false
@@ -255,6 +257,7 @@ final class World {
     var bandTex: MTLTexture { shown.band }
     var giantBuffer: MTLBuffer { shown.giants }
     var sites: [SiteInfo] { shown.siteList }
+    var lamps: [Int: SiteInfo.Lamp] { shown.lamps }
     var giants: [GiantInfo] { shown.giantList }
     // Whether a flagged cell of the active map's band mips (under a giant's crown or the jungle's roof) may lie within r
     // of world xz p.
@@ -518,6 +521,7 @@ final class World {
             buf.origin = o
             buf.globalMax = top + 1
             buf.siteList = World.readSites(buf.sites)
+            buf.lamps = Dictionary(uniqueKeysWithValues: buf.siteList.flatMap { $0.lamps.map { ($0.index, $0) } })
             buf.giantList = World.readGiants(buf.giants)
             buf.jungleGrid = stride(from: 0, through: World.size, by: 64).flatMap { z in
                 stride(from: 0, through: World.size, by: 64).map { x in
@@ -1448,8 +1452,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
             for ty in y0...y1 { for tx in x0...x1 { tileMasks[ty * n + tx] |= bit } }
         }
-        var lamps: [Int: SiteInfo.Lamp] = [:]
-        for site in world.sites { for l in site.lamps { lamps[l.index] = l } }
+        let lamps = world.lamps
         for i in 0..<Int(f.refs.x) {
             guard let l = lamps[Int(hazeRefs[i])] else { continue }
             mark(l.pos, 3 * Renderer.lampReach[min(l.kind, 7)] + 0.5, 1 << UInt32(i))
