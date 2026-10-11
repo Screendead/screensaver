@@ -43,6 +43,8 @@ final class FlightCamera {
     private var hug: Double = 0
     // Structure sites on the loaded map.
     var sitesAt: () -> [SiteInfo] = { [] }
+    // Giant trees on the loaded map: the flight passes beside them, never under a crown or up over one.
+    var giantsAt: () -> [GiantInfo] = { [] }
     // Index of the current night, as the lamps read it (beacons and rites burn only on some nights).
     var nightIndex = 0
     // Sites a shot was built around, and when; each rests for a while so one place can't own the flight.
@@ -229,6 +231,27 @@ final class FlightCamera {
         let light = lightW * max(0, cos(heading - lightYaw)) * 0.8
         let turn = -0.25 * abs(FlightCamera.angleDiff(heading, yaw))
         return relief + water + light + turn + wall + fill + open + siteInterest(heading, night: night).0 + { let v = vista(heading); return v.0 * (1 - night) - v.1 }()
+            + giantInterest(heading)
+    }
+
+    // A giant tree is a landmark: a heading that frames one 0.4-3 km ahead scores, and one far off draws the flight
+    // slowly toward its country. Passing within a crown's reach is the steering's business (step).
+    private func giantInterest(_ heading: Double) -> Double {
+        let p = SIMD2(position.x, position.z)
+        var best = 0.0
+        for g in giantsAt() {
+            let v = g.pos - p, d = simd_length(v)
+            guard d > 300, d < 9000 else { continue }
+            let off = abs(FlightCamera.angleDiff(atan2(v.x, v.y), heading))
+            if d < 3500 {
+                // Framed to one side, so the flight passes it a few hundred voxels off.
+                let aim = atan2(GiantInfo.reach + 260, d)
+                best = max(best, 0.7 * max(0, 1 - abs(off - aim) / 0.3) * min(1, (3500 - d) / 1000))
+            } else {
+                best = max(best, 0.25 * max(0, 1 - off / 0.7))
+            }
+        }
+        return best
     }
 
     func placeAtStart() {
@@ -352,10 +375,21 @@ final class FlightCamera {
             let awayYaw = atan2(push.x, push.y)
             steerAway = sin(FlightCamera.angleDiff(awayYaw, yaw)) * 0.2 * crowd
         }
+        // A giant whose crown the heading would pass under or climb over: turn for its nearer side early, while a
+        // gentle turn still clears it (at most 0.09 rad/s, a radius of ~170 at top speed).
+        var steerGiant = 0.0
+        for g in giantsAt() where g.top > position.y - 25 {
+            let v = g.pos - p
+            let along = simd_dot(v, fwdFlat), across = v.x * fwdFlat.y - v.y * fwdFlat.x
+            let clear = GiantInfo.reach + 70
+            guard along > -clear, along < 1000, abs(across) < clear else { continue }
+            let w = (1 - max(along, 0) / 1000) * (1 - abs(across) / clear)
+            steerGiant += (across >= 0 ? -1 : 1) * 0.09 * min(1, 2.5 * w)
+        }
         let urgency = max(min(blockedAhead / 20, 1), 0.7 * crowd)
         avoidRate = routeYaw.map { sin(FlightCamera.angleDiff($0, yaw)) * 0.15 * urgency } ?? 0
         // The birds' sightline predictions (Wildlife.hidden) rely on turns of at most 0.09 rad/s.
-        let targetRate = max(-0.09, min(0.09, (drift + steerShot + steerKey + steerMoon) * (1 - urgency) + avoidRate + steerAway))
+        let targetRate = max(-0.09, min(0.09, (drift + steerShot + steerKey + steerMoon) * (1 - urgency) + avoidRate + steerAway + steerGiant))
         // Critically damped spring on yaw rate: turns take tens of seconds.
         let k = 0.25
         yawAccel += (k * k * (targetRate - yawRate) - 2 * k * yawAccel) * dt

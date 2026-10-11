@@ -127,6 +127,8 @@ final class Wildlife {
     private(set) var spawnMs = 0.0
     private let noiseSeed: UInt32
     var heightAt: (Double, Double) -> Double? = { _, _ in nil }
+    // Giant trees on the loaded map (world coordinates).
+    var giantsAt: () -> [GiantInfo] = { [] }
 
     init(seed: UInt32) {
         state = UInt64(seed) &* 0x9E37_79B9_7F4A_7C15 ^ 0xD1B5_4A32_D192_ED03
@@ -627,6 +629,23 @@ final class Wildlife {
                 turn += wa > 0 ? 0.12 * (wl - wr) : 0.3 * (wr - wl)
             }
             f.heading += turn * dt
+        }
+        // Giant trees: flown round, not over: a flock below a crown's top turns away from its axis well before its reach,
+        // and one that holds to a spot is pushed off it.
+        for g in giantsAt() where f.anchor.y < g.top + 10 {
+            let d = SIMD2(f.anchor.x - g.pos.x, f.anchor.z - g.pos.y), l = simd_length(d)
+            let near = GiantInfo.reach + 160
+            guard l < near, l > 1 else { continue }
+            let away = d / l, fd = SIMD2(sin(f.heading), cos(f.heading))
+            let w = 1 - l / near
+            if simd_dot(fd, away) < 0.3 {
+                let side: Double = fd.x * away.y - fd.y * away.x > 0 ? -1 : 1
+                f.heading += side * 0.6 * w * dt
+            }
+            if f.kind == .starling || (f.kind == .bat && arrived) || l < GiantInfo.reach + 20 {
+                f.anchor.x += away.x * 12 * w * dt
+                f.anchor.z += away.y * 12 * w * dt
+            }
         }
         if (f.kind == .starling || (f.kind == .bat && arrived)) && !f.leaving {
             // These hold to one spot: the anchor circles slowly about where it arrived.

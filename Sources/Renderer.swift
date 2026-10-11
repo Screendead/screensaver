@@ -949,6 +949,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         camera.farHeightAt = { [unowned self] x, z in self.farHeight(x: x, z: z) }
         camera.sitesAt = { [unowned world] in world.sites }
         wildlife.heightAt = camera.heightAt
+        wildlife.giantsAt = { [unowned world] in world.giants }
+        camera.giantsAt = wildlife.giantsAt
         world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
         refreshFar(wait: true)
         camera.placeAtStart()
@@ -1565,6 +1567,7 @@ enum Snapshot {
             var maxClimb = 0.0, minClear = Double.infinity, maxY = 0.0, lows = 0
             var walled = 0, walledRun = 0, maxWalledRun = 0, fastClimb = 0, prevY = r.camera.position.y
             var lastY = r.camera.position.y
+            var underCrown = 0, giantsSeen = Set<Int>()
             for i in 1...Int(mins * 60) {
                 for _ in 0..<4 { r.simulate(0.25) }
                 let p = r.camera.position
@@ -1578,6 +1581,11 @@ enum Snapshot {
                 let wall = r.camera.wallInFrame()
                 if wall >= 0.4 { walled += 1; walledRun += 1; maxWalledRun = max(maxWalledRun, walledRun) } else { walledRun = 0 }
                 if p.y - (i == 1 ? p.y : prevY) > 6 { fastClimb += 1 }
+                for g in r.world.giants {
+                    let dg = simd_length(SIMD2(p.x, p.z) - g.pos)
+                    if dg < GiantInfo.reach && p.y < g.top { underCrown += 1 }
+                    if dg < 1500 { giantsSeen.insert(Int(g.pos.x) * 100_003 + Int(g.pos.y)) }
+                }
                 prevY = p.y
                 if i % 12 == 0 {
                     fflush(stdout)
@@ -1596,7 +1604,7 @@ enum Snapshot {
                     write(bytes: bytes, width: w, height: h, to: path.replacingOccurrences(of: ".png", with: "_m\(i / 60).png"))
                 }
             }
-            print(String(format: "flight done: max climb %.2f/s, min clearance %.1f, max y %.0f (ceiling %.0f), low seconds %d, walled seconds %d (longest %d), seconds climbing over 6/s %d", maxClimb, minClear, maxY, FlightCamera.ceiling, lows, walled, maxWalledRun, fastClimb))
+            print(String(format: "flight done: max climb %.2f/s, min clearance %.1f, max y %.0f (ceiling %.0f), low seconds %d, walled seconds %d (longest %d), seconds climbing over 6/s %d, seconds under a crown %d, giants passed within 1500 %d", maxClimb, minClear, maxY, FlightCamera.ceiling, lows, walled, maxWalledRun, fastClimb, underCrown, giantsSeen.count))
             return
         }
         var simulated = 0.0
