@@ -226,11 +226,14 @@ final class World {
     private let bandTopPipeline: MTLComputePipelineState
     private let bandReducePipeline: MTLComputePipelineState
     private let bandFlagPipeline: MTLComputePipelineState
-    private let scratch: MTLTexture
+    // The raw columns while a regeneration runs; allocated for each, as is the map it builds, so between regenerations only the
+    // map shown holds memory.
+    private var scratch: MTLTexture?
+    private let scratchDescriptor: MTLTextureDescriptor
     // Max mips 1 and 2 of the plain heights (r) and solid floors (g) for the CPU readback: the map's own mips from 1 up also bound the
     // level-1 columns, which the camera must not steer by.
     private let cpuMips: [MTLTexture]
-    private var buffers: [Buffer]
+    private var buffers: [Buffer?]
     private var active = 0
     // The active map's CPU copy, held here so the camera's many lookups read it directly.
     private var cpuOrigin = SIMD2<Int32>(Int32.min, Int32.min)
@@ -240,22 +243,23 @@ final class World {
     private var pending = false
     var synchronous = false
 
-    var heightTex: MTLTexture { buffers[active].tex }
-    var maxTex: MTLTexture { buffers[active].hmax }
-    var gapTex: MTLTexture { buffers[active].gx }
-    var climateTex: MTLTexture { buffers[active].climate }
-    var origin: SIMD2<Int32> { buffers[active].origin }
-    var globalMax: Float { buffers[active].globalMax }
-    var siteBuffer: MTLBuffer { buffers[active].sites }
-    var structTex: MTLTexture { buffers[active].structTex }
-    var bandTex: MTLTexture { buffers[active].band }
-    var giantBuffer: MTLBuffer { buffers[active].giants }
-    var sites: [SiteInfo] { buffers[active].siteList }
-    var giants: [GiantInfo] { buffers[active].giantList }
+    private var shown: Buffer { buffers[active]! }
+    var heightTex: MTLTexture { shown.tex }
+    var maxTex: MTLTexture { shown.hmax }
+    var gapTex: MTLTexture { shown.gx }
+    var climateTex: MTLTexture { shown.climate }
+    var origin: SIMD2<Int32> { shown.origin }
+    var globalMax: Float { shown.globalMax }
+    var siteBuffer: MTLBuffer { shown.sites }
+    var structTex: MTLTexture { shown.structTex }
+    var bandTex: MTLTexture { shown.band }
+    var giantBuffer: MTLBuffer { shown.giants }
+    var sites: [SiteInfo] { shown.siteList }
+    var giants: [GiantInfo] { shown.giantList }
     // Whether a flagged cell of the active map's band mips (under a giant's crown or the jungle's roof) may lie within r
     // of world xz p.
     func bandsNear(_ p: SIMD2<Double>, radius r: Double) -> Bool {
-        let b = buffers[active]
+        let b = shown
         if b.giantList.contains(where: { simd_length($0.pos - p) < r + GiantInfo.reach }) { return true }
         guard b.jungle else { return false }
         let n = World.size / 64 + 1
@@ -279,8 +283,7 @@ final class World {
               let clean = pipeline("cleanupColumns"),
               let plant = pipeline("plantTrees"), let clim = pipeline("bakeClimate"), let place = pipeline("placeSites"), let stamp = pipeline("stampStructures"),
               let bTop = pipeline("bandTop"), let bRed = pipeline("bandReduce"), let bFlag = pipeline("bandFlag"), let pg = pipeline("placeGiants"),
-              let s0 = device.makeTexture(descriptor: sd), let q = device.makeCommandQueue(),
-              let a = Buffer(device: device), let b = Buffer(device: device) else { return nil }
+              let q = device.makeCommandQueue(), let a = Buffer(device: device) else { return nil }
         var mips: [MTLTexture] = []
         for l in 1...World.cpuLevel {
             let md = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Float, width: World.size >> l, height: World.size >> l, mipmapped: false)
@@ -307,21 +310,22 @@ final class World {
         bandTopPipeline = bTop
         bandReducePipeline = bRed
         bandFlagPipeline = bFlag
-        scratch = s0
-        buffers = [a, b]
+        scratchDescriptor = sd
+        buffers = [a, nil]
     }
 
     // Recentres the map when the camera drifts. The swap happens only once the new map is complete;
     // a synchronous fallback covers startup and the case where the camera outruns generation.
     func ensureCentered(on center: SIMD2<Double>) {
         let half = Double(World.size / 2)
-        let cur = buffers[active]
+        let cur = shown
         let local = center - SIMD2(Double(cur.origin.x), Double(cur.origin.y))
         let drift = max(abs(local.x - half), abs(local.y - half))
         let o = SIMD2<Int32>(Int32(floor((center.x - half) / 64)) * 64, Int32(floor((center.y - half) / 64)) * 64)
         if cur.origin.x == Int32.min || drift > 340 || (synchronous && drift > World.recentre) {
             if job != nil { advance(pieces: Int.max, wait: true); return }
             if pending { return } // the in-flight job will land momentarily
+            guard begin(active) else { return }
             job = (active, o, 0, CACurrentMediaTime())
             // VR_PIECES: one command buffer per piece, each timed (the regeneration budget is per piece).
             if World.timePieces {
@@ -335,13 +339,20 @@ final class World {
             advance(pieces: Int.max, wait: true)
         } else if job != nil {
             advance(pieces: 1, wait: false)
-        } else if drift > World.recentre && !pending {
+        } else if drift > World.recentre && !pending, begin(1 - active), let next = buffers[1 - active] {
             pending = true
             // The new map's giant table starts from this one's, so placeGiants fills only the cells that changed.
-            memcpy(buffers[1 - active].giants.contents(), cur.giants.contents(), cur.giants.length)
+            memcpy(next.giants.contents(), cur.giants.contents(), cur.giants.length)
             job = (1 - active, o, 0, CACurrentMediaTime())
             advance(pieces: 1, wait: false)
         }
+    }
+
+    // Allocates what a regeneration into map i needs.
+    private func begin(_ i: Int) -> Bool {
+        if buffers[i] == nil { buffers[i] = Buffer(device: device) }
+        if scratch == nil { scratch = device.makeTexture(descriptor: scratchDescriptor) }
+        return buffers[i] != nil && scratch != nil
     }
 
     private static let passes = 5
@@ -365,8 +376,8 @@ final class World {
 
     @discardableResult
     private func advance(pieces: Int, wait: Bool, timed: Bool = false) -> Double {
-        guard var j = job, let cb = genQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return 0 }
-        let buf = buffers[j.index]
+        guard var j = job, let buf = buffers[j.index], let scratch, let cb = genQueue.makeCommandBuffer(),
+              let enc = cb.makeComputeCommandEncoder() else { return 0 }
         var info = SIMD4<Int32>(j.origin.x, j.origin.y, Int32(World.size), Int32(bitPattern: seed))
         let tg = MTLSize(width: 16, height: 16, depth: 1)
         var n = pieces
@@ -533,7 +544,10 @@ final class World {
                 }
                 print("sites at (\(o.x),\(o.y)): henge \(counts[1]) cairn \(counts[2]) ruins \(counts[3]) hamlet \(counts[4]) jetty \(counts[5]) camp \(counts[6]) total \(buf.siteList.count)")
             }
+            // Frames in flight hold the map they read until they complete.
+            if index != self.active { self.buffers[self.active] = nil }
             self.active = index
+            self.scratch = nil
             self.cpuOrigin = o
             self.cpuHeights = heights
             self.cpuFloors = floors
