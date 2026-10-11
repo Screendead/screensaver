@@ -44,7 +44,9 @@ enum SystemState {
 // MARK: - Settings
 
 struct Settings {
-    var idleThreshold: Double = 30
+    var idleThreshold: Double?
+    var menu = false
+    var noDither = false
     var preview = false
     var previewDuration: Double = 0
     var screenshotPath: String?
@@ -66,6 +68,8 @@ struct Settings {
         while i < args.count {
             switch args[i] {
             case "--idle": s.idleThreshold = Double(next()) ?? 30
+            case "--menu": s.menu = true
+            case "--nodither": s.noDither = true
             case "--preview": s.preview = true
             case "--duration": s.previewDuration = Double(next()) ?? 0
             case "--screenshot": s.screenshotPath = next()
@@ -123,7 +127,15 @@ final class SaverController {
 
     private static var now: TimeInterval { ProcessInfo.processInfo.systemUptime }
 
-    func show() {
+    // A manual start follows a click or key press that is still within the idle clock's reach, so input counts only once
+    // the grace has passed.
+    private var inputGrace: TimeInterval = 0
+
+    private func inputReceived() {
+        if SaverController.now - shownAt >= inputGrace { dismiss() }
+    }
+
+    func show(manual: Bool = false) {
         let screens = NSScreen.screens
         guard !isShowing, !screens.isEmpty else { return }
         dismissing = false
@@ -145,12 +157,12 @@ final class SaverController {
             window.alphaValue = 0
             window.isReleasedWhenClosed = false
             window.setFrame(screen.frame, display: false)
-            window.onInput = { [weak self] in self?.dismiss() }
+            window.onInput = { [weak self] in self?.inputReceived() }
 
             // A screen whose renderer can't start still gets covered, in black.
             if let gpu {
                 let view = MTKView(frame: CGRect(origin: .zero, size: screen.frame.size), device: gpu.device)
-                if let renderer = Renderer(view: view, gpu: gpu, screen: screen, seed: sessionSeed, screenIndex: index, battery: battery) {
+                if let renderer = Renderer(view: view, gpu: gpu, screen: screen, seed: sessionSeed, screenIndex: index, battery: battery, dither: !settings.noDither && Prefs.dither) {
                     renderer.timeScale = settings.timeScale
                     window.contentView = view
                     renderers.append((renderer, view))
@@ -174,6 +186,8 @@ final class SaverController {
         }
 
         shownAt = SaverController.now
+        inputGrace = manual ? 1.5 : 0
+        let grace = inputGrace
         var lastPowerCheck = shownAt
         watchTimer?.invalidate()
         watchTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
@@ -181,7 +195,7 @@ final class SaverController {
             let age = SaverController.now - self.shownAt
             // Any physical input after the moment we appeared, including during the fade-in.
             let idle = SystemState.idleSeconds()
-            if idle < age - 0.15 { dlog("input detected: idle \(idle), shown \(age)"); self.dismiss(); return }
+            if idle < age - grace - 0.15 { dlog("input detected: idle \(idle), shown \(age)"); self.dismiss(); return }
             if self.settings.previewDuration > 0 && age > self.settings.previewDuration { self.dismiss(); return }
             if SaverController.now - lastPowerCheck > 5 {
                 lastPowerCheck = SaverController.now
@@ -234,6 +248,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let settings: Settings
     lazy var saver = SaverController(settings: settings)
     var pollTimer: Timer?
+    private var menuController: MenuController?
     private var systemSaverRunning = false
 
     init(settings: Settings) { self.settings = settings }
@@ -242,6 +257,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let path = settings.screenshotPath {
             Snapshot.run(settings: settings, path: path)
             exit(0)
+        }
+        if settings.menu {
+            let menu = MenuController()
+            menu.start()
+            menuController = menu
+            return
         }
         if settings.preview {
             saver.onDismiss = { NSApp.terminate(nil) }
@@ -266,6 +287,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dnc.addObserver(forName: NSNotification.Name("com.apple.screensaver.didstop"), object: nil, queue: .main) { [weak self] _ in
             self?.systemSaverRunning = false
             self?.schedule(after: 0)
+        }
+        dnc.addObserver(forName: Prefs.changed, object: nil, queue: .main) { [weak self] _ in self?.schedule(after: 0) }
+        dnc.addObserver(forName: Prefs.startNow, object: nil, queue: .main) { [weak self] _ in
+            guard let self, !self.saver.isShowing, !SystemState.screenIsLockedOrInactive(), !SystemState.displaysAsleep() else { return }
+            self.saver.show(manual: true)
         }
         dnc.addObserver(forName: NSNotification.Name("com.apple.screenIsLocked"), object: nil, queue: .main) { [weak self] _ in
             self?.saver.dismiss(animated: false)
@@ -304,8 +330,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                      SystemState.displaysAsleep() ? 1 : 0, saver.isShowing ? 1 : 0, systemSaverRunning ? 1 : 0))
         if saver.isShowing { return }
         if systemSaverRunning { schedule(after: 10); return }
+        if !Prefs.autoStart { schedule(after: 30); return }
+        if let until = Prefs.pauseUntil { schedule(after: min(30, until.timeIntervalSinceNow + 0.5)); return }
+        let threshold = settings.idleThreshold ?? Prefs.idleDelay
         let idle = SystemState.idleSeconds()
-        if idle < settings.idleThreshold { schedule(after: max(0.25, settings.idleThreshold - idle)); return }
+        if idle < threshold { schedule(after: max(0.25, threshold - idle)); return }
         if SystemState.screenIsLockedOrInactive() || SystemState.displaysAsleep() { schedule(after: 10); return }
         if SystemState.somethingWantsDisplayAwake() { schedule(after: 1); return }
         saver.show()

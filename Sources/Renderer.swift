@@ -1021,7 +1021,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         0.52 + 0.12 * sin(simTime * 0.0021 + 1.0) + 0.06 * sin(simTime * 0.0057 + 4.0)
     }
 
-    init?(gpu: GPU, outputFormat: MTLPixelFormat, seed: UInt32, screenIndex: Int, battery: Bool) {
+    init?(gpu: GPU, outputFormat: MTLPixelFormat, seed: UInt32, screenIndex: Int, battery: Bool, dither: Bool = true) {
         let device = gpu.device, lib = gpu.library
         guard let queue = device.makeCommandQueue() else { return nil }
         func fullscreen(_ fragment: MTLFunction?, _ format: MTLPixelFormat) -> MTLRenderPipelineDescriptor {
@@ -1043,7 +1043,12 @@ final class Renderer: NSObject, MTKViewDelegate {
         let sceneStates = [false, true].map { t in [false, true].compactMap { b in sceneVariant(towers: t, bands: b) } }
         guard sceneStates.allSatisfy({ $0.count == 2 }),
               let tp = gpu.pipeline("taa", { fullscreen(lib.makeFunction(name: "taaFragment"), .rgba16Float) }),
-              let pp = gpu.pipeline("post \(outputFormat.rawValue)", { fullscreen(lib.makeFunction(name: "postFragment"), outputFormat) }),
+              let pp = gpu.pipeline("post \(outputFormat.rawValue) \(dither)", {
+                  let fc = MTLFunctionConstantValues()
+                  var d = dither
+                  fc.setConstantValue(&d, type: .bool, index: 2)
+                  return fullscreen(try? lib.makeFunction(name: "postFragment", constantValues: fc), outputFormat)
+              }),
               let cf = gpu.pipeline("cloudField"),
               let csf = gpu.pipeline("cloudSlowField"),
               let shP = gpu.pipeline("bakeShadowHeight"),
@@ -1147,7 +1152,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         battery && edgeRadius <= Clipmap.handoff(Clipmap.levels - 1) ? Clipmap.levels - 1 : Clipmap.levels
     }
 
-    convenience init?(view: MTKView, gpu: GPU, screen: NSScreen, seed: UInt32, screenIndex: Int, battery: Bool) {
+    convenience init?(view: MTKView, gpu: GPU, screen: NSScreen, seed: UInt32, screenIndex: Int, battery: Bool, dither: Bool = true) {
         let backingScale = screen.backingScaleFactor
         let edr = screen.maximumPotentialExtendedDynamicRangeColorComponentValue > 1
         if edr {
@@ -1159,7 +1164,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         view.framebufferOnly = true
         view.preferredFramesPerSecond = battery ? 30 : 60
-        self.init(gpu: gpu, outputFormat: view.colorPixelFormat, seed: seed, screenIndex: screenIndex, battery: battery)
+        self.init(gpu: gpu, outputFormat: view.colorPixelFormat, seed: seed, screenIndex: screenIndex, battery: battery, dither: dither)
         view.autoResizeDrawable = false
         screenPixels = CGSize(width: view.bounds.width * backingScale, height: view.bounds.height * backingScale)
         // postFragment gives every pixel of a cell the cell's colour, so presenting the cell grid and letting the layer
@@ -1735,7 +1740,7 @@ enum Snapshot {
     static func run(settings: Settings, path: String) {
         guard let device = MTLCreateSystemDefaultDevice(), let gpu = GPU(device: device),
               let r = Renderer(gpu: gpu, outputFormat: .rgba8Unorm, seed: settings.seed == 0 ? 1 : settings.seed,
-                               screenIndex: 0, battery: settings.forceBattery) else {
+                               screenIndex: 0, battery: settings.forceBattery, dither: !settings.noDither) else {
             FileHandle.standardError.write("renderer init failed\n".data(using: .utf8)!)
             return
         }
