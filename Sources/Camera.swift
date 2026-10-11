@@ -31,6 +31,14 @@ final class FlightCamera {
 
     // Height lookup in world coords; returns nil outside the loaded map.
     var heightAt: (Double, Double) -> Double? = { _, _ in nil }
+    // Coarse (32-voxel max) heights out to about 7.7k; nil beyond or before the first readback.
+    var farHeightAt: (Double, Double) -> Double? = { _, _ in nil }
+    // Flight stays this far under the cloud base (CLOUD_Y0 in Shaders/Saver.metal, 1065).
+    static let ceiling = 1065.0 - 80.0
+    private var avoidRate: Double = 0
+    private var nextRoute: Double = 0
+    private var routeYaw: Double?
+    private var blockedAhead: Double = 0
     // Structure sites on the loaded map.
     var sitesAt: () -> [SiteInfo] = { [] }
     // Index of the current night, as the lamps read it (beacons and rites burn only on some nights).
@@ -61,7 +69,61 @@ final class FlightCamera {
         return (f, r, u)
     }
 
-    private func h(_ x: Double, _ z: Double) -> Double { heightAt(x, z) ?? 20 }
+    private func h(_ x: Double, _ z: Double) -> Double { heightAt(x, z) ?? farHeightAt(x, z) ?? 20 }
+    // Far terrain: the 32-voxel max grid, else the fine map.
+    private func hFar(_ x: Double, _ z: Double) -> Double { farHeightAt(x, z) ?? heightAt(x, z) ?? 20 }
+
+    // How much terrain along a heading rises above what the flight could clear: the slope it may climb (capped at
+    // the ceiling), weighted toward near walls. Gorges and passes are the open headings.
+    private func blocked(_ heading: Double) -> Double {
+        let dir = SIMD2(sin(heading), cos(heading))
+        let side = SIMD2(dir.y, -dir.x)
+        var b = 0.0
+        for dist in [40.0, 60.0, 80.0, 105.0, 135.0, 170.0, 210.0, 260.0, 320.0, 400.0, 500.0, 650.0, 850.0, 1100.0, 1500.0] {
+            let q = SIMD2(position.x, position.z) + dir * dist
+            // The flight's width: a pillar between samples must still count.
+            let w = min(dist * 0.12, 30)
+            let l = q + side * w, r = q - side * w
+            let g = dist < 400 ? max(h(q.x, q.y), h(l.x, l.y), h(r.x, r.y)) : hFar(q.x, q.y)
+            let allow = min(FlightCamera.ceiling - 30, position.y + 0.18 * dist)
+            b += max(0, g - allow) / (1 + dist / 250)
+        }
+        return b
+    }
+
+    // Elevation angle of the highest terrain 1-8k along a heading: a range or a tepui standing in the upper middle
+    // of the frame is a vista; a wall close by is not.
+    // (reward, wall penalty)
+    private func vista(_ heading: Double) -> (Double, Double) {
+        let dir = SIMD2(sin(heading), cos(heading))
+        var best = -1.0, near = -1.0
+        for dist in [60.0, 120.0, 200.0] + Array(stride(from: 300.0, through: 7500.0, by: 300.0)) {
+            for off in [-0.2, 0.0, 0.2] {
+                let d2 = SIMD2(sin(heading + off), cos(heading + off))
+                let q = SIMD2(position.x, position.z) + (off == 0 ? dir : d2) * dist
+                guard let g = dist < 300 ? heightAt(q.x, q.y) : farHeightAt(q.x, q.y) else { continue }
+                let e = atan2(g - position.y, dist)
+                if dist >= 1000 { best = max(best, e) } else { near = max(near, e) }
+            }
+        }
+        let deg = best * 180 / .pi, nearDeg = near * 180 / .pi
+        let reward = deg < 2 ? max(0, deg / 2) : deg < 12 ? 1 : max(0, 1 - (deg - 12) / 8)
+        return (0.6 * reward, 1.2 * min(max((nearDeg - 15) / 10, 0), 1))
+    }
+
+    // Share of the frame's width (11 bearings across the horizontal field) where land within 220 rises above the eye:
+    // a wall filling the frame (tests).
+    func wallInFrame() -> Double {
+        var n = 0.0
+        for i in -5...5 {
+            let a = yaw + Double(i) * 0.12
+            for dist in stride(from: 25.0, through: 220.0, by: 15.0) where h(position.x + sin(a) * dist, position.z + cos(a) * dist) > position.y {
+                n += 1
+                break
+            }
+        }
+        return n / 11
+    }
 
     private func footprintMax(_ x: Double, _ z: Double, radius: Double) -> Double {
         var m = 0.0
@@ -164,10 +226,27 @@ final class FlightCamera {
         let water = wf < 0.1 ? 0 : (wf < 0.45 ? pool : pool - 2.0 * (wf - 0.45))
         let light = lightW * max(0, cos(heading - lightYaw)) * 0.8
         let turn = -0.25 * abs(FlightCamera.angleDiff(heading, yaw))
-        return relief + water + light + turn + wall + fill + open + siteInterest(heading, night: night).0
+        return relief + water + light + turn + wall + fill + open + siteInterest(heading, night: night).0 + { let v = vista(heading); return v.0 * (1 - night) - v.1 }()
     }
 
     func placeAtStart() {
+        // A start among or beside the massifs moves to the nearest open low ground, so the flight begins under the ceiling.
+        if (0..<12).contains(where: { (farHeightAt(position.x + sin(Double($0) * .pi / 6) * 500, position.z + cos(Double($0) * .pi / 6) * 500) ?? 0) > 260 })
+            || hFar(position.x, position.z) > 200 {
+            search: for r in stride(from: 200.0, through: 6000.0, by: 200.0) {
+                for k in 0..<24 {
+                    let a = Double(k) * .pi / 12
+                    let x = position.x + sin(a) * r, z = position.z + cos(a) * r
+                    guard let g = farHeightAt(x, z), g < 120 else { continue }
+                    // Clear of the massifs on every side, so the first seconds are not a climb up a wall.
+                    var clear = true
+                    for rr in [250.0, 500.0, 800.0] {
+                        for j in 0..<12 where (farHeightAt(x + sin(Double(j) * .pi / 6) * rr, z + cos(Double(j) * .pi / 6) * rr) ?? 0) > 260 { clear = false }
+                    }
+                    if clear { position.x = x; position.z = z; break search }
+                }
+            }
+        }
         position.y = max(position.y, footprintMax(position.x, position.z, radius: 24) + 30)
     }
 
@@ -235,7 +314,46 @@ final class FlightCamera {
         let steerShot = shotYaw.map { sin(FlightCamera.angleDiff($0, yaw)) * 0.05 } ?? 0
         let valley: Double = steer * 0.004 * steerSign * (1 - 0.6 * w) * 0.4
         let drift: Double = (valley + wander(time, 1) * 0.02) * (1 - nightW)
-        let targetRate = max(-0.09, min(0.09, drift + steerShot + steerKey + steerMoon))
+        // Routing: every second, compare headings by how much terrain they would have the flight climb; when the way
+        // ahead is blocked, turn toward the most open one (a gorge, a pass, the lowland) rather than climb the wall.
+        if time >= nextRoute {
+            nextRoute = time + 1
+            let here = blocked(yaw)
+            blockedAhead = here
+            if here > 2 {
+                var best = (yaw, here)
+                for off in [0.25, -0.25, 0.5, -0.5, 0.8, -0.8, 1.2, -1.2, 1.7, -1.7] {
+                    let b = blocked(yaw + off) + abs(off) * 2
+                    if b < best.1 { best = (yaw + off, b) }
+                }
+                routeYaw = best.0
+            } else {
+                routeYaw = nil
+            }
+        }
+        // Walls close beside or ahead push the heading away, so the flight keeps a frame's width off a massif's face
+        // (close up, a steep face is a lattice of single steps).
+        var push = SIMD2<Double>.zero
+        for k in 0..<12 {
+            let a = Double(k) * .pi / 6
+            let dv = SIMD2(sin(a), cos(a))
+            for r in [30.0, 60.0, 110.0, 180.0, 260.0, 360.0] {
+                let q = p + dv * r
+                let over = h(q.x, q.y) - (position.y - 10)
+                if over > 0 { push -= dv * min(over / 60, 1) * (60 / r) }
+            }
+        }
+        let pushLen = simd_length(push)
+        var steerAway = 0.0
+        let crowd = min(max((pushLen - 0.25) / 1.0, 0), 1)
+        if crowd > 0 {
+            let awayYaw = atan2(push.x, push.y)
+            steerAway = sin(FlightCamera.angleDiff(awayYaw, yaw)) * 0.2 * crowd
+        }
+        let urgency = max(min(blockedAhead / 40, 1), 0.7 * crowd)
+        avoidRate = routeYaw.map { sin(FlightCamera.angleDiff($0, yaw)) * 0.15 * urgency } ?? 0
+        // The birds' sightline predictions (Wildlife.hidden) rely on turns of at most 0.09 rad/s.
+        let targetRate = max(-0.09, min(0.09, (drift + steerShot + steerKey + steerMoon) * (1 - urgency) + avoidRate + steerAway))
         // Critically damped spring on yaw rate: turns take tens of seconds.
         let k = 0.25
         yawAccel += (k * k * (targetRate - yawRate) - 2 * k * yawAccel) * dt
@@ -262,6 +380,9 @@ final class FlightCamera {
         }
         let roughClimb = min(max((hi - lo - 6) * 1.5, 0), 30)
         var clearance = roughClimb + 12 + 12 * (wander(time + 500, 0.7) + 0.6) + 10 * surveyAmount + 40 * max(0, min(1, -mode / 0.6)) + 14 * noon
+        // Over the great relief the flight keeps well up: close above, its stepped slopes read as a block lattice.
+        let groundHere = h(position.x, position.z)
+        clearance += 70 * min(max((groundHere - 150) / 200, 0), 1)
         // Passing the site a shot was built around: a little lower, so the windows read.
         if let f = focus, simd_length(f - p) < 150 { clearance = max(clearance - 8, min(clearance, 22)) }
         // Canyon and mesa country: down among the walls they fill the frame, so rise to look across the rims.
@@ -285,10 +406,31 @@ final class FlightCamera {
         let base = max(ahead, 19.85) + clearance
         let lift = rough * max(0, rim + 18 - base)
         rimLift += (lift - rimLift) * min(1, dt * (lift > rimLift ? 0.3 : 0.04))
-        // The lift stops well under the cloud slab (base 230).
-        let target = base + min(rimLift, max(0, 200 - base))
+        // The lift stops well under the cloud slab (among lowland rims at 200), and the flight never targets above the
+        // ceiling. Among the great walls it rises to look across them rather than fly at their feet.
+        let liftTop = rim > 260 ? FlightCamera.ceiling - 30 : 200
+        var target = min(base + min(rimLift, max(0, liftTop - base)), FlightCamera.ceiling)
+        // Relief rising ahead is met early, at the slow climb, so the flight arrives over a massif's shoulder rather
+        // than having to leap it: land over 280 within 1.5k ahead sets a floor, eased with distance.
+        var regional = -Double.infinity
+        for dist in stride(from: 250.0, through: 1500.0, by: 125.0) {
+            for off in [-0.3, 0.0, 0.3] {
+                let g = hFar(position.x + sin(yaw + off) * dist, position.z + cos(yaw + off) * dist)
+                if g > 280 { regional = max(regional, g + 30 - 0.15 * (dist - 250)) }
+            }
+        }
+        target = max(target, min(regional, FlightCamera.ceiling))
         let kc = 0.35
         climbRate += (kc * kc * (target - position.y) - 2 * kc * climbRate) * dt
+        // Climbs are capped (3 voxels/s): mountains are flown around and through, not leapt. A wall the routing
+        // could not turn from lifts the flight just fast enough to clear it by the time it arrives, still smoothly.
+        var need = 0.0
+        for dist in [0.0, 15.0, 30.0, 45.0, 60.0, 90.0, 130.0, 180.0] {
+            let rise = footprintMax(position.x + fwdFlat.x * dist, position.z + fwdFlat.y * dist, radius: dist == 0 ? 14 : 8) + 12 - position.y
+            if rise > 0 { need = max(need, rise / max((dist - 8) / v, 0.5)) }
+        }
+        if need > 3 { climbRate = max(climbRate, min(need, 40)) }
+        climbRate = min(climbRate, max(3, min(1.3 * need, 40)))
         position.y += climbRate * dt
         let floor = footprintMax(position.x, position.z, radius: 4) + 8
         if position.y < floor { position.y = floor; climbRate = max(climbRate, 0) }

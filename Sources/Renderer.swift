@@ -28,6 +28,8 @@ struct Frame {
     var lod3 = SIMD4<Float>()
     var lod4 = SIMD4<Float>()
     var fade = SIMD4<Float>()
+    var shadow = SIMD4<Float>()
+    var slowCloud = SIMD4<Float>()
 }
 
 enum GPU {
@@ -38,6 +40,13 @@ enum GPU {
         let exe = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
         return try? device.makeLibrary(URL: exe.appendingPathComponent("Saver.metallib"))
     }
+}
+
+// Must match ShadowBake in Shaders/Saver.metal.
+struct ShadowBake {
+    var key: SIMD4<Float>
+    var cam: SIMD4<Float>
+    var rows: SIMD4<Int32>
 }
 
 // Day cycle with a time-warp that lingers in golden and blue hour.
@@ -591,11 +600,33 @@ final class Renderer: NSObject, MTKViewDelegate {
     let postPipeline: MTLRenderPipelineState
     let taaPipeline: MTLRenderPipelineState
     private let cloudPipeline: MTLComputePipelineState
+    // Shadow-height maps (see bakeShadowHeight in Shaders/Saver.metal): near and far cascades, a band rebaked per frame.
+    private let shadowPipeline: MTLComputePipelineState
+    private let shadowMaps: [MTLTexture]
+    static let shadowN = 1024, shadowCell = 8.0
+    private static let shadowBands = [256, 512]
+    private var shadowBand = [0, 0]
+    private var shadowValid = false
+    private var shadowFrom: (cam: SIMD2<Double>, key: SIMD3<Double>)?
+    // Far heights for the camera: level 3's max mip 2 (32-voxel cells, toroidal, about +-7.7k around the camera),
+    // read back every few frames; conservative, being a max.
+    private let farTex: MTLTexture
+    // The terrain horizon around the camera (bakeHorizon): sky pixels above it skip the trace.
+    private let horizonPipeline: MTLComputePipelineState
+    private let horizonBuf: MTLBuffer
+    private var farHeights: [Float16] = []
+    private var farCentre = SIMD2<Int>(Int.min, Int.min)
+    private var farAge = 0
+    private var farSimClock = -1e9
+    static let farN = 512, farCell = 32.0
     // The fine cloud field only drifts with the wind, so it is baked once around the camera (in drifted
     // coordinates) and re-baked when the camera nears its edge.
     private var cloudTex: MTLTexture?
     private var cloudCenter: SIMD2<Double>?
-    static let cloudTexels = 2048, cloudTexel = 4.0
+    static let cloudTexels = 2048, cloudTexel = 20.0
+    private var slowTex: MTLTexture?
+    private let slowPipeline: MTLComputePipelineState
+    static let slowTexels = 512, slowTexel = 100.0
     private var history: [MTLTexture] = []
     // Lamps: per-frame position and state (schedule, flicker), and their light baked onto the map.
     private let lampPipeline: MTLComputePipelineState
@@ -637,6 +668,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     let popLog: PopLog? = PopLog.enabled ? PopLog() : nil
     private(set) var aspect: Float = 16.0 / 10.0
     static let logTiming = ProcessInfo.processInfo.environment["VR_TIMING"] != nil
+    static let profile = ProcessInfo.processInfo.environment["VR_PROFILE"] ?? ""
     static let fullCoarse = ProcessInfo.processInfo.environment["VR_COARSE_FULL"] != nil
     // VR_CHUNKED: snapshots update the coarse rings a chunk per frame, as live.
     static let chunkedCoarse = ProcessInfo.processInfo.environment["VR_CHUNKED"] != nil
@@ -670,6 +702,10 @@ final class Renderer: NSObject, MTKViewDelegate {
               let tp = try? device.makeRenderPipelineState(descriptor: taa),
               let pp = try? device.makeRenderPipelineState(descriptor: post),
               let cf = lib.makeFunction(name: "cloudField").flatMap({ try? device.makeComputePipelineState(function: $0) }),
+              let csf = lib.makeFunction(name: "cloudSlowField").flatMap({ try? device.makeComputePipelineState(function: $0) }),
+              let shP = lib.makeFunction(name: "bakeShadowHeight").flatMap({ try? device.makeComputePipelineState(function: $0) }),
+              let hzP = lib.makeFunction(name: "bakeHorizon").flatMap({ try? device.makeComputePipelineState(function: $0) }),
+              let hzB = device.makeBuffer(length: 1024 * 4, options: .storageModePrivate),
               let lampP = lib.makeFunction(name: "updateLamps").flatMap({ try? device.makeComputePipelineState(function: $0) }),
               let lightP = lib.makeFunction(name: "bakeLights").flatMap({ try? device.makeComputePipelineState(function: $0) }),
               let lpos = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.maxLamps * 16, options: .storageModePrivate),
@@ -682,6 +718,20 @@ final class Renderer: NSObject, MTKViewDelegate {
         postPipeline = pp
         taaPipeline = tp
         cloudPipeline = cf
+        slowPipeline = csf
+        shadowPipeline = shP
+        horizonPipeline = hzP
+        horizonBuf = hzB
+        let sd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg32Float, width: Renderer.shadowN, height: Renderer.shadowN, mipmapped: false)
+        sd.usage = [.shaderRead, .shaderWrite]
+        sd.storageMode = .private
+        guard let sm0 = device.makeTexture(descriptor: sd), let sm1 = device.makeTexture(descriptor: sd) else { return nil }
+        shadowMaps = [sm0, sm1]
+        let fd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Float, width: Renderer.farN, height: Renderer.farN, mipmapped: false)
+        fd.usage = [.shaderRead]
+        fd.storageMode = .shared
+        guard let ft = device.makeTexture(descriptor: fd) else { return nil }
+        farTex = ft
         lampPipeline = lampP
         lightPipeline = lightP
         lampPos = lpos
@@ -705,9 +755,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         edgeRadius = Clipmap.handoff(battery ? Clipmap.levels - 1 : Clipmap.levels)
         super.init()
         camera.heightAt = { [unowned world] x, z in world.height(x: x, z: z) }
+        camera.farHeightAt = { [unowned self] x, z in self.farHeight(x: x, z: z) }
         camera.sitesAt = { [unowned world] in world.sites }
         wildlife.heightAt = camera.heightAt
         world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
+        refreshFar(wait: true)
         camera.placeAtStart()
         // The coarse rings are built ahead of the first frame on the same queue, which orders that frame after them;
         // nothing waits on the CPU. Afterwards only strips are rewritten.
@@ -771,6 +823,11 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
             clock.advance(step)
             world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
+            // Snapshots simulate long stretches without frames: keep the far heights following the camera.
+            if world.synchronous && simTime + (dt * timeScale - remaining) - farSimClock > 2 {
+                farSimClock = simTime + (dt * timeScale - remaining)
+                refreshFar(wait: true)
+            }
             remaining -= step
         }
         simTime += dt * timeScale
@@ -899,6 +956,22 @@ final class Renderer: NSObject, MTKViewDelegate {
         clipmap.encode(into: cb, center: SIMD2(camera.position.x, camera.position.z), drain: world.synchronous && !Renderer.chunkedCoarse,
                        active: activeLevels)
         bakeLamps(into: cb, frame: &f)
+        // The shadow maps and the horizon share no data: one concurrent pass, so their short dispatches overlap.
+        let bakes = cb.makeComputeCommandEncoder(dispatchType: .concurrent)
+        if let bakes { bakeShadows(into: bakes, frame: &f) }
+        if Renderer.profile != "nohorizon", let enc = bakes {
+            f.shadow.z = 1
+            enc.setComputePipelineState(horizonPipeline)
+            enc.setBuffer(horizonBuf, offset: 0, index: 0)
+            enc.setBytes(&f, length: MemoryLayout<Frame>.stride, index: 1)
+            enc.setTexture(world.heightTex, index: 0)
+            enc.setTexture(clipmap.height, index: 1)
+            // HORIZON_SEGS (16) threads per bin, one threadgroup each.
+            enc.dispatchThreads(MTLSize(width: 16, height: 1024, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 1, depth: 1))
+        }
+        bakes?.endEncoding()
+        farAge += 1
+        if farAge >= 20 { farAge = 0; encodeFar(into: cb, wait: false) }
         birdSlots.wait()
         cb.addCompletedHandler { [birdSlots] _ in birdSlots.signal() }
         let birdBuf = birdBuffers[birdIndex]
@@ -917,6 +990,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setRenderPipelineState(scenePipeline)
             enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
             enc.setFragmentBuffer(birdBuf, offset: 0, index: 5)
+            enc.setFragmentBuffer(horizonBuf, offset: 0, index: 6)
             enc.setFragmentTexture(world.heightTex, index: 0)
             enc.setFragmentTexture(cloudTex, index: 1)
             enc.setFragmentTexture(world.climateTex, index: 2)
@@ -927,6 +1001,9 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentTexture(clipmap.height, index: 6)
             enc.setFragmentTexture(clipmap.climate, index: 7)
             enc.setFragmentTexture(clipmap.cover, index: 8)
+            enc.setFragmentTexture(shadowMaps[0], index: 9)
+            enc.setFragmentTexture(shadowMaps[1], index: 10)
+            enc.setFragmentTexture(slowTex, index: 11)
             enc.setFragmentBuffer(lampPos, offset: 0, index: 2)
             enc.setFragmentBuffer(lampState, offset: 0, index: 3)
             enc.setFragmentBytes(&hazeRefs, length: 128, index: 4)
@@ -1014,6 +1091,100 @@ final class Renderer: NSObject, MTKViewDelegate {
         enc.endEncoding()
     }
 
+    // Conservative terrain height at world (x, z) out to about 7.7k, or nil.
+    func farHeight(x: Double, z: Double) -> Double? {
+        guard !farHeights.isEmpty else { return nil }
+        let cx = Int(floor(x / Renderer.farCell)), cz = Int(floor(z / Renderer.farCell))
+        guard abs(cx - farCentre.x) < 236, abs(cz - farCentre.y) < 236 else { return nil }
+        let n = Renderer.farN
+        return Double(farHeights[(cz & (n - 1)) * n + (cx & (n - 1))])
+    }
+
+    private func encodeFar(into cb: MTLCommandBuffer, wait: Bool) {
+        guard clipmap.ready(3), let blit = cb.makeBlitCommandEncoder() else { return }
+        blit.copy(from: clipmap.height, sourceSlice: 2, sourceLevel: 2, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                  sourceSize: MTLSize(width: Renderer.farN, height: Renderer.farN, depth: 1),
+                  to: farTex, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+        blit.endEncoding()
+        let centre = SIMD2(Int(floor(camera.position.x / Renderer.farCell)), Int(floor(camera.position.z / Renderer.farCell)))
+        let read = { [weak self] in
+            guard let self else { return }
+            let n = Renderer.farN
+            var raw = [Float16](repeating: 0, count: n * n)
+            self.farTex.getBytes(&raw, bytesPerRow: n * 2, from: MTLRegionMake2D(0, 0, n, n), mipmapLevel: 0)
+            self.farHeights = raw
+            self.farCentre = centre
+        }
+        if wait { return }
+        cb.addCompletedHandler { _ in DispatchQueue.main.async(execute: read) }
+    }
+
+    // Brings the rings to the camera and reads the far heights back at once (startup and snapshots).
+    private func refreshFar(wait: Bool) {
+        guard let cb = queue.makeCommandBuffer() else { return }
+        clipmap.encode(into: cb, center: SIMD2(camera.position.x, camera.position.z), drain: true, active: activeLevels)
+        encodeFar(into: cb, wait: true)
+        cb.commit()
+        cb.waitUntilCompleted()
+        guard clipmap.ready(3) else { return }
+        let n = Renderer.farN
+        var raw = [Float16](repeating: 0, count: n * n)
+        farTex.getBytes(&raw, bytesPerRow: n * 2, from: MTLRegionMake2D(0, 0, n, n), mipmapLevel: 0)
+        farHeights = raw
+        farCentre = SIMD2(Int(floor(camera.position.x / Renderer.farCell)), Int(floor(camera.position.z / Renderer.farCell)))
+    }
+
+    // The key light as the shader's makeLight picks it, and whether it casts shadows.
+    static func keyLight(_ sun: SIMD3<Double>) -> (SIMD3<Double>, Bool) {
+        let e = sun.y
+        if e > -0.02 { return (sun, true) }
+        let glow = simd_normalize(SIMD3(sun.x, 0.05, sun.z))
+        let moon = simd_normalize(SIMD3(-sun.x, max(-sun.y * 0.7, 0.08), -sun.z))
+        let t = min(max((e + 0.09) / (-0.16 + 0.09), 0), 1)
+        let m = t * t * (3 - 2 * t)
+        return (simd_normalize(glow + (moon - glow) * m), m > 0.5)
+    }
+
+    // A band of each shadow-height map per frame, around the camera, for the current key light; everything at once
+    // when the camera or the light has jumped (startup, snapshots), so the maps never hold another place's shadows.
+    private func bakeShadows(into enc: MTLComputeCommandEncoder, frame f: inout Frame) {
+        let (key, casts) = Renderer.keyLight(clock.sunDirection)
+        let levels = (1...Clipmap.levels).prefix { clipmap.ready($0) }.count
+        // VR_PROFILE (tests): "noshadow" drops terrain shadows, "nobake" keeps the maps but skips their rebaking.
+        // "bitsN" sets profiling flags directly: 8 reflections unshaded, 16 no sky visibility, 32 no cloud shadow or veil,
+        // 64 primary hits unshaded.
+        f.shadow.y = Renderer.profile == "nearclouds" ? 1 : Renderer.profile == "lowmax" ? 2 : Renderer.profile == "norefl" ? 4 : Float(Renderer.profile.hasPrefix("bits") ? Int(Renderer.profile.dropFirst(4)) ?? 0 : 0)
+        if Renderer.profile == "noshadow" { f.shadow.x = 3; return }
+        if Renderer.profile == "oldshadow" { f.shadow.x = 0; return }
+        if Renderer.profile == "nobake" && shadowValid { f.shadow.x = 1; return }
+        guard casts, levels > 0 else { shadowValid = false; f.shadow.x = 0; return }
+        let cam = SIMD2(camera.position.x, camera.position.z)
+        let jumped = shadowFrom.map { simd_length($0.cam - cam) > 300 || simd_dot($0.key, key) < 0.995 } ?? true
+        if !shadowValid || jumped { shadowFrom = (cam, key); shadowBand = [0, 0] }
+        let full = !shadowValid || jumped
+        let cosE = simd_length(SIMD2(key.x, key.z))
+        enc.setComputePipelineState(shadowPipeline)
+        enc.setTexture(clipmap.height, index: 1)
+        for c in 0..<2 {
+            let cell = Renderer.shadowCell * (c == 0 ? 1 : 4)
+            let bands = Renderer.shadowBands[c], rows = Renderer.shadowN / bands
+            let todo = full ? bands : 1
+            for _ in 0..<todo {
+                // 96: SHADOW_NEAR in Shaders/Saver.metal, the traced ray's reach.
+                var b = ShadowBake(key: SIMD4(Float(key.x), Float(key.y), Float(key.z), Float(max(0.8 * 96 * cosE, cell))),
+                                   cam: SIMD4(Float(cam.x), Float(cam.y), Float(cell), Float(levels)),
+                                   rows: SIMD4(Int32(shadowBand[c] * rows), Int32(floor(cam.x / cell)), Int32(floor(cam.y / cell)), 0))
+                enc.setTexture(shadowMaps[c], index: 0)
+                enc.setBytes(&b, length: MemoryLayout<ShadowBake>.stride, index: 0)
+                enc.dispatchThreads(MTLSize(width: Renderer.shadowN, height: rows, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+                shadowBand[c] = (shadowBand[c] + 1) % bands
+                if c == 0 && shadowBand[0] == 0 { shadowFrom = (cam, key) }
+            }
+        }
+        shadowValid = true
+        f.shadow.x = 1
+    }
+
     private func bakeClouds(into cb: MTLCommandBuffer, frame f: inout Frame) {
         let n = Renderer.cloudTexels, span = Double(n) * Renderer.cloudTexel
         if cloudTex == nil {
@@ -1024,7 +1195,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         guard let cloudTex else { return }
         // Must match CLOUD_DRIFT in Shaders/Saver.metal.
-        let drift = SIMD2(cos(0.6), sin(0.6)) * 1.6 * Double(Float(simTime))
+        let drift = SIMD2(cos(0.6), sin(0.6)) * 4.8 * Double(Float(simTime))
         let cam = SIMD2(camera.position.x, camera.position.z) - drift
         if cloudCenter.map({ simd_length(cam - $0) > span * 0.2 }) ?? true,
            let enc = cb.makeComputeCommandEncoder() {
@@ -1038,6 +1209,25 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.endEncoding()
         }
         if let c = cloudCenter { f.cloud = SIMD4(Float(c.x - span / 2), Float(c.y - span / 2), Float(Renderer.cloudTexel), 0) }
+        // The slow part of the cloud cover evolves and drifts: baked every frame around the camera, in world coordinates.
+        let sn = Renderer.slowTexels, sspan = Double(sn) * Renderer.slowTexel
+        if slowTex == nil {
+            let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: sn, height: sn, mipmapped: false)
+            td.usage = [.shaderRead, .shaderWrite]
+            td.storageMode = .private
+            slowTex = device.makeTexture(descriptor: td)
+        }
+        guard let slowTex, let enc = cb.makeComputeCommandEncoder() else { return }
+        let sc = (SIMD2(camera.position.x, camera.position.z) / Renderer.slowTexel).rounded(.down) * Renderer.slowTexel
+        var info = SIMD4<Float>(Float(sc.x - sspan / 2), Float(sc.y - sspan / 2), Float(Renderer.slowTexel), Float(simTime))
+        var seed = world.seed
+        enc.setComputePipelineState(slowPipeline)
+        enc.setTexture(slowTex, index: 0)
+        enc.setBytes(&info, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+        enc.setBytes(&seed, length: 4, index: 1)
+        enc.dispatchThreads(MTLSize(width: sn, height: sn, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+        enc.endEncoding()
+        f.slowCloud = info
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
@@ -1121,9 +1311,60 @@ enum Snapshot {
                 }
             }
         }
+        // VR_CAM=x,z,height,yawDeg,pitchDeg[,abs]: holds the camera at world (x, z), `height` above the ground there
+        // (absolute when abs is 1).
+        let camSpec = env["VR_CAM"].map { $0.split(separator: ",").compactMap { Double($0) } }
+        if let v = camSpec, v.count >= 5 {
+            r.camera.freeze(position: SIMD3(v[0], 400, v[1]), yaw: v[3] * .pi / 180, pitch: v[4] * .pi / 180)
+            r.camera.pitchOverride = nil
+        }
+        // VR_FLIGHT=minutes: flies the autopilot that long, logging altitude, clearance and climb every 12 s and
+        // writing a frame each minute next to the screenshot path.
+        if let mins = Double(env["VR_FLIGHT"] ?? "") {
+            var maxClimb = 0.0, minClear = Double.infinity, maxY = 0.0, lows = 0
+            var walled = 0, walledRun = 0, maxWalledRun = 0, fastClimb = 0, prevY = r.camera.position.y
+            var lastY = r.camera.position.y
+            for i in 1...Int(mins * 60) {
+                for _ in 0..<4 { r.simulate(0.25) }
+                let p = r.camera.position
+                let g = r.world.height(x: p.x, z: p.z) ?? 0
+                if p.y - lastY > 6 { print(String(format: "flight jump t=%d pos=(%.0f,%.0f) %.0f -> %.0f", i, p.x, p.z, lastY, p.y)) }
+                maxClimb = max(maxClimb, p.y - lastY)
+                lastY = p.y
+                minClear = min(minClear, p.y - g)
+                maxY = max(maxY, p.y)
+                if p.y < g + 2 { lows += 1 }
+                let wall = r.camera.wallInFrame()
+                if wall >= 0.4 { walled += 1; walledRun += 1; maxWalledRun = max(maxWalledRun, walledRun) } else { walledRun = 0 }
+                if p.y - (i == 1 ? p.y : prevY) > 6 { fastClimb += 1 }
+                prevY = p.y
+                if i % 12 == 0 {
+                    fflush(stdout)
+                    print(String(format: "flight t=%d pos=(%.0f,%.0f) y=%.0f ground=%.0f wall=%.2f far=%.0f yaw=%.0f", i, p.x, p.z, p.y, g, wall,
+                                 r.farHeight(x: p.x + sin(r.camera.yaw) * 600, z: p.z + cos(r.camera.yaw) * 600) ?? -1, r.camera.yaw * 180 / .pi))
+                }
+                if i % 60 == 0 {
+                    for _ in 0..<4 {
+                        let cb = r.queue.makeCommandBuffer()!
+                        r.encode(into: cb, output: tex, outputSize: CGSize(width: w, height: h))
+                        cb.commit()
+                        cb.waitUntilCompleted()
+                    }
+                    var bytes = [UInt8](repeating: 0, count: w * h * 4)
+                    tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+                    write(bytes: bytes, width: w, height: h, to: path.replacingOccurrences(of: ".png", with: "_m\(i / 60).png"))
+                }
+            }
+            print(String(format: "flight done: max climb %.2f/s, min clearance %.1f, max y %.0f (ceiling %.0f), low seconds %d, walled seconds %d (longest %d), seconds climbing over 6/s %d", maxClimb, minClear, maxY, FlightCamera.ceiling, lows, walled, maxWalledRun, fastClimb))
+            return
+        }
         var simulated = 0.0
         for t in settings.screenshotTimes.sorted() {
             r.simulate(t - simulated)
+            if let v = camSpec, v.count >= 5 {
+                let g = (v.count > 5 && v[5] == 1) ? 0 : max(r.world.height(x: v[0], z: v[1]) ?? 20, 19.85)
+                r.camera.freeze(position: SIMD3(v[0], g + v[2], v[1]), yaw: v[3] * .pi / 180, pitch: v[4] * .pi / 180)
+            }
             if let phase = settings.phase { r.clock.phase = phase }
             simulated = t
             if let d = Double(ProcessInfo.processInfo.environment["VR_BIRDTEST"] ?? "") { r.wildlife.testPattern(camera: r.camera, distance: d) }
@@ -1143,7 +1384,7 @@ enum Snapshot {
                 cb.commit()
                 cb.waitUntilCompleted()
                 times.append((cb.gpuEndTime - cb.gpuStartTime) * 1000)
-                if Renderer.logTiming { print(String(format: "frame %d gpu %.2f ms%@", i, times.last!, r.clipmap.idle ? "" : " (coarse job pending)")) }
+                if Renderer.logTiming { print(String(format: "frame %d gpu %.2f ms cam (%.1f, %.1f, %.1f)%@", i, times.last!, r.camera.position.x, r.camera.position.y, r.camera.position.z, r.clipmap.idle ? "" : " (coarse job pending)")) }
                 if i >= frames - dump {
                     tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
                     write(bytes: bytes, width: w, height: h, to: out.replacingOccurrences(of: ".png", with: "_f\(i - frames + dump).png"))
@@ -1152,8 +1393,8 @@ enum Snapshot {
             tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
             write(bytes: bytes, width: w, height: h, to: out)
             let seen = r.wildlife.inView(camera: r.camera, aspect: Double(w) / Double(h), tanHalf: tan(25.0 * .pi / 180))
-            print(String(format: "t=%.0f phase=%.3f sunY=%.2f exposure=%.2f cam=(%.0f,%.0f,%.0f) gpu=%.2fms mem=%.0fMB birds=%d flocks=%d near=%.0f %@ -> %@", t, r.clock.phase,
-                         r.clock.sunDirection.y, r.exposure, r.camera.position.x, r.camera.position.y, r.camera.position.z, times.min()!,
+            print(String(format: "t=%.0f phase=%.3f sunY=%.2f exposure=%.2f cam=(%.0f,%.0f,%.0f) yaw=%.1f pitch=%.1f gpu=%.2fms mem=%.0fMB birds=%d flocks=%d near=%.0f %@ -> %@", t, r.clock.phase,
+                         r.clock.sunDirection.y, r.exposure, r.camera.position.x, r.camera.position.y, r.camera.position.z, r.camera.yaw * 180 / .pi, r.camera.pitch * 180 / .pi, times.min()!,
                          Double(device.currentAllocatedSize) / 1048576, seen.count, seen.flocks, seen.nearest.isFinite ? seen.nearest : -1, Snapshot.sitesInView(r), out))
         }
         if let log = r.popLog { print(log.summary(r.wildlife)) }

@@ -161,6 +161,11 @@ final class Wildlife {
     }
 
     private func ground(_ x: Double, _ z: Double) -> Double { heightAt(x, z) ?? 200 }
+    // Highest a flock flies over ground g: low over the lowland, up with the land among the massifs, and under the
+    // cloud base unless the ground itself rises past it.
+    private func topAlt(over g: Double, clearance c: Double) -> Double {
+        min(max(190, g + 120), max(FlightCamera.ceiling - 20, g + 2 * c))
+    }
 
     // Which flocks the hour calls for, one per slot. Gull slots fall back to songbirds away from water.
     private static func roster(sunY: Double, phase: Double) -> [Kind] {
@@ -404,7 +409,7 @@ final class Wildlife {
             var start = s.pos + d * r
             let floorY = ground(start.x, start.z) + fl.clearance * 1.5
             if behindHill { start.y = floorY } else if start.y < floorY { failWhy["ground\(edge < 0.6 ? "S" : "T")", default: 0] += 1; continue }
-            if start.y > 190 { failWhy["high", default: 0] += 1; continue }
+            if start.y > topAlt(over: ground(start.x, start.z), clearance: fl.clearance) { failWhy["high", default: 0] += 1; continue }
             // Paths: twelve headings, level, gliding down or climbing; scored by how soon the anchor is in the frame
             // and how long it stays.
             var best: [(score: Double, v: SIMD3<Double>, enter: Double, leave: Double)] = []
@@ -418,7 +423,7 @@ final class Wildlife {
                     for i in stride(from: behindHill ? 1 : 0, to: 60, by: behindHill ? 2 : 1) {
                         let k = Double(i + 1) * 0.5
                         let p = start + v * k
-                        if p.y < ground(p.x, p.z) + 2 || p.y > 205 { if enter < 0 { enter = 99 }; leave = min(leave, k); break }
+                        if p.y < ground(p.x, p.z) + 2 || p.y > topAlt(over: ground(p.x, p.z), clearance: fl.clearance) + 15 { if enter < 0 { enter = 99 }; leave = min(leave, k); break }
                         let f = ahead[i]
                         let seen = behindHill ? f.shows(p, size: size) : f.inFrame(p, size: size)
                         if enter < 0 { if seen { enter = k } } else if !seen { leave = k; break }
@@ -480,7 +485,7 @@ final class Wildlife {
             let streams = Int(rand(3...5.99))
             let tilts = (0..<streams).map { _ in (rand(-0.8...0.1), rand(-0.05...0.25), rand(40...100)) }
             let firstSide: Double = rand() < 0.5 ? -1 : 1
-            guard alt <= 190, s.direct(anchor, size: 40),
+            guard alt <= topAlt(over: ground(p.x, p.y), clearance: Wildlife.flight(.starling).clearance), s.direct(anchor, size: 40),
                   predicted(s, tau: 10, turnFor: 6).direct(anchor, size: 40) else { continue }
             let f = makeMurmuration(slot: slot, anchor: anchor, n: n, life: life, seedPhase: seedPhase)
             let right = SIMD3(cos(camYaw), 0, -sin(camYaw)), ahead = SIMD3(sin(camYaw), 0, cos(camYaw))
@@ -524,7 +529,7 @@ final class Wildlife {
             let p = c2 + SIMD2(sin(a), cos(a)) * r
             let alt = flightLevel(.starling, at: p, from: cam, elev: elevation(.starling, pitch: pitch))
             let anchor = SIMD3(p.x, alt, p.y)
-            guard alt <= 190, s.direct(anchor, size: 40), predicted(s, tau: 10, turnFor: 6).direct(anchor, size: 40) else { continue }
+            guard alt <= topAlt(over: ground(p.x, p.y), clearance: Wildlife.flight(.starling).clearance), s.direct(anchor, size: 40), predicted(s, tau: 10, turnFor: 6).direct(anchor, size: 40) else { continue }
             f.anchor = anchor
             f.altitude = alt
             f.drift = SIMD3(camVel.x, 0, camVel.z) * 0.8
@@ -652,8 +657,10 @@ final class Wildlife {
         for d in [20.0, 45.0, 80.0] {
             gAhead = max(gAhead, ground(f.anchor.x + vA.x / max(f.speed, 0.1) * d, f.anchor.z + vA.z / max(f.speed, 0.1) * d) - d * 0.15)
         }
-        let yT = min(max(f.altitude, gAhead + fl.clearance * (f.kind == .raptor ? 2 : 1.5)), 205)
-        f.anchor.y += (yT - f.anchor.y) * min(1, dt * 0.4)
+        // Ground-relative: flocks rise with the land (over a wall, before it) and otherwise keep under the clouds.
+        let lift = gAhead + fl.clearance * (f.kind == .raptor ? 2 : 1.5)
+        let yT = max(min(f.altitude, FlightCamera.ceiling - 20), lift)
+        f.anchor.y += (yT - f.anchor.y) * min(1, dt * (yT > f.anchor.y && lift > f.anchor.y - 5 ? 1.5 : 0.4))
 
         // Murmuration: a falcon-like disturbance loops through the flock, so it folds, splits and pulses.
         let hawk = f.anchor + SIMD3(sin(time * 0.31 + f.seedPhase) * 28, sin(time * 0.53) * 9, sin(time * 0.23 + 1.7) * 28)
