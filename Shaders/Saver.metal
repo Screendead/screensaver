@@ -3558,7 +3558,9 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     if (!(x.prof & 32) && !water && h.hit && o.y < CLOUD_Y0 && o.y + d.y * h.t > CLOUD_Y0) {
         CloudSample cl = cloudSheet(x, o, d, h.t, 6);
         // A flat base would cut a level line across every wall that rises into it: the veil thickens up the wall.
-        col = mix(col, cl.col, cl.a * smoothstep(CLOUD_Y0, CLOUD_Y0 + 110.0, o.y + d.y * h.t));
+        // Thin cover would wash the whole wall evenly, which reads as terrain gone translucent rather than as cloud:
+        // the veil is drawn only where the cloud in front is dense, as an opaque body with soft edges.
+        col = mix(col, cl.col, smoothstep(0.35, 0.8, cl.a) * smoothstep(CLOUD_Y0, CLOUD_Y0 + 110.0, o.y + d.y * h.t));
     }
     col = hazeAndSmoke(x, col, sites, lampPos, lampState, refs, f.refs, o, d, tSurf);
     return float4(col, birdRefl ? -tSurf : tSurf);
