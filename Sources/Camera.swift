@@ -230,13 +230,20 @@ final class FlightCamera {
     }
 
     func placeAtStart() {
-        // A start among the massifs moves to the nearest low ground, so the flight begins under the ceiling.
-        if hFar(position.x, position.z) > 200 {
+        // A start among or beside the massifs moves to the nearest open low ground, so the flight begins under the ceiling.
+        if (0..<12).contains(where: { (farHeightAt(position.x + sin(Double($0) * .pi / 6) * 500, position.z + cos(Double($0) * .pi / 6) * 500) ?? 0) > 260 })
+            || hFar(position.x, position.z) > 200 {
             search: for r in stride(from: 200.0, through: 6000.0, by: 200.0) {
                 for k in 0..<24 {
                     let a = Double(k) * .pi / 12
                     let x = position.x + sin(a) * r, z = position.z + cos(a) * r
-                    if let g = farHeightAt(x, z), g < 120 { position.x = x; position.z = z; break search }
+                    guard let g = farHeightAt(x, z), g < 120 else { continue }
+                    // Clear of the massifs on every side, so the first seconds are not a climb up a wall.
+                    var clear = true
+                    for rr in [250.0, 500.0, 800.0] {
+                        for j in 0..<12 where (farHeightAt(x + sin(Double(j) * .pi / 6) * rr, z + cos(Double(j) * .pi / 6) * rr) ?? 0) > 260 { clear = false }
+                    }
+                    if clear { position.x = x; position.z = z; break search }
                 }
             }
         }
@@ -330,7 +337,7 @@ final class FlightCamera {
         for k in 0..<12 {
             let a = Double(k) * .pi / 6
             let dv = SIMD2(sin(a), cos(a))
-            for r in [30.0, 60.0, 110.0, 180.0, 260.0] {
+            for r in [30.0, 60.0, 110.0, 180.0, 260.0, 360.0] {
                 let q = p + dv * r
                 let over = h(q.x, q.y) - (position.y - 10)
                 if over > 0 { push -= dv * min(over / 60, 1) * (60 / r) }
@@ -338,10 +345,10 @@ final class FlightCamera {
         }
         let pushLen = simd_length(push)
         var steerAway = 0.0
-        let crowd = min(max((pushLen - 0.3) / 1.2, 0), 1)
+        let crowd = min(max((pushLen - 0.25) / 1.0, 0), 1)
         if crowd > 0 {
             let awayYaw = atan2(push.x, push.y)
-            steerAway = sin(FlightCamera.angleDiff(awayYaw, yaw)) * 0.15 * crowd
+            steerAway = sin(FlightCamera.angleDiff(awayYaw, yaw)) * 0.2 * crowd
         }
         let urgency = max(min(blockedAhead / 40, 1), 0.7 * crowd)
         avoidRate = routeYaw.map { sin(FlightCamera.angleDiff($0, yaw)) * 0.15 * urgency } ?? 0
