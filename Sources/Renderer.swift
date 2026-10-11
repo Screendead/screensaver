@@ -543,9 +543,9 @@ final class Clipmap {
     // Forgets the windows, so the next encode rebuilds every level whole (VR_COARSE_FULL: checks strips against it).
     func invalidate() { lo = Array(repeating: nil, count: Clipmap.levels); job = nil }
 
-    private func nextJob(_ center: SIMD2<Double>, active: Int) -> Job? {
+    private func nextJob(_ center: SIMD2<Double>, active: Int, only: Int?) -> Job? {
         let n = Int32(Clipmap.size), step = Int32(Clipmap.snap)
-        for i in 0..<active {
+        for i in only.map({ [$0 - 1] }) ?? Array(0..<active) {
             let t = Clipmap.target(center, level: i + 1)
             guard let cur = lo[i], abs(t.x - cur.x) <= 8 * step, abs(t.y - cur.y) <= 8 * step else {
                 lo[i] = nil
@@ -565,11 +565,11 @@ final class Clipmap {
         return nil
     }
 
-    // Encodes pending generation for levels 1...active: one piece, or with `drain` everything the camera position
-    // needs. Levels past `active` are dropped, to be rebuilt whole once they are active again.
-    func encode(into cb: MTLCommandBuffer, center: SIMD2<Double>, drain: Bool, active: Int) {
+    // Encodes pending generation for levels 1...active (or level `only` alone): one piece, or with `drain` everything
+    // the camera position needs. Levels past `active` are dropped, to be rebuilt whole once they are active again.
+    func encode(into cb: MTLCommandBuffer, center: SIMD2<Double>, drain: Bool, active: Int, only: Int? = nil) {
         for i in active..<Clipmap.levels { lo[i] = nil }
-        if let j = job, j.level >= active { job = nil }
+        if let j = job, j.level >= active || only.map({ j.level != $0 - 1 }) ?? false { job = nil }
         // A level more than a strip behind the camera could soon be read past its window: catch it up at once. In
         // flight that never happens: at 15 voxels/s a level-1 strip falls due at most every 8.5 s and takes 17
         // frames. Only the outermost level, which the edge waits for, is ever built whole in pieces.
@@ -578,11 +578,11 @@ final class Clipmap {
             return lo[i].map { abs($0.x - t.x) > Int32(Clipmap.snap) || abs($0.y - t.y) > Int32(Clipmap.snap) } ?? (i < active - 1)
         }
         var budget = drain || lagging ? Int.max : 1
-        if job == nil { job = nextJob(center, active: active) }
+        if job == nil { job = nextJob(center, active: active, only: only) }
         guard job != nil, let enc = cb.makeComputeCommandEncoder() else { return }
         defer { enc.endEncoding() }
         while budget > 0 {
-            if job == nil { job = nextJob(center, active: active) }
+            if job == nil { job = nextJob(center, active: active, only: only) }
             guard var j = job else { return }
             let full = j.w == Int32(Clipmap.size) && j.h == Int32(Clipmap.size)
             let long = max(j.w, j.h)
@@ -813,9 +813,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         camera.sitesAt = { [unowned world] in world.sites }
         wildlife.heightAt = camera.heightAt
         world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
-        refreshFar(wait: true)
+        // Placing the camera reads only the far heights, which level 3 holds: the CPU waits for that level alone.
+        refreshFar(wait: true, only: 3)
         camera.placeAtStart()
-        // The coarse rings are built ahead of the first frame on the same queue, which orders that frame after them;
+        // The other rings are built ahead of the first frame on the same queue, which orders that frame after them;
         // nothing waits on the CPU. Afterwards only strips are rewritten.
         if let cb = queue.makeCommandBuffer() {
             let t0 = CACurrentMediaTime()
@@ -1226,9 +1227,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
 
     // Brings the rings to the camera and reads the far heights back at once (startup and snapshots).
-    private func refreshFar(wait: Bool) {
+    private func refreshFar(wait: Bool, only: Int? = nil) {
         guard let cb = queue.makeCommandBuffer() else { return }
-        clipmap.encode(into: cb, center: SIMD2(camera.position.x, camera.position.z), drain: true, active: activeLevels)
+        clipmap.encode(into: cb, center: SIMD2(camera.position.x, camera.position.z), drain: true, active: activeLevels, only: only)
         encodeFar(into: cb, wait: true)
         cb.commit()
         cb.waitUntilCompleted()
