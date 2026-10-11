@@ -430,7 +430,7 @@ static inline float megaTerrace(float h, float U, float wK, float td, uint seed)
     return min(mix(hm, (lv3 + smoothstep(e3, 1.0, hn3 - lv3)) * tdm, smoothstep(0.5, 30.0, U) * (1.0 - wK)), TERRAIN_CEIL);
 }
 
-static inline Col terrainColumn(int2 w, uint seed) {
+static inline Col terrainColumnBase(int2 w, uint seed) {
     float2 p = float2(w) + seedOffset(seed);
     float2 warp = float2(fbm2(p / 900.0, 2, seed + 1), fbm2(p / 900.0 + 37.1, 2, seed + 2)) * 300.0;
     float c = saturate(fbm2((p + warp) / 2000.0, 3, seed + 3) * 1.4 + 0.5);
@@ -544,6 +544,615 @@ static inline Col terrainColumn(int2 w, uint seed) {
     col.h = h; col.gl = gl; col.gh = gh;
     return col;
 }
+
+// MARK: - Ruined towers
+
+// Rare, colossal ruined towers. A tower is a landform: terrainColumn adds it to the column, so the 1-voxel map, every
+// coarse ring, the max mips, the horizon, the shadow maps and the CPU copy (camera, birds) all carry it. A world cell
+// TOWER_CELL wide holds at most one group of 1 to 3 towers, centred in the middle half of the cell; nothing of a group
+// lies farther than TOWER_GROUP_R from that centre, so a column asks its own cell only. Whether a group stands is
+// decided at its centre alone (climate, provinces), so every map and ring decides it alike.
+constant float TOWER_CELL = 9000.0;
+// Chance a cell holds a group where the climate weighs 1 (wet, warm country weighs 1.5).
+constant float TOWER_P = 0.4;
+constant float TOWER_GROUP_R = 2250.0;
+constant int TOWER_MEMBERS = 4;
+// The widest base apothem any member can draw (drums), for spacing a group.
+constant float TOWER_R_MAX = 150.0;
+// Records in the shading table (fragment buffer 9); must match Towers.tableSize in Sources/Towers.swift.
+constant int TOWER_TABLE = 16;
+// Function constant 1: false compiles the towers out of sceneFragment, for frames with none in view. Compiled in, even
+// unused, they slow every pixel's shading.
+constant bool sceneTowers [[function_constant(1)]];
+
+struct Tower {
+    float2 c;              // world xz of the base's axis
+    float R0;              // the base shaft's apothem
+    float Hb;              // the ground it stands on (the lake's surface where it stands in water)
+    float Ht;              // its full height above Hb
+    int K;                 // stages; the top two are one hollow shell
+    int N;                 // sides of the plan
+    float rot, th0, th1;   // plan rotation; the bearing the crown fell toward; the bearing of the wound
+    int kb;                // the wounded stage
+    float Sy, bw;          // storey height, bay width
+    uint h;
+    int kind;              // 0 stepped spire, 1 drum, 2 needle
+    float reach;           // nothing of it, rubble included, lies farther than this from c
+};
+
+struct TowerGroup { float2 c; uint h; int n; };
+
+// A tower's build, by its hash alone (the shading table holds the hash): 0 a slender spire, 1 a broad terraced keep of
+// a few deep setbacks, 2 the stump of a great drum, its upper storeys long fallen.
+static inline int towerStyle(uint h) {
+    float u = hashf(pcg(h + 15u));
+    return u < 0.4 ? 0 : u < 0.72 ? 1 : 2;
+}
+
+static inline bool towerGroupIn(int2 cell, uint seed, thread TowerGroup& g) {
+    uint h = hash2i(cell, seed + 500u);
+    if (hashf(h) >= TOWER_P * 1.5) return false;
+    g.h = h;
+    g.c = (float2(cell) + 0.25 + 0.5 * float2(hashf(pcg(h + 1u)), hashf(pcg(h + 2u)))) * TOWER_CELL;
+    float u = hashf(pcg(h + 3u));
+    // Mostly alone; a pair now and then; three rarely, the third a stump. More read as a skyline.
+    g.n = u < 0.65 ? 1 : u < 0.95 ? 2 : 3;
+    return true;
+}
+
+// Member m of a group, all but its base height: hashes only.
+static inline Tower towerMember(TowerGroup g, int m) {
+    Tower T;
+    uint h0 = pcg(g.h + 11u);
+    // The first stands tallest; a few pierce the cloud deck.
+    float Ht0 = floor(420.0 + 780.0 * pow(hashf(h0), 1.5));
+    uint h = m == 0 ? h0 : pcg(g.h + 101u * uint(m));
+    for (int i = 0; i < 8 && m == 2 && towerStyle(h) != 2; i++) h = pcg(h + 7u);
+    T.h = h;
+    float u = hashf(pcg(h + 1u));
+    int st = towerStyle(h);
+    // A slender drum reads as a modern stack: the spires are stepped or needles, the drums broad.
+    T.kind = st == 0 ? (u < 0.7 ? 0 : 2) : (u < 0.55 ? 0 : 1);
+    T.Ht = m == 0 ? Ht0 : floor(Ht0 * (0.38 + 0.4 * hashf(pcg(h + 2u))));
+    if (st == 2) T.Ht = floor(T.Ht * (0.42 + 0.18 * hashf(pcg(h + 17u))));
+    float u3 = hashf(pcg(h + 3u));
+    float girth = st == 0 ? 0.08 + 0.04 * u3 : st == 1 ? 0.13 + 0.05 * u3 : 0.2 + 0.08 * u3;
+    T.R0 = floor(clamp(T.Ht * girth, 36.0, 130.0) * (T.kind == 1 ? 1.15 : T.kind == 2 ? 0.85 : 1.0));
+    T.K = T.kind == 2 ? 3 + int(pcg(h + 4u) % 2u) : st == 1 ? 4 + int(pcg(h + 4u) % 2u) : st == 2 ? 3 + int(pcg(h + 4u) % 2u)
+        : 3 + int(pcg(h + 4u) % 3u);
+    T.N = T.kind == 0 ? (hashf(pcg(h + 5u)) < 0.5 ? 6 : 8) : 12;
+    T.rot = hashf(pcg(h + 6u)) * 6.2831853 / float(T.N);
+    T.th0 = hashf(pcg(h + 7u)) * 6.2831853;
+    T.th1 = T.th0 + 2.0 + 2.0 * hashf(pcg(h + 8u));
+    T.kb = 1 + int(pcg(h + 9u) % 2u);
+    T.Sy = floor(16.0 + 6.0 * hashf(pcg(h + 10u)));
+    T.bw = floor(11.0 + 3.0 * hashf(pcg(h + 12u)));
+    T.reach = T.R0 * 2.8;
+    T.c = floor(g.c) + 0.5;
+    if (m > 0) {
+        // Round the first, each in its own sector, far enough that no two reaches meet.
+        float a = hashf(pcg(g.h + 21u)) * 6.2831853 + float(m - 1) * 6.2831853 / float(max(g.n - 1, 1))
+                + 0.6 * (hashf(pcg(h + 13u)) - 0.5);
+        float d = 2.8 * (T.R0 + TOWER_R_MAX) + 500.0 + 600.0 * hashf(pcg(h + 14u));
+        T.c = floor(g.c + float2(cos(a), sin(a)) * d) + 0.5;
+    }
+    T.Hb = 0.0;
+    return T;
+}
+
+// The field megaLift's provinces rise from (they stand where it passes 0.5; keep in step with megaLift), and whether a
+// tepui stands within d of p: what a tower group asks instead of megaLift itself, which every column of the group would
+// otherwise evaluate many times over.
+static inline float towerProvinceField(float2 p, uint seed) {
+    float2 cw = float2(fbm2(p / 7000.0, 2, seed + 200u), fbm2(p / 7000.0 + 71.3, 2, seed + 201u)) * 3000.0;
+    return fbm2((p + cw) / 16000.0, 3, seed + 202u) * 1.6 + 0.5;
+}
+
+static inline bool towerNearTepui(float2 p, float d, uint seed) {
+    const float CELL = 30000.0;
+    int2 c0 = int2(floor(p / CELL));
+    for (int j = -1; j <= 1; j++)
+        for (int i = -1; i <= 1; i++) {
+            int2 cell = c0 + int2(i, j);
+            uint hc = hash2i(cell, seed + 240u);
+            if (hashf(hc) >= 0.35) continue;
+            float2 c = (float2(cell) + 0.25 + 0.5 * float2(hashf(pcg(hc)), hashf(pcg(hc + 1u)))) * CELL;
+            if (length(p - c) < 1500.0 + 1300.0 + 520.0 + d) return true;
+        }
+    return false;
+}
+
+// Whether the group fits its country: lowland well clear of the provinces (it out-scales the land there; beside a
+// province's walls it is dwarfed) and of the tepuis, never on a salt pan, most often in wet, warm country, where the
+// jungle has half reclaimed it.
+static inline bool towerGroupFits(TowerGroup g, uint seed, thread float& lag) {
+    Climate cl = climate(g.c, seed);
+    if (saltAmount(cl) > 0.1) return false;
+    float wgt = mix(1.0, 1.5, smoothstep(0.45, 0.65, cl.moist) * smoothstep(0.4, 0.55, cl.temp));
+    wgt *= mix(1.0, 0.5, smoothstep(0.35, 0.7, desertAmount(cl)));
+    wgt *= mix(1.0, 0.3, smoothstep(0.32, 0.2, cl.temp));
+    if (hashf(g.h) >= TOWER_P * wgt) return false;
+    float2 p = g.c + seedOffset(seed);
+    if (towerProvinceField(p, seed) > 0.46) return false;
+    for (int i = 0; i < 4; i++) {
+        float a = float(i) * 1.5707963 + 0.785398;
+        if (towerProvinceField(p + float2(cos(a), sin(a)) * 2500.0, seed) > 0.5) return false;
+    }
+    if (towerNearTepui(p, 2500.0, seed)) return false;
+    lag = lagoonAmount(cl);
+    return true;
+}
+
+// Whether the group stands: it fits, and most stand on dry land; some in a lake or a river's bed, more often in lagoon
+// country.
+static inline bool towerGroupStands(TowerGroup g, uint seed) {
+    float lag = 0.0;
+    if (!towerGroupFits(g, seed, lag)) return false;
+    if (terrainColumnBase(int2(floor(g.c)), seed).h >= SEA + 2.0 || lag >= 1.0) return true;
+    return hashf(pcg(g.h + 5u)) < mix(0.3, 1.0, lag);
+}
+
+// A member whose ground stands higher than this (a group's edge reaching up a province's slopes) is not built.
+constant float TOWER_BASE_MAX = 130.0;
+
+// A member's base: the ground at its axis, or the lake's surface where it stands in water.
+static inline float towerBase(Tower T, uint seed) {
+    return max(terrainColumnBase(int2(floor(T.c)), seed).h, floor(SEA) + 1.0);
+}
+
+// The member whose reach (plus margin) holds wf, by hashes only (members never share ground); the caller still asks
+// towerGroupStands.
+static inline bool towerFind(float2 wf, float margin, uint seed, thread Tower& T, thread TowerGroup& g) {
+    if (!towerGroupIn(int2(floor(wf / TOWER_CELL)), seed, g)) return false;
+    if (length(wf - g.c) > TOWER_GROUP_R + margin) return false;
+    for (int m = 0; m < TOWER_MEMBERS; m++) {
+        if (m >= g.n) break;
+        Tower t = towerMember(g, m);
+        if (length(wf - t.c) < t.reach + margin) { T = t; return true; }
+    }
+    return false;
+}
+
+// Fraction of the height at the top of stage k of a tower of K stages and hash h: a tall base shaft, then setback
+// stages of uneven height. (The shading table holds h and K, so the masonry finds the ledges too.)
+static inline float tierTop(uint h, int k, int K) {
+    float acc = 0.0, tot = 0.0;
+    for (int i = 0; i < 6; i++) {
+        if (i >= K) break;
+        float u = hashf(pcg(h + 80u + uint(i)));
+        float wgt = i == 0 ? (towerStyle(h) == 1 ? 1.0 + 0.6 * u : 1.4 + 1.2 * u) : 0.65 + 0.6 * u;
+        tot += wgt;
+        if (i <= k) acc += wgt;
+    }
+    return acc / tot;
+}
+
+// Stage k's apothem as a share of the base's: each setback its own depth (the shell's two stages share one).
+static inline float towerTierScale(Tower T, int k) {
+    float r = 1.0;
+    for (int i = 1; i < 6; i++) {
+        if (i > min(k, T.K - 2)) break;
+        float u = hashf(pcg(T.h + 90u + uint(i)));
+        r -= T.kind == 2 ? 0.14 + 0.1 * u : towerStyle(T.h) == 1 ? 0.12 + 0.1 * u : 0.09 + 0.14 * u;
+    }
+    return r;
+}
+
+// Stage k's axis: the upper stages stand off the base's, mostly toward one side, so a setback is a broad terrace on one
+// side and narrow on the other (concentric setbacks read as a wedding cake; near flush, as fins down the face).
+static inline float2 towerStageAxis(Tower T, int k) {
+    int j = min(k, T.K - 2);
+    if (j <= 0) return T.c;
+    uint h = pcg(T.h + 40u + uint(j));
+    float a = hashf(pcg(T.h + 39u)) * 6.2831853 + 1.6 * (hashf(h) - 0.5);
+    return T.c + float2(cos(a), sin(a)) * T.R0 * (1.0 - towerTierScale(T, j)) * (0.2 + 0.3 * hashf(pcg(h)));
+}
+
+struct TowerPlan { float r; float a; float am; float reff; float t; int face; float2 dir; };
+
+// The plan's coordinates of offset d from an axis: reff, the distance to the face's line (faces are flat walls with
+// square corners), t along the face, am the bearing from the face's middle.
+static inline TowerPlan towerPlan(Tower T, float2 d) {
+    TowerPlan P;
+    P.r = length(d);
+    P.dir = P.r > 1e-3 ? d / P.r : float2(1, 0);
+    P.a = atan2(d.y, d.x);
+    float seg = 6.2831853 / float(T.N);
+    float fi = floor((P.a - T.rot) / seg);
+    P.face = (int(fi) % T.N + T.N) % T.N;
+    P.am = P.a - T.rot - seg * fi - 0.5 * seg;
+    P.reff = P.r * cos(P.am);
+    P.t = P.r * sin(P.am);
+    return P;
+}
+
+// Stage k's apothem. (Corner piers drew a crisp vertical line down every corner: art deco, not a ruin.)
+static inline float tierR(Tower T, TowerPlan P, int k) {
+    return T.R0 * towerTierScale(T, k);
+}
+
+// Top of stage k (below the shell) at this bearing.
+static inline float tierY(Tower T, TowerPlan P, int k, uint seed) {
+    float t1 = tierTop(T.h, k, T.K), t0 = k > 0 ? tierTop(T.h, k - 1, T.K) : 0.0;
+    float hk = T.Ht * (t1 - t0);
+    float y = T.Hb + T.Ht * t1;
+    // The rim is worn at a broad angular scale, so a ledge stays level along whole faces.
+    y -= floor(6.0 * abs(perlin2(P.dir * 2.2 + float(k) * 5.1, seed + 503u)));
+    float fall = 0.5 + 0.5 * cos(P.a - T.th0);
+    // The stage under the shell slumped on the side the crown fell to.
+    if (k == T.K - 3) y -= floor(hk * 0.55 * smoothstep(0.55, 0.95, fall) * saturate(0.5 + perlin2(P.dir * 3.0, seed + 504u)) / 5.0) * 5.0;
+    return floor(y);
+}
+
+// Top of the shell's wall: broken away down to stumps on the side the crown fell toward, rising round the shell to a
+// ragged peak opposite, the break stepping down in whole courses a few columns at a time.
+static inline float crownY(Tower T, TowerPlan P, float y0, float y1, uint seed) {
+    float up = 0.5 - 0.5 * cos(P.a - T.th0);
+    float nz = perlin2(P.dir * 2.1 + float(T.h & 63u), seed + 544u);
+    // Each crown broke its own way: a ragged peak opposite the fall, a low ring worn all round (every stump), or one
+    // tall shard.
+    float cr = hashf(pcg(T.h + 16u));
+    float g = 0.9 * up * up * (3.0 - 2.0 * up) - 0.08 + 0.38 * nz;
+    if (towerStyle(T.h) == 2 || cr < 0.35) g = 0.15 + 0.3 * up + 0.5 * perlin2(P.dir * 3.3 + float(T.h & 63u), seed + 548u);
+    else if (cr > 0.75) g = 1.15 * pow(up, 6.0) - 0.05 + 0.2 * nz;
+    // Masonry breaks in blocks: one or two courses up or down per 16th of the round.
+    uint sh = hash2i(int2(int(floor((P.a + 3.14159265) / 6.2831853 * 24.0)), int(T.h & 1023u)), seed + 545u);
+    float y = y0 + (y1 - y0) * saturate(g) + 5.0 * floor(3.0 * hashf(sh) - 1.0);
+    return clamp(floor(y / 5.0) * 5.0, y0 + 3.0, y1);
+}
+
+// Stage k's bay width on plan face `face`: each face of each stage laid out on its own.
+static inline float towerBayW(uint h, int k, int face, float bw) {
+    return floor(bw * (0.8 + 0.7 * hashf(hash3i(int3(face, k, 7), h + 122u))));
+}
+
+// Whether stage k's loggia opens bay `bay` of plan face `face` (tower hash h): about half the stages have none, some an
+// arcade all round, some arches in pairs; whole runs of bays are walled up or gone, and here and there one bay. Rows of
+// identical arches on every stage read as a block of flats.
+static inline bool towerLoggiaBay(uint h, int k, int face, float bay) {
+    float u = hashf(pcg(h + 120u + uint(k)));
+    if (u < 0.45) return false;
+    int b = int(bay);
+    if (u > 0.78 && ((b % 3) + 3) % 3 == 0) return false;
+    if (hashf(hash3i(int3(face, int(floor(bay / 4.0)), k), h + 124u)) < 0.35) return false;
+    return hashf(hash3i(int3(face, b, k), h + 121u)) > 0.12;
+}
+
+// Whether an open bay's arch and the rim over it have fallen, leaving a notch down to the loggia's floor.
+static inline bool towerBayFallen(uint h, int k, int face, float bay) {
+    return hashf(hash3i(int3(face, int(bay), k), h + 123u)) < 0.22;
+}
+
+// How deep the masonry is weathered back from stage face P (apothem R) at height y, in whole courses, deepest
+// at the corners, some faces worn hard and others nearly sound. Isotropic in the face's plane, so it never streaks.
+static inline float towerErosion(Tower T, TowerPlan P, float R, float y, uint seed) {
+    float3 q = float3(P.dir.x * R, y * 0.7, P.dir.y * R);
+    float n = perlin3(q / 34.0, seed + 541u) + 0.4 * perlin3(q / 12.0, seed + 542u);
+    float corner = smoothstep(0.3, 0.5, abs(P.am) * float(T.N) / 6.2831853);
+    float zone = saturate(perlin3(float3(P.dir * 1.6, y / 170.0), seed + 543u) * 2.0 + 0.2);
+    float e = 16.0 * saturate((n + 0.3 * corner) * 2.0 - 0.5) * zone;
+    // At least 6 deep wherever the face is worn at all: a depth from zero would follow the jogs of a diagonal face and
+    // carve it in slivers a column wide.
+    return e < 0.5 ? 0.0 : max(e, 6.0);
+}
+
+// The roots of the trees that took the tower, poured down its base onto the plinth: a few fans round the base, each
+// some ridges that leave the wall together high up and part as they run out over the plinth, thinning. The root mass's
+// height over the plinth's top at plan P (from the base's axis), 0 where there is none. towerSurface takes a column
+// outside the base and above the plinth's top for root.
+// The talus of fallen masonry heaped against the base at plan P (from the base's axis), world wf, deepest and widest on
+// the side the crown fell to, lumpy, gone by 0.4 R0 out: x its height over the slope from the outer plinth's top at the
+// wall down to the ground y out, y its share of the way to the wall.
+static inline float2 towerTalus(Tower T, TowerPlan P, float2 wf, int s, uint seed) {
+    float e = P.reff - T.R0;
+    if (e < 0.0) return 0.0;
+    float fall = 0.5 + 0.5 * cos(P.a - T.th0);
+    float L = T.R0 * (0.24 + 0.14 * fall) * (0.85 + 0.3 * saturate(0.5 + perlin2(P.dir * 4.1, seed + 518u)));
+    float f = saturate(1.0 - e / L);
+    if (f <= 0.0) return 0.0;
+    float amp = T.R0 * (0.15 + 0.15 * fall) * (0.6 + 0.4 * saturate(0.5 + 0.9 * perlin2(P.dir * 2.3, seed + 517u)));
+    // Octaves finer than a coarse ring's columns would alias there, and its talus differ from the finer ring's.
+    float lump = (s < 8 ? 4.0 * perlin2(wf / 8.0, seed + 519u) : 0.0) + (s < 4 ? 1.5 * perlin2(wf / 3.5, seed + 524u) : 0.0);
+    return float2(max(amp * f * sqrt(f) + lump * saturate(f * 3.0), 0.0), f);
+}
+
+static inline float towerRootH(Tower T, TowerPlan P, uint seed) {
+    float e = P.reff - T.R0;
+    if (e < 0.0 || e > 0.45 * T.R0) return 0.0;
+    float best = 0.0;
+    int nf = 2 + int(pcg(T.h + 150u) % 3u);
+    for (int i = 0; i < 4; i++) {
+        if (i >= nf) break;
+        uint h = pcg(T.h + 151u + uint(i) * 7u);
+        float da = P.a - hashf(h) * 6.2831853;
+        da -= 6.2831853 * floor(da / 6.2831853 + 0.5);
+        float t = da * T.R0;
+        // A fan widening as it runs out, its edge wandering.
+        float hw = 9.0 + 7.0 * hashf(pcg(h + 3u)) + 0.5 * e + 4.0 * perlin2(float2(e / 14.0, float(i) * 3.3), seed + 571u);
+        if (abs(t) > hw) continue;
+        float Hr = 14.0 + 22.0 * hashf(pcg(h + 1u));
+        float len = T.R0 * (0.25 + 0.2 * hashf(pcg(h + 2u)));
+        float f = saturate(1.0 - e / len);
+        // Separate roots part out of the mass: channels between them deepen outward.
+        float ch = abs(perlin2(float2(t / 5.0, e / 22.0), seed + 572u));
+        float y = (Hr * f * f + 2.0 * f) * smoothstep(hw, hw * 0.6, abs(t)) * (1.0 - smoothstep(0.08, 0.02, ch) * (1.0 - f * f));
+        best = max(best, floor(y));
+    }
+    return best;
+}
+
+// The tower's share of column wf: its plinth, stages, shell and openings over the terrain column col. s: the column
+// width this is sampled for (coarse level k: 2^k); from 4 on, no hollows or openings, which the samples would alias.
+static inline Col towerShape(Col col, Tower T, float2 wf, int s, uint seed) {
+    float2 d0 = wf - T.c;
+    TowerPlan P0 = towerPlan(T, d0);
+    // Rubble of the fallen crown in a lobe toward th0: mounds only (loose blocks read as toys).
+    float2 f0 = float2(cos(T.th0), sin(T.th0));
+    float along = dot(d0, f0), across = abs(dot(d0, float2(-f0.y, f0.x)));
+    float lobe = smoothstep(T.R0 * 0.9, T.R0 * 1.4, along) * smoothstep(T.R0 * 2.7, T.R0 * 1.7, along)
+               * smoothstep(T.R0 * (0.8 + 0.003 * along), T.R0 * 0.3, across);
+    if (lobe > 0.0) {
+        float mnd = perlin2(wf / 23.0, seed + 510u) * 0.7 + perlin2(wf / 9.0, seed + 511u) * 0.3;
+        col.h = max(col.h, floor(col.h + 16.0 * lobe * saturate(mnd + 0.4)));
+    }
+    // The plinth: two broad platforms, cut and filled level, the outer one broken up and gone in places.
+    if (P0.reff >= T.R0 * 1.42) return col;
+    float inner = T.R0 * (1.2 + 0.08 * perlin2(P0.dir * 3.7, seed + 520u));
+    // Where the ground falls away there is no plinth: built out over it, it stood on a sheer pedestal of ground.
+    float ground = col.h;
+    if (ground > T.Hb - 12.0) col.h = P0.reff < inner ? T.Hb + 6.0 : perlin2(wf / 37.0, seed + 521u) > -0.15 ? T.Hb + 3.0 : col.h;
+    col.gl = 0; col.gh = 0; col.lo1 = 0; col.hi1 = 0; col.lo2 = 0; col.hi2 = 0; col.carved = false;
+    // The highest stage whose plan covers the column, and how far outside each stage's plan it lies.
+    int m = -1;
+    float Rm = 0.0;
+    TowerPlan Pm = P0;
+    float out[6] = { 0, 0, 0, 0, 0, 0 };
+    for (int k = 0; k < 6; k++) {
+        if (k >= T.K) break;
+        TowerPlan Pk = towerPlan(T, wf - towerStageAxis(T, k));
+        float Rk = tierR(T, Pk, k);
+        out[k] = Pk.reff - Rk;
+        if (Pk.reff < Rk) { m = k; Rm = Rk; Pm = Pk; }
+    }
+    if (m < 0) {
+        float root = s < 4 ? towerRootH(T, P0, seed) : 0.0;
+        float2 tal = towerTalus(T, P0, wf, s, seed);
+        col.h = max(col.h + root, floor(mix(min(ground, T.Hb + 3.0), T.Hb + 3.0, tal.y) + tal.x));
+        return col;
+    }
+    bool shell = m >= T.K - 2;
+    float yS = tierY(T, Pm, T.K - 3, seed);                       // the shell stands on this
+    float y0 = m == 0 ? T.Hb + 6.0 : shell ? yS : tierY(T, Pm, m - 1, seed);
+    float H = shell ? crownY(T, Pm, yS, T.Hb + T.Ht, seed) : tierY(T, Pm, m, seed);
+    float wallIn = Rm - Pm.reff;
+    // Whole sections of a stage's outer wall have fallen from the top, in broad bites, so no two stages share an outline;
+    // each bite a few dozen courses at most (cut down a whole stage, a bite's sides ran down the face as crisp lines).
+    float bite = 30.0 * saturate(perlin2(Pm.dir * 2.6 + float(m) * 2.3, seed + 506u) * 1.7 - 0.2) * (m == 0 ? 0.6 : 1.0);
+    if (!shell && bite > 4.0 && wallIn < bite * (0.7 + 0.5 * perlin2(wf / 9.0, seed + 533u)))
+        H = max(y0 + 3.0, H - floor(min((H - y0) * (0.15 + 0.01 * bite), 25.0 + 2.0 * bite) / 5.0) * 5.0);
+    // Chunks bitten out of the corners, part of a stage's height, their edges ragged. (Stepped down toward the corner,
+    // they drew more setbacks.)
+    float seg = 6.2831853 / float(T.N);
+    uint ch = hash3i(int3((Pm.face + (Pm.am > 0.0 ? 1 : 0)) % T.N, m, int(T.h & 1023u)), seed + 515u);
+    if (hashf(ch) < 0.65) {
+        float hf = Rm * tan(0.5 * seg);
+        float drop = min((H - y0) * (0.25 + 0.5 * hashf(pcg(ch + 1u))), 20.0 + 50.0 * hashf(pcg(ch + 2u)));
+        float dc = hf - abs(Pm.t) + (s < 8 ? 7.0 * perlin2(wf / 7.0, seed + 523u) : 0.0) + 0.3 * drop * perlin2(wf / 13.0, seed + 530u);
+        if (dc < hf * (0.25 + 0.45 * hashf(pcg(ch))))
+            H = max(y0, H - floor(drop / 5.0) * 5.0);
+    }
+    // The parapet along each rim broken down a course or three, in runs of a few columns.
+    if (!shell && wallIn < 8.0 + 0.05 * T.R0)
+        H = max(y0, H - 5.0 * floor(3.5 * saturate(perlin2(wf / 11.0, seed + 531u) + (s < 4 ? 0.6 * perlin2(wf / 4.0, seed + 532u) : 0.0) + 0.15)));
+    // A great collapse on most towers: a wedge of the upper storeys fallen on the crown's side, its floor broken in
+    // courses, the outer skin gone deeper than the core.
+    uint hc = pcg(T.h + 30u);
+    if (hashf(hc) < 0.75) {
+        float thc = T.th0 + 0.9 * (hashf(pcg(hc)) - 0.5);
+        float da = P0.a - thc;
+        da -= 6.2831853 * floor(da / 6.2831853 + 0.5);
+        float u = abs(da) / (0.3 + 0.4 * hashf(pcg(hc + 1u))) + 0.25 * perlin2(wf / 23.0, seed + 525u);
+        if (u < 1.0) {
+            float yF = T.Hb + T.Ht * (0.3 + 0.35 * hashf(pcg(hc + 2u)));
+            float yc = yF + (T.Hb + T.Ht - yF) * u * u + 1.2 * wallIn;
+            uint bh = hash2i(int2(floor(wf / 6.0)), seed + 526u);
+            yc = floor(yc / 5.0) * 5.0 + 5.0 * floor(3.0 * hashf(bh) - 1.0);
+            H = min(H, max(yc, T.Hb + 6.0));
+        }
+    }
+    // Weathering: the top crumbles back course by course where the worn skin has gone, a few courses at most: run down a
+    // whole stage, the worn skin cut grooves down the face, a crisp line each. (Pockets cut in the face read as dark
+    // bricks or windows punched in it, so none are.)
+    if (wallIn < 16.0 && s < 8) {
+        float yl = max(y0, H - 25.0);
+        for (float yc = y0 + 5.0 * (ceil((H - y0) / 5.0) - 1.0); yc > yl; yc -= 5.0) {
+            if (wallIn >= towerErosion(T, Pm, Rm, yc + 2.5, seed)) break;
+            H = yc;
+        }
+    }
+    // Rubble heaped in mounds on the tread at the foot of the stage above.
+    if (!shell && H > y0 + 3.0) {
+        float L = max(8.0, 0.45 * T.R0 * (towerTierScale(T, m) - towerTierScale(T, m + 1)));
+        float f = saturate(1.0 - out[m + 1] / L);
+        if (f > 0.0)
+            H += floor((3.0 + 0.1 * T.R0) * f * sqrt(f) * saturate(0.35 + perlin2(wf / 19.0, seed + 527u) + (s < 8 ? 0.4 * perlin2(wf / 7.0, seed + 528u) : 0.0)));
+    }
+    float gaps[6] = { 0, 0, 0, 0, 0, 0 };
+    int ng = 0;
+    // A stage fallen away beneath the one above (the wound): a sector of stage kb's outer mass is gone, the stages over
+    // it overhang.
+    if (T.kb <= m && T.kb < T.K - 2) {
+        TowerPlan Pb = towerPlan(T, wf - towerStageAxis(T, T.kb));
+        float Rk = tierR(T, Pb, T.kb);
+        float lobeW = 0.5 + 0.5 * cos(Pb.a - T.th1);
+        float depth = T.R0 * 0.35 * smoothstep(0.82, 0.97, lobeW) * saturate(0.7 + perlin2(Pb.dir * 8.0, seed + 513u));
+        if (Pb.reff > Rk - depth) {
+            float yb0 = tierY(T, Pb, T.kb - 1, seed) + 8.0 + floor(10.0 * abs(perlin2(Pb.dir * 6.0, seed + 514u)));
+            float yb1 = tierY(T, Pb, T.kb, seed) - 4.0;
+            if (m == T.kb) H = min(H, yb0);
+            else if (s < 4 && yb1 - yb0 > 6.0) { gaps[0] = yb0; gaps[1] = yb1; ng = 1; }
+        }
+    }
+    if (shell && Pm.reff < Rm - max(10.0, 1.5 * float(s))) {
+        // The shell is open to the sky, its floor a court where a grove can root. Every ring keeps the court: filled, its
+        // top would follow the crown's broken rim and show a radial pattern from above. The wall thickens with the
+        // samples' spacing, or whole runs of the rim would fall between them and the crown lose its silhouette.
+        H = min(H, yS + 3.0);
+    }
+    if (s < 4) {
+        // A passage through the base under arches, in some towers.
+        if ((T.h & 128u) != 0u && ng < 3) {
+            float2 pd = float2(cos(T.th1 + 1.5708), sin(T.th1 + 1.5708));
+            float off = abs(d0.x * pd.y - d0.y * pd.x);
+            if (off < 7.0 && P0.reff < T.R0) {
+                float hi = T.Hb + 36.0 + floor(0.2 * T.R0) - floor(6.0 * (off / 7.0) * (off / 7.0));
+                gaps[2 * ng] = T.Hb + 6.0; gaps[2 * ng + 1] = min(hi, H - 4.0); ng++;
+            }
+        }
+        // Great portals in the base's faces.
+        if (m == 0 && P0.face % (T.N > 8 ? 3 : 2) == 0 && abs(Pm.t) < 7.0 && wallIn < 14.0 && ng < 3) {
+            float hi = T.Hb + 40.0 - floor(4.0 * (Pm.t / 7.0) * (Pm.t / 7.0));
+            gaps[2 * ng] = T.Hb + 6.0; gaps[2 * ng + 1] = min(hi, H - 4.0); ng++;
+        }
+        bool through = shell && Pm.reff >= Rm - 10.0;
+        float bwF = towerBayW(T.h, m, Pm.face, T.bw);
+        float bay = floor(Pm.t / bwF + 0.5);
+        float dt = abs(Pm.t - bay * bwF);
+        int ns = int((H - y0) / T.Sy);
+        // A loggia under each stage's rim: a storey of deep arches round the stage, wherever its top still stands.
+        if (!shell && wallIn < 6.0 && dt < 0.32 * bwF && ng < 3 && towerLoggiaBay(T.h, m, Pm.face, bay)) {
+            float top = tierY(T, Pm, m, seed);
+            float hi = top - 4.0 - (dt > 0.25 * bwF ? 2.0 : dt > 0.18 * bwF ? 1.0 : 0.0);
+            float lo = top - 4.0 - floor(T.Sy * 1.1);
+            if (hi <= H - 3.0 && lo > y0 + 4.0) {
+                if (towerBayFallen(T.h, m, Pm.face, bay)) H = lo;
+                else { gaps[2 * ng] = lo; gaps[2 * ng + 1] = hi; ng++; }
+            }
+        }
+        // Arcades through the shell's wall: on each face a few of every other storey, bays missing from them. (Single
+        // windows in the stage walls read as slots punched in a slab, a grid of them as a block of flats.)
+        if (through && dt < 3.0) {
+            for (int st = 40; st >= 0; st--) {
+                if (ng >= 3) break;
+                if (st >= ns || (st & 1) != 0 || hashf(hash3i(int3(Pm.face, st, 9), T.h + 125u)) > 0.4
+                    || hashf(hash3i(int3(Pm.face, int(bay), st + 16), T.h + 121u)) < 0.3) continue;
+                float lo = y0 + float(st) * T.Sy + 3.0;
+                float hi = lo + floor(T.Sy * 0.75) - (dt > 2.0 ? 2.0 : dt > 1.0 ? 1.0 : 0.0);
+                if (hi > H - 3.0) continue;
+                gaps[2 * ng] = lo; gaps[2 * ng + 1] = hi; ng++;
+            }
+        }
+    }
+    col.h = min(max(col.h, floor(H)), TERRAIN_CEIL);
+    // Highest gap first.
+    for (int i = 0; i < 3; i++)
+        for (int j = i + 1; j < 3; j++)
+            if (gaps[2 * j + 1] > gaps[2 * i + 1]) {
+                float a0 = gaps[2 * i], a1 = gaps[2 * i + 1];
+                gaps[2 * i] = gaps[2 * j]; gaps[2 * i + 1] = gaps[2 * j + 1];
+                gaps[2 * j] = a0; gaps[2 * j + 1] = a1;
+            }
+    col.gl = floor(gaps[0]); col.gh = floor(gaps[1]);
+    col.lo1 = floor(gaps[2]); col.hi1 = floor(gaps[3]);
+    col.lo2 = floor(gaps[4]); col.hi2 = floor(gaps[5]);
+    col.carved = col.gh > col.gl;
+    return col;
+}
+
+static inline Col towerColumn(Col col, int2 w, uint seed, int s) {
+    float2 wf = float2(w) + 0.5;
+    Tower T;
+    TowerGroup g;
+    if (!towerFind(wf, 0.0, seed, T, g)) return col;
+    // Most of a member's reach is open ground, off its plinth and its rubble: those columns are let go before asking
+    // whether the group stands, which costs two terrain columns and the province fields.
+    float2 d0 = wf - T.c, f0 = float2(cos(T.th0), sin(T.th0));
+    float along = dot(d0, f0), across = abs(dot(d0, float2(-f0.y, f0.x)));
+    bool rubble = along > T.R0 * 0.9 && along < T.R0 * 2.7 && across < T.R0 * (0.8 + 0.003 * along);
+    if (!rubble && towerPlan(T, d0).reff >= T.R0 * 1.42) return col;
+    if (!towerGroupStands(g, seed)) return col;
+    T.Hb = towerBase(T, seed);
+    if (T.Hb > TOWER_BASE_MAX) return col;
+    return towerShape(col, T, wf, s, seed);
+}
+
+// Within margin of a standing tower's reach (sites keep off them).
+static inline bool towerNear(float2 wf, float margin, uint seed) {
+    Tower T;
+    TowerGroup g;
+    return towerFind(wf, margin, seed, T, g) && towerGroupStands(g, seed) && towerBase(T, seed) <= TOWER_BASE_MAX;
+}
+
+// How wet a tower's country is, for its greenery.
+static inline float towerWet(Climate c) {
+    return smoothstep(0.25, 0.65, c.moist) * (1.0 - smoothstep(0.35, 0.7, desertAmount(c)));
+}
+
+// How far the ivy hangs below a rim at height rim, at most room, at world xz w on a face of the tower whose axis is c
+// (plan rotation rot, N sides, hash th): mats several columns wide with bare stone between, their lower edges drifting
+// smoothly along the face, a whole column at a time on the 1-voxel map (q quantised by the caller).
+static inline float towerIvyDrop(float2 w, float2 c, float rot, int N, uint th, float rim, float room, float wet, uint seed) {
+    float2 d = w - c;
+    float seg = 6.2831853 / float(N);
+    float a = atan2(d.y, d.x) - rot;
+    float fi = floor(a / seg);
+    float t = length(d) * sin(a - seg * fi - 0.5 * seg) + 97.0 * fi;
+    float2 q = float2(t, rim * 0.4 + float(th & 255u) * 7.3);
+    float mat = perlin2(q / 34.0, seed + 560u) + 0.35 * perlin2(q / 14.0, seed + 561u);
+    return min(room, 20.0 + 90.0 * wet) * smoothstep(-0.25, 0.2, mat + 0.4 * wet - 0.1) * (0.75 + 0.25 * perlin2(q / 9.0, seed + 562u));
+}
+
+static inline Col terrainColumnS(int2 w, uint seed, int s) { return towerColumn(terrainColumnBase(w, seed), w, seed, s); }
+static inline Col terrainColumn(int2 w, uint seed) { return terrainColumnS(w, seed, 1); }
+
+// The shading table (fragment buffer 9; stage 3's giants hold 8): the towers standing nearest the camera (Sources/Towers.swift fills it from placeTowers).
+// a: axis xz, R0, Hb; b: Ht, K, N, rot; c: th0, th1, Sy, bw; d: hash, kind, lit at night, member index | moisture << 8 |
+// temperature << 16 (bytes; for listings).
+struct TowerRec { float4 a; float4 b; float4 c; uint4 d; };
+struct TowerTable { int4 n; TowerRec r[TOWER_TABLE]; };
+
+// The table record of the standing tower whose plinth holds world point w, or -1.
+static inline int towerIndexAt(constant TowerTable* tt, float2 w) {
+    int n = min(tt->n.x, TOWER_TABLE);
+    for (int i = 0; i < n; i++) {
+        float4 a = tt->r[i].a;
+        float2 d = w - a.xy;
+        float R = a.z * 1.45;
+        if (dot(d, d) < R * R) return i;
+    }
+    return -1;
+}
+
+
+// One thread per world cell info.xy + gid of an info.z-square grid: its group's members, TOWER_MEMBERS records a cell
+// (Ht 0: none).
+kernel void placeTowers(device TowerRec* out [[buffer(0)]],
+                        constant int4& info [[buffer(1)]],
+                        uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= uint(info.z) || gid.y >= uint(info.z)) return;
+    uint seed = uint(info.w);
+    uint base = (gid.y * uint(info.z) + gid.x) * uint(TOWER_MEMBERS);
+    TowerRec none;
+    none.a = 0; none.b = 0; none.c = 0; none.d = 0;
+    for (int m = 0; m < TOWER_MEMBERS; m++) out[base + uint(m)] = none;
+    TowerGroup g;
+    if (!towerGroupIn(info.xy + int2(gid), seed, g) || !towerGroupStands(g, seed)) return;
+    for (int m = 0; m < TOWER_MEMBERS; m++) {
+        if (m >= g.n) break;
+        Tower T = towerMember(g, m);
+        T.Hb = towerBase(T, seed);
+        if (T.Hb > TOWER_BASE_MAX) continue;
+        TowerRec r;
+        r.a = float4(T.c, T.R0, T.Hb);
+        r.b = float4(T.Ht, float(T.K), float(T.N), T.rot);
+        r.c = float4(T.th0, T.th1, T.Sy, T.bw);
+        Climate cl = climate(T.c, seed);
+        r.d = uint4(T.h, uint(T.kind), hashf(pcg(T.h + 60u)) < 0.35 ? 1u : 0u,
+                    uint(m) | (uint(cl.moist * 255.0) << 8) | (uint(cl.temp * 255.0) << 16));
+        out[base + uint(m)] = r;
+    }
+}
+
 
 kernel void generateHeight(texture2d<float, access::write> out [[texture(0)]],
                            texture2d<uint, access::write> gxOut [[texture(1)]],
@@ -724,6 +1333,8 @@ kernel void placeGiants(device GiantRec* out [[buffer(0)]],
             float2 P = floor((float2(cell) + 0.2 + 0.6 * float2(hashf(pcg(h + 1u)), hashf(pcg(h + 2u)))) * GIANT_CELL) + 0.5;
             Climate c = climate(P, seed);
             if (c.jungle < 0.6) continue;
+            // A crown spreading through a tower's masonry would hang leaves inside it.
+            if (towerNear(P, GIANT_REACH + 20.0, seed)) continue;
             Col col = terrainColumn(int2(floor(P)), seed);
             float G = col.h;
             if (G < SEA + 3.0 || G > 600.0 || col.gh > col.gl) continue;
@@ -1314,6 +1925,86 @@ static void writeVeg(GCol gc, float G, uint2 gid, texture2d<float, access::write
     st.write(uint4(ST_GIANT | uint(G) | (uint(gc.leafStart) << 11) | (gc.mats << 22) | (pal << 28), 0, 0, 0), gid);
 }
 
+// MARK: - Tower overgrowth
+
+// The towers' own greenery, the hook stage-3 vegetation replaces: the leaf span [x, y) it adds to map column p (world
+// wc, top G), empty off the towers: low crowns standing well back on the broad treads, the court and the plinth. A crown
+// must have tread under the most of it: one hanging off a narrow ledge or a pier's top reads, from below, as a ball stuck
+// to a blank wall.
+// (The ivy on the faces is painted by towerSurface: hung as leaves in the column in front of a face, any mat broke up
+// into vertical bars on the faces' jogs.)
+static int2 towerOvergrowth(texture2d<float, access::read> src, int2 p, int2 wc, float G, uint seed) {
+    float2 wf = float2(wc) + 0.5;
+    Tower T;
+    TowerGroup g;
+    if (!towerFind(wf, 0.0, seed, T, g)) return int2(0);
+    float2 d0 = wf - T.c;
+    float Rg = T.R0 * 1.42 + 6.0;
+    if (dot(d0, d0) > Rg * Rg || !towerGroupStands(g, seed)) return int2(0);
+    T.Hb = towerBase(T, seed);
+    if (T.Hb > TOWER_BASE_MAX) return int2(0);
+    Climate cl = climate(T.c, seed);
+    float wet = towerWet(cl);
+    float snow = treelineAt(snowlineAt(cl.temp));
+    int n = int(src.get_width());
+    int2 span = int2(0);
+    // Crowns on a jittered 9-voxel grid: a site holds one where it stands on a flat tread of the tower or its plinth.
+    const int C = 9;
+    int2 home = int2(floor(wf / float(C)));
+    int2 origin = wc - p;
+    for (int j = -1; j <= 1; j++)
+        for (int i = -1; i <= 1; i++) {
+            int2 cell = home + int2(i, j);
+            uint h = hash2i(cell, seed + 563u);
+            int2 cw = cell * C + int2(h % uint(C), (h / 11u) % uint(C));
+            float r = 2.5 + 4.0 * hashf(pcg(h + 1u));
+            float2 o = float2(wc - cw);
+            if (dot(o, o) > r * r) continue;
+            int2 pc = cw - origin;
+            if (any(pc < 1) || any(pc >= n - 1)) continue;
+            float4 cc = src.read(uint2(pc));
+            float Gc = cc.r;
+            if (cc.b > cc.g || Gc < SEA + 2.0 || Gc > snow) continue;
+            float2 dc = float2(cw) + 0.5 - T.c;
+            if (dot(dc, dc) > T.R0 * T.R0 * 1.9) continue;
+            bool flat = true;
+            for (int k = 0; k < 4; k++) {
+                int2 q = pc + int2(k == 0 ? 1 : k == 1 ? -1 : 0, k == 2 ? 1 : k == 3 ? -1 : 0);
+                if (abs(src.read(uint2(q)).r - Gc) > 1.0) flat = false;
+            }
+            // Tread (or the wall behind it) under the crown out to 0.85 of its radius all round.
+            for (int k = 0; k < 8 && flat; k++) {
+                float a = float(k) * 0.785398;
+                int2 q = pc + int2(round(float2(cos(a), sin(a)) * (r * 0.85 + 0.5)));
+                if (any(q < 0) || any(q >= n) || src.read(uint2(q)).r < Gc - 1.0) flat = false;
+            }
+            if (!flat) continue;
+            bool ledge = Gc > T.Hb + 8.0;
+            if (hashf(pcg(h + 2u)) > (ledge ? 0.1 : 0.15) + 0.45 * wet) continue;
+            float trunk = floor(2.0 * hashf(pcg(h + 3u)));
+            float hv = 0.6 * r * sqrt(saturate(1.0 - dot(o, o) / (r * r)));
+            float yc = Gc + trunk + 0.6 * r;
+            int2 s = int2(int(floor(yc - hv)), int(ceil(yc + hv)));
+            // The trunk's column reaches the ground.
+            if (all(wc == cw)) s.x = int(Gc);
+            if (s.y <= s.x) continue;
+            if (span.y <= span.x || (s.x <= span.y && s.y >= span.x)) span = span.y > span.x ? int2(min(s.x, span.x), max(s.y, span.y)) : s;
+            else if (s.y > span.y) span = s;
+        }
+    // Scrub and fern in a low, patchy mat over the tower's level treads (not the plinth, which the land's own trees
+    // and the crowns hold): a green fringe along the rims rather than a row of beads.
+    int2 pp = wc - origin;
+    if (G > T.Hb + 8.0 && G < snow && all(pp >= 1) && all(pp < n - 1)) {
+        float mn = perlin2(wf / 7.0, seed + 564u) + 0.5 * perlin2(wf / 2.7, seed + 565u) + 0.7 * wet - 0.35;
+        if (mn > 0.0) {
+            int2 m2 = int2(int(G), int(G) + 1 + int(floor(3.0 * saturate(mn * 1.5))));
+            if (span.y <= span.x) span = m2;
+            else span = int2(min(span.x, m2.x), max(span.y, m2.y));
+        }
+    }
+    return span;
+}
+
 // Runs after cleanupColumns, which would clamp one-column trunks away. Tree columns set w = first leaf
 // voxel; g then holds the ground height (b = g on trunks and buried canopies, b = w under a floating canopy).
 kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
@@ -1344,7 +2035,10 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
     float G = col.r;
     GRuns rr;
     rr.n = 0;
+    int2 tg = towerOvergrowth(src, p, wc, G, seed);
     float J = col.r >= SEA + 2.0 ? provinces(w + seedOffset(seed), seed).x : 0.0;
+    if (tg.y > tg.x && (J >= 0.15 || (col.r >= SEA + 2.0 && provinces(w + seedOffset(seed), seed).y >= 0.2)))
+        gAdd(rr, float(tg.x), float(tg.y), GM_LEAF);
     if (J >= 0.15) {
         // The roof follows the ground smoothed over a few columns, and keeps off cliffs.
         float gs = 0.0, gmin = 1e9, gmax = -1e9;
@@ -1434,6 +2128,7 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
                 hi = max(hi, s.y);
                 if (all(o == 0) && t.kind != 0) trunk = true;
             }
+        if (tg.y > tg.x) { lo = min(lo, tg.x); hi = max(hi, tg.y); }
         if (!isGiant) {
             if (float(hi) <= G) { dst.write(col, gid); return; }
             float leaf = max(float(lo), G);
@@ -1839,6 +2534,7 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
     // same way on every map that holds it.
     int2 cl = cell * SITE_CELL - info.xy;
     if (any(cl < 48) || any(cl > n - 176)) { sites[idx] = G.s; return; }
+    if (towerNear(float2(cell * SITE_CELL + 64), 128.0, seed)) { sites[idx] = G.s; return; }
     for (int k = 0; k < 9; k++) {
         uint hk = pcg(h + uint(k) * 7919u);
         int2 ck = cell * SITE_CELL + 16 + int2(k % 3, k / 3) * 32 + int2(int(hk % 32u), int((hk >> 5) % 32u));
@@ -2508,8 +3204,8 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
     depth = 0.0;
     int s = 1 << k, off = s >> 2, hs = s >> 1;
     int2 b = cw * s + off;
-    Col c0 = terrainColumn(b, seed), c1 = terrainColumn(b + int2(hs, 0), seed);
-    Col c2 = terrainColumn(b + int2(0, hs), seed), c3 = terrainColumn(b + int2(hs, hs), seed);
+    Col c0 = terrainColumnS(b, seed, s), c1 = terrainColumnS(b + int2(hs, 0), seed, s);
+    Col c2 = terrainColumnS(b + int2(0, hs), seed, s), c3 = terrainColumnS(b + int2(hs, hs), seed, s);
     float H = coarseCombine(c0.h, c1.h, c2.h, c3.h, float(s));
     // A giant: where at least two samples stand in it, the mean of their tops, of their lowest gaps (the air under the
     // crown, the second gap) and of the tallest gap above that (between tiers, the principal one); solid where two are
@@ -2698,6 +3394,8 @@ struct Terrain {
     uint seed;
     device const GiantRec* giants; // the giant table (placeGiants)
     texture2d<float> pv;           // the province fields (bakeProvinces)
+    constant TowerTable* towers; // the ruined towers nearest the camera (towerN of them; none outside the scene pass)
+    int towerN;
 };
 
 static inline int2 levelOrigin(thread const Terrain& tr, int k) { return k == 0 ? int2(0) : tr.origin >> k; }
@@ -2777,6 +3475,9 @@ static inline float morphAt(thread const Terrain& tr, int k, float2 p) {
     return smoothstep(tr.lod[k].x, tr.lod[k].z, length(p - tr.cam));
 }
 
+// Whether world xz w lies on a tower's plinth.
+static inline bool towerWallAt(constant TowerTable* tt, float2 w) { return towerIndexAt(tt, w) >= 0; }
+
 // Morphed (H, gapLo, gapHi): across the band a column slides to its parent's height and its gap to the parent's (opening
 // from the parent's floor where it has none), or closes from the top where the parent has none, so at the handoff the
 // level equals the next one exactly.
@@ -2784,7 +3485,13 @@ static inline float morphAt(thread const Terrain& tr, int k, float2 p) {
 static inline float3 columnMorphW(thread const Terrain& tr, int k, int2 c, float w) {
     float3 col = columnL(tr, k, c).rgb;
     if (w > 0.0) {
-        col.x = mix(col.x, parentH(tr, k, c), w);
+        float ph = parentH(tr, k, c);
+        // A column sliding up or down a tower's sheer wall stands part way up it as a sliver, and the band of them rules
+        // the wall with stripes: there it steps at the middle of the band instead.
+        float wh = w;
+        if (tr.towerN > 0 && abs(ph - col.x) > 12.0 && towerWallAt(tr.towers, (float2(c) + 0.5) * tr.lod[k].w + float2(tr.origin)))
+            wh = step(0.5, w);
+        col.x = mix(col.x, ph, wh);
         float2 pg = parentGap(tr, k, c);
         if (pg.y > pg.x) {
             float2 g0 = col.z > col.y ? col.yz : pg.xx;
@@ -2990,7 +3697,7 @@ kernel void bakeHorizon(device float* out [[buffer(0)]],
     uint gid = tid.y;
     int levels = int(f.fade.z);
     Terrain tr { hm, coarse, coarse, coarse, hm, f.lod, f.mapInfo.xy, f.mapInfo.z, levels,
-                 f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, 0.0, hx, gx, cg, cg2, hx, uint(f.mapInfo.w), giants, hx };
+                 f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, 0.0, hx, gx, cg, cg2, hx, uint(f.mapInfo.w), giants, hx, nullptr, 0 };
     float a = (float(gid) + 0.5) * 6.2831853 / float(HORIZON_BINS);
     float2 dir = float2(sin(a), cos(a));
     float3 o = f.camPos.xyz;
@@ -3203,7 +3910,7 @@ struct Surface {
     float2 gapSpan; // the lowest floor and highest roof of those gaps (extra gaps lie lower still: floor 0 then)
     float pale;     // sand, salt crust or snow
     float wall;     // megaWall: among the great walls
-    float3 nrm;     // structures: the plane a roof voxel shades as (zero: the face normal)
+    float3 nrm;     // the plane a structure's roof voxel or a tower's wall shades as (zero: the face normal)
     float3 emit;    // fire, lanterns and lit windows
 };
 
@@ -3970,6 +4677,7 @@ struct Ctx {
     texture2d<float> slowTex;
     float4 slowInfo;
     uint tiles;                   // haze lamps (bits 0-15) and smoke plumes (16-27) that may touch this pixel's screen tile
+    constant TowerTable* towers;  // the ruined towers nearest the camera
 };
 
 // Baked fine cloud field where it covers q, else evaluated.
@@ -4163,6 +4871,342 @@ static float3 roofField(thread const Terrain& tr, int k, float2 p, float y) {
     return float3(share, g);
 }
 
+// MARK: - Tower masonry
+
+// The flicker key of the lit room at w, stage j's loggia (j = 7: the portals), or 0 where the room is dark. A tower that
+// lights any lights one or two, a near the middle of a face, so the open rooms near by and the painted bays far off light
+// the same ones. (A share of every bay lit read as an inhabited block.)
+static inline uint towerLitRoom(Tower T, float2 w, int j) {
+    TowerPlan P = towerPlan(T, w - (j < 7 ? towerStageAxis(T, j) : T.c));
+    int bay = j < 7 ? int(floor(P.t / towerBayW(T.h, j, P.face, T.bw) + 0.5)) : 0;
+    int n = hashf(pcg(T.h + 61u)) < 0.4 ? 2 : 1;
+    int step = T.N > 8 ? 3 : 2;
+    // Candidates in turn, skipping bays walled up or fallen, until n are chosen.
+    for (int i = 0; i < 8; i++) {
+        if (n <= 0) break;
+        uint r = pcg(T.h + 62u + 5u * uint(i));
+        int jj = hashf(r) < 0.3 ? 7 : int(pcg(r + 1u) % uint(max(T.K - 2, 1)));
+        int ff = jj == 7 ? int(pcg(r + 2u) % uint(T.N / step)) * step : int(pcg(r + 2u) % uint(T.N));
+        int bb = jj == 7 ? 0 : int(pcg(r + 3u) % 3u) - 1;
+        if (jj != 7 && (!towerLoggiaBay(T.h, jj, ff, float(bb)) || towerBayFallen(T.h, jj, ff, float(bb)))) continue;
+        if (j == jj && P.face == ff && bay == bb) return r | 1u;
+        n--;
+    }
+    return 0u;
+}
+
+static inline Tower towerFromRec(TowerRec R) {
+    Tower T;
+    T.c = R.a.xy; T.R0 = R.a.z; T.Hb = R.a.w;
+    T.Ht = R.b.x; T.K = int(R.b.y); T.N = int(R.b.z); T.rot = R.b.w;
+    T.th0 = R.c.x; T.th1 = R.c.y; T.Sy = R.c.z; T.bw = R.c.w;
+    T.h = R.d.x; T.kind = int(R.d.y);
+    T.kb = 1 + int(pcg(T.h + 9u) % 2u);
+    T.reach = T.R0 * 2.8;
+    return T;
+}
+
+// The plane a side face of tower column wc (normal n) shades as, or 0 where it keeps its own (broken masonry). Every
+// plane off the grid is a run of voxel jogs; each jog's faces take the plane they make up: the polygon face's (out of
+// the wall, or into the court). A jog's face nearly across the plane would otherwise turn to the light on its own and
+// rule the wall with a line per jog.
+static float3 towerWallPlane(Tower T, float2 wc, float3 n) {
+    float seg = 6.2831853 / float(T.N);
+    float2 d0 = wc - T.c;
+    // The highest stage whose plan holds the column (none: the plinth, the base's polygon).
+    int m = -1;
+    float Rm = 0.0;
+    TowerPlan Pm = towerPlan(T, d0);
+    float2 ax = T.c;
+    for (int k = 0; k < 6; k++) {
+        if (k >= T.K) break;
+        float2 a = towerStageAxis(T, k);
+        TowerPlan Pk = towerPlan(T, wc - a);
+        float Rk = tierR(T, Pk, k);
+        if (Pk.reff < Rk + 0.75) { m = k; Rm = Rk; Pm = Pk; ax = a; }
+    }
+    // Off the stages (plinth, talus, roots) and deep in a stage (the breaks and the rubble on its treads) the masonry is
+    // broken, its faces their own.
+    if (m < 0 || (m < T.K - 2 && Rm - Pm.reff > 3.0)) return 0.0;
+    float fa = T.rot + seg * (float(Pm.face) + 0.5);
+    float2 pn = float2(cos(fa), sin(fa));
+    // At a corner a jog's face takes the plane its own centre lies nearer: by the column's centre, or by the plane it is
+    // nearer square to, a line of the corner's faces lit as the other face ran down it.
+    float fb = fa + (Pm.am > 0.0 ? seg : -seg);
+    float2 pb = float2(cos(fb), sin(fb)), q = wc + 0.5 * n.xz - ax;
+    if (dot(q, pb) > dot(q, pn)) pn = pb;
+    float cp = dot(n.xz, pn);
+    if (cp > 0.1) return float3(pn.x, 0.0, pn.y);
+    if (cp < -0.1) return float3(-pn.x, 0.0, -pn.y);
+    // Nearly across the plane: a jog of the outer face, or of the court's wall within it.
+    bool inner = m >= T.K - 2 && Pm.reff < Rm - 4.0;
+    return inner ? float3(-pn.x, 0.0, -pn.y) : float3(pn.x, 0.0, pn.y);
+}
+
+// A lit room's light: faint, a lamp deep inside.
+constant float3 TOWER_ROOM = float3(1.0, 0.55, 0.22) * 0.5;
+
+// The light of a lit room on the faces of an opening of tower R at voxel v of level k (0 where none): only the great
+// portals and the loggias' bays, a storey and a tenth tall just under a rim; weathered pockets stay dark. Out of line:
+// it runs only at night, and inlined it slows every pixel's shading by day.
+static __attribute__((noinline)) float3 towerRoomLight(thread const Ctx& x, TowerRec R, int k, int3 v, int3 n, float2 w, float night) {
+    float cs = x.tr.lod[k].w;
+    float Hb = R.a.w, Sy = R.c.z;
+    int K = int(R.b.y);
+    uint seed = x.seed;
+    float yv = float(v.y);
+    float4 here = columnL(x.tr, k, v.xz);
+    float4 e = k == 0 ? extraGaps(x.tr.gx.read(uint2(clamp(v.xz, int2(0), int2(x.tr.size - 1))))) : float4(0);
+    float2 g = float2(-1.0);
+    if (n.y > 0) {
+        if (here.b > here.g && here.g == yv + 1.0) g = here.gb;
+        else if (e.y > e.x && e.x == yv + 1.0) g = e.xy;
+        else if (e.w > e.z && e.z == yv + 1.0) g = e.zw;
+    } else if (n.y < 0) {
+        if (here.b > here.g && here.b == yv) g = here.gb;
+        else if (e.y > e.x && e.y == yv) g = e.xy;
+        else if (e.w > e.z && e.w == yv) g = e.zw;
+    } else {
+        int2 q = v.xz + n.xz;
+        float4 f = columnL(x.tr, k, q);
+        float4 fe = k == 0 ? extraGaps(x.tr.gx.read(uint2(clamp(q, int2(0), int2(x.tr.size - 1))))) : float4(0);
+        if (f.b > f.g && yv >= f.g && yv < f.b) g = f.gb;
+        else if (fe.y > fe.x && yv >= fe.x && yv < fe.y) g = fe.xy;
+        else if (fe.w > fe.z && yv >= fe.z && yv < fe.w) g = fe.zw;
+    }
+    int jr = -1;
+    Tower T = towerFromRec(R);
+    float2 wc = w + 0.5 * cs;
+    if (g.y > g.x) {
+        for (int j = 0; j < 6; j++) {
+            if (j >= K - 2) break;
+            float top = tierY(T, towerPlan(T, wc - towerStageAxis(T, j)), j, seed);
+            if (g.y <= top - 3.0 && g.y >= top - 7.0 && abs(g.y - g.x - floor(Sy * 1.1)) <= 2.0 + float(k)) jr = j;
+        }
+        if (abs(g.x - (Hb + 6.0)) <= float(k) && g.y - g.x >= 26.0) jr = 7;
+    }
+    if (jr >= 0) {
+        uint lh = towerLitRoom(T, wc, jr);
+        if (lh != 0u) return TOWER_ROOM * night * (0.8 + 0.2 * hashf(pcg(lh))) * flicker(x.time, float(lh & 255u), seed);
+    }
+    return 0.0;
+}
+
+// A tower's masonry in place of the terrain's surface s: each tower its own old stone laid in storey courses, stained
+// under its ledges, lichened, darkened by age at the foot; greened on its treads, hung with ivy under its rims (painted
+// where the coarse rings carry no leaves), roots over its plinth, and at night a few rooms lit. Every term is taken in
+// the face's own plane and fades to its mean with the footprint.
+static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, int3 n, float2 uv, float fp, float fpA, float3 d) {
+    if (s.mat != 0) return;
+    float cs = x.tr.lod[k].w;
+    float2 w = float2(v.xz * int(cs) + x.tr.origin);
+    int i = towerIndexAt(x.towers, w + 0.5 * cs);
+    if (i < 0) return;
+    TowerRec R = x.towers->r[i];
+    float Hb = R.a.w, Ht = R.b.x, Sy = R.c.z, bw = R.c.w, R0 = R.a.z;
+    int K = int(R.b.y);
+    uint th = R.d.x;
+    uint seed = x.seed;
+    float2 wq = w + (n.y != 0 ? uv : n.x != 0 ? float2(n.x > 0 ? 1.0 : 0.0, uv.x) : float2(uv.x, n.z > 0 ? 1.0 : 0.0)) * cs;
+    float wy = n.y != 0 ? float(v.y + max(n.y, 0)) : float(v.y) + uv.y;
+    // Along a side face, the distance along the plan's face it lies on: by the face's own axis, the faces of each jog of
+    // a diagonal face would take different stone.
+    float2 dq = wq - R.a.xy;
+    float aq = atan2(dq.y, dq.x) - R.b.w, sq = 6.2831853 / R.b.z;
+    float fq = floor(aq / sq);
+    float along = n.y != 0 ? wq.x : length(dq) * sin(aq - sq * fq - 0.5 * sq) + 97.0 * fq;
+    Climate c = climateL(x.tr, k, (float2(v.xz) + 0.5) * cs);
+    float wet = towerWet(c);
+    float dry = smoothstep(0.35, 0.7, desertAmount(c));
+    // The plan at the column: out from the base's face, and whether the column stands outside the base (roots).
+    float2 dc0 = w + 0.5 * cs - R.a.xy;
+    float seg = 6.2831853 / R.b.z;
+    float ang = atan2(dc0.y, dc0.x) - R.b.w;
+    float am = ang - seg * floor(ang / seg) - 0.5 * seg;
+    float reff = length(dc0) * cos(am);
+    bool off = reff > R0 + 0.5 * cs;
+    // Below the plinth's foot it is the ground it was cut from; the base's walls go down to the ground wherever it falls
+    // away.
+    if (float(v.y) < Hb - 1.0 && off) return;
+    bool root = false;
+    if (off && k <= 1) {
+        // Roots stand over the plinth and over the talus heaped on it.
+        Tower T = towerFromRec(R);
+        TowerPlan P0 = towerPlan(T, dc0);
+        float inner = R0 * (1.2 + 0.08 * perlin2(P0.dir * 3.7, seed + 520u));
+        root = wy > Hb + max(reff < inner ? 6.0 : 3.0, 3.0 + towerTalus(T, P0, w + 0.5 * cs, 1, seed).x) + 0.5;
+    }
+    // A face of the plan's polygon is a plane: its voxel jogs shade as that plane, and every detail fades with the
+    // footprint across the plane, not across the jog's own face, or the jogs' two orientations fade apart in stripes.
+    float3 pl = n.y == 0 && !root ? towerWallPlane(towerFromRec(R), w + 0.5 * cs, float3(n)) : float3(0);
+    if (any(pl != 0.0)) fpA = fp / max(abs(dot(pl, d)), 0.15);
+    // Each tower its own stone: pale limestone, warm sandstone, grey granite or rose.
+    float u = hashf(pcg(th + 70u));
+    float3 stone = u < 0.4 ? float3(0.27, 0.25, 0.215) : u < 0.7 ? float3(0.29, 0.24, 0.185) : u < 0.9 ? float3(0.24, 0.235, 0.225)
+                 : float3(0.265, 0.235, 0.215);
+    // Broad drifts of tone over the tower and up it.
+    float3 m = stone * mix(1.06, 0.9, saturate(perlin2(wq / 90.0 + float(th & 255u), seed + 530u) + 0.5));
+    m = mix(m, float3(0.42, 0.33, 0.24), 0.5 * dry);
+    m *= (1.0 + 0.12 * perlin2(float2(along / 37.0, wy / 29.0), seed + 531u)) * (1.0 + 0.2 * perlin2(float2(along / 130.0, wy / 95.0), seed + 546u));
+    // Age darkens the foot and the wet country's stone, and grime lies over it in broad blotches.
+    m *= mix(1.0, 0.72, smoothstep(Hb + 120.0, Hb, wy) * (0.4 + 0.6 * wet));
+    m *= mix(0.78, 1.0, smoothstep(-0.35, 0.25, perlin2(float2(along / 30.0, wy / 70.0), seed + 529u) + 0.4 * perlin2(float2(along / 10.0, wy / 25.0), seed + 538u)));
+    // Courses: each storey a different tone, a voxel block's own tone close up; the fallen masonry off the stages more so.
+    // (Far off, storey bands read as strata.)
+    if (fpA < 0.6) {
+        float course = hashf(hash2i(int2(int(floor((wy - Hb) / Sy)), int(th & 1023u)), seed + 532u)) - 0.5;
+        m *= 1.0 + 0.12 * course * (1.0 - smoothstep(0.15, 0.6, fpA));
+    }
+    if (fp < 0.3) {
+        uint bh = hash3i(v, seed + 533u);
+        m *= 1.0 + (off ? 0.3 : 0.16) * (hashf(bh) - 0.5) * (1.0 - smoothstep(0.05, 0.3, fp));
+    }
+    // Ashlar on the walls: courses a third of a storey high, blocks of 6 to 13 laid in bond, each its own tone; and the
+    // weathered crust spalled off in broad patches of paler, fresher stone. No joints are drawn (a grid of lines reads as
+    // toy blocks); both fade to their mean with the footprint.
+    if (n.y == 0) {
+        float fade = 1.0 - smoothstep(0.3, 1.1, fpA);
+        if (fade > 0.0) {
+            float ch = max(4.0, floor(Sy / 3.0));
+            float row = floor((wy - Hb) / ch);
+            float rh = hashf(hash2i(int2(int(row), int(th & 1023u)), seed + 554u));
+            float len = 6.0 + floor(8.0 * rh);
+            float blk = floor((along + row * 3.7) / len);
+            m *= (1.0 + 0.12 * (rh - 0.5) * fade) * (1.0 + 0.26 * (hashf(hash3i(int3(int(blk), int(row), int(th & 1023u)), seed + 555u)) - 0.5) * fade);
+        }
+        float sp = perlin2(float2(along, wy) / 23.0, seed + 556u) + 0.45 * perlin2(float2(along, wy) / 8.0, seed + 557u);
+        float spall = mix(smoothstep(0.15, 0.5, sp), 0.15, smoothstep(0.6, 4.0, fpA));
+        m *= mix(0.96, 1.07, spall);
+    }
+    // Lichen in pale crusts on the drier stone, faded to its mean with the footprint.
+    float lich = smoothstep(0.25, 0.45, perlin2(float2(along, wy) / 7.0 + (n.y != 0 ? 3.1 : 0.0), seed + 547u) + 0.25 * perlin2(float2(along, wy) / 31.0, seed + 548u));
+    lich = mix(lich, 0.2, smoothstep(0.15, 0.6, fpA)) * (1.0 - 0.6 * wet);
+    m *= 1.0 + 0.07 * lich;
+    float3 moss = mix(float3(0.06, 0.085, 0.04), float3(0.09, 0.11, 0.055), saturate(perlin2(wq / 13.0, seed + 534u) + 0.5));
+    float conifer = smoothstep(0.50, 0.32, c.temp);
+    float3 leaf = mix(mix(float3(0.035, 0.07, 0.035), float3(0.065, 0.09, 0.04), saturate(perlin2(wq / 23.0, seed + 93u) * 0.9 + 0.5)),
+                      float3(0.025, 0.055, 0.045), conifer);
+    float snowline = snowlineAt(c.temp);
+    // The ledge (stage rim) above this height, by the stages' nominal tops.
+    float ledge = Hb + Ht;
+    int jl = -1;
+    for (int j = 0; j < 6; j++) {
+        if (j >= K - 2) break;
+        float yk = Hb + Ht * tierTop(th, j, K);
+        if (yk >= wy - (n.y > 0 ? 1.0 : 0.0)) { ledge = yk; jl = j; break; }
+    }
+    if (root) {
+        // Roots: grey bark under moss, mossed over their tops.
+        float3 bark = mix(float3(0.17, 0.145, 0.115), float3(0.12, 0.11, 0.09), saturate(perlin2(wq / 5.0, seed + 549u) + 0.5));
+        m = n.y > 0 ? mix(bark, moss, 0.6 + 0.3 * wet) : mix(bark, moss, 0.25 * wet);
+    } else if (n.y > 0) {
+        if (wy > snowline) m = float3(0.31, 0.325, 0.35);
+        else {
+            // Moss and turf over the treads, more in wet country.
+            float cov = smoothstep(-0.25, 0.25, perlin2(wq / 6.0, seed + 535u) + 0.5 * perlin2(wq / 23.0, seed + 536u) + 0.6 * wet - 0.3);
+            cov = mix(cov, saturate(0.2 + 0.6 * wet), smoothstep(0.1, 0.6, fpA));
+            m = mix(m, moss, cov * (0.25 + 0.75 * wet));
+            // Past the 1-voxel map the treads carry no crowns: their share of the tread takes the leaves' colour.
+            if (k > 0 && wy < treelineAt(snowline)) m = mix(m, leaf, 0.45 * (0.25 + 0.6 * wet));
+        }
+    } else if (n.y == 0) {
+        float drop = max(ledge - wy, 0.0);
+        // Rain off each rim stains the stone below it in soft, broad runs.
+        float run = saturate(0.55 + 0.6 * perlin2(float2(along / 13.0, wy / 70.0), seed + 550u));
+        run = mix(run, 0.55, smoothstep(0.3, 1.5, fpA));
+        m *= 1.0 - 0.42 * run * exp(-drop / 80.0) * step(wy, ledge);
+        // The ivy below the rim: hung as leaves on the 1-voxel map, painted past it, over a halo of moss on the stone.
+        // Taken in the column in front of the face, as the leaves are hung.
+        float2 wf = wq + float2(n.xz) * 0.5;
+        if (k == 0) wf = floor(wf) + 0.5;
+        float L = towerIvyDrop(wf, R.a.xy, R.b.w, int(R.b.z), th, ledge, drop + 200.0, wet, seed);
+        if (k == 0) L = floor(L);
+        float e = 0.5 * max(fpA, cs);
+        // The mat's edge is ragged in leafy clumps, with stone showing through toward it; both fade to its mean with the
+        // footprint (whole voxels on the 1-voxel map).
+        float2 lq = k == 0 ? floor(float2(along, wy)) + 0.5 : float2(along, wy);
+        float rag = (0.6 * perlin2(lq / 5.0, seed + 552u) + 0.4 * perlin2(lq / 2.2, seed + 553u)) * (1.0 - smoothstep(0.3, 2.0, fpA));
+        float cover = (L - drop) / max(L, 1.0) + 0.45 * rag + 0.05;
+        float ec = 0.5 * max(fpA, cs) / max(L, 4.0) + 0.04;
+        float vine = smoothstep(-ec, ec, cover) * step(1.0, L) * step(drop, L * 1.5 + 2.0) * mix(1.0, 0.8, smoothstep(0.3, 2.0, fpA));
+        float halo = smoothstep(L * 1.3 + 8.0 + e, L * 1.3 + 8.0 - e, drop) * step(1.0, L);
+        m = mix(m, moss * 1.1, 0.4 * halo);
+        if (wy < treelineAt(snowline)) {
+            // Leaves in three tones voxel by voxel close up (sunlit tips, mid, the dark between), their mean past that.
+            float lt = hashf(hash3i(int3(int(floor(wq.x)), int(floor(wy)), int(floor(wq.y))), seed + 551u));
+            float tex = lt < 0.25 ? 0.65 : lt < 0.75 ? 1.0 : 1.25;
+            float3 ivy = mix(leaf, float3(0.06, 0.075, 0.04), 0.5);
+            m = mix(m, ivy * mix(tex, 1.0, smoothstep(0.05, 0.3, fp)), vine);
+        }
+        // A damp band of moss along the foot.
+        m = mix(m, moss * 1.1, smoothstep(Hb + 30.0, Hb + 6.0, wy) * 0.6 * wet);
+        // Past level 1 the coarse columns hold no loggias: their dark bays are painted under each rim, eased in across
+        // level 1's morph band as its gaps close.
+        float paint = k >= 2 ? 1.0 : k == 1 ? morphAt(x.tr, 1, (float2(v.xz) + 0.5) * cs) : 0.0;
+        if (paint > 0.0) {
+            Tower T = towerFromRec(R);
+            float2 wc = w + 0.5 * cs;
+            float hole = 0.0;
+            int jr = -1;
+            if (jl >= 0) {
+                TowerPlan Pj = towerPlan(T, wc - towerStageAxis(T, jl));
+                float bwF = towerBayW(th, jl, Pj.face, bw);
+                float bayI = floor(Pj.t / bwF + 0.5);
+                if (towerLoggiaBay(th, jl, Pj.face, bayI) && !towerBayFallen(th, jl, Pj.face, bayI)) {
+                    float dt = abs(Pj.t - bwF * bayI);
+                    float hi = tierY(T, Pj, jl, seed) - 4.0, lo = hi - floor(Sy * 1.1);
+                    float band = smoothstep(lo - e, lo + e, wy) * smoothstep(hi + e, hi - e, wy);
+                    float bay = mix(smoothstep(0.32 * bwF + e, 0.32 * bwF - e, dt), 0.64, smoothstep(0.15 * bwF, 0.4 * bwF, max(fpA, cs)));
+                    hole = band * bay;
+                    jr = jl;
+                }
+            }
+            // The great portals in the base's faces, and the passage under arches.
+            TowerPlan P0 = towerPlan(T, wc - T.c);
+            if (wy < Hb + 40.0 + e && P0.reff < R0 + 6.0 + cs) {
+                float tw = 7.0 + 0.5 * cs;
+                float hp = smoothstep(Hb + 40.0 + e, Hb + 40.0 - e, wy + 4.0 * (P0.t / 7.0) * (P0.t / 7.0));
+                if (P0.face % (T.N > 8 ? 3 : 2) == 0) {
+                    float por = smoothstep(tw + e, tw - e, abs(P0.t)) * hp;
+                    if (por > hole) { hole = por; jr = 7; }
+                }
+                if ((th & 128u) != 0u) {
+                    float2 pd = float2(cos(T.th1 + 1.5708), sin(T.th1 + 1.5708));
+                    float off = abs((wc - T.c).x * pd.y - (wc - T.c).y * pd.x);
+                    float hpass = Hb + 36.0 + floor(0.2 * R0);
+                    float pas = smoothstep(tw + e, tw - e, off) * smoothstep(hpass + e, hpass - e, wy + 6.0 * (off / 7.0) * (off / 7.0));
+                    hole = max(hole, pas);
+                }
+            }
+            m = mix(m, m * 0.22, hole * paint);
+            // Its lit rooms, as the open bays near by light them, glowing on far into the night.
+            float night = saturate(x.lights.w * 4.0) * paint * (1.0 - smoothstep(2500.0, 4500.0, length((float2(v.xz) + 0.5) * cs - x.tr.cam)));
+            if (night > 0.0 && R.d.z != 0u && jr >= 0) {
+                uint lh = towerLitRoom(T, wc, jr);
+                if (lh != 0u)
+                    s.emit = TOWER_ROOM * night * hole * (0.8 + 0.2 * hashf(pcg(lh))) * flicker(x.time, float(lh & 255u), seed);
+            }
+        }
+    } else {
+        m *= 0.85;
+    }
+    s.albedo = m;
+    s.tread = m;
+    s.face = m;
+    s.pale = n.y > 0 && wy > snowline && !root ? 1.0 : 0.0;
+    s.slope = 0.0;
+    s.wall = 1.0;
+    if (any(pl != 0.0)) s.nrm = pl;
+    s.level = n.y > 0 ? 1.0 : 0.0;
+    // A few rooms lit at night on some towers: the faces of an opening (back wall, reveals, sill and lintel) on the
+    // 1-voxel map, faded out across its morph band, where the painted bays take over.
+    float night = saturate(x.lights.w * 4.0) * (k == 0 ? 1.0 : k == 1 ? 1.0 - morphAt(x.tr, 1, (float2(v.xz) + 0.5) * cs) : 0.0);
+    if (night > 0.0 && R.d.z != 0u) {
+        float3 e = towerRoomLight(x, R, k, v, n, w, night);
+        if (any(e > 0.0)) s.emit = e;
+    }
+}
+
 // shadows: 0 none, 1 traced near ray and maps, 2 maps only (reflections: ripples hide contact shadows).
 // L: the light (the bed under water takes it refracted); inWater: seen in rippled water.
 static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3 d, Hit h, int shadows, bool inWater = false) {
@@ -4175,6 +5219,10 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // Footprint stretched across a grazing face, for detail that must fade before it aliases along the view.
     float fpA = fp / max(abs(dot(n, d)), 0.15);
     Surface s = surfaceAt(x.tr, x.st, x.sites, x.lampState, k, h.voxel, h.normal, uv, fp, fpA, p, x.seed, x.time, inWater);
+    if (sceneTowers && x.towers->n.x > 0) towerSurface(x, s, k, h.voxel, h.normal, uv, inWater ? max(fp, 4.0) : fp, inWater ? max(fpA, 4.0) : fpA, d);
+    // A tower wall shading as its plane (s.nrm; terrain has none of its own): no corner AO, which would line every jog of
+    // a diagonal face.
+    bool planar = sceneTowers && s.mat == 0 && any(s.nrm != 0.0);
     // Prefilter: from ~1/10 voxel per pixel, relax AO and shadows and give risers their tread colour, so
     // distant stairs read as contour bands, not moire.
     float wf = smoothstep(0.025, 0.20, fp);
@@ -4224,7 +5272,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // Seen in water (reflections, the bed) the surface is rippled out of focus: no corner AO, a coarse sky visibility.
     bool lite = shadows != 1;
     // A wall under a roof skips corner AO too: every jog of a back wall is a concave corner, a dark line per column.
-    float ao = (s.level < 1.0 ? mix(k == 0 && !lite && !(h.normal.y == 0 && roofW > 0.0) ? mix(cornerAO(x.tr.hm, x.tr.size, h.voxel, h.normal, uv), 0.85, wf) : 0.85, 1.0, s.level) : 1.0) * s.canopy;
+    float ao = (s.level < 1.0 ? mix(k == 0 && !lite && !(h.normal.y == 0 && roofW > 0.0) && !planar ? mix(cornerAO(x.tr.hm, x.tr.size, h.voxel, h.normal, uv), 0.85, wf) : 0.85, 1.0, s.level) : 1.0) * s.canopy;
     float drop = s.H - min(min(s.nh.x, s.nh.y), min(s.nh.z, s.nh.w));
     // Cliffs several pixels tall keep their strata; only sub-pixel stairs take the tread colour. Keyed to the
     // column's deepest drop, not this face's: the faces of a wall running diagonal to the grid alternate
@@ -4244,7 +5292,9 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // rock face. Its risers painted in the tread colour read as a veil of the ground above (grass, snow, hypsometric
     // bands) hung across the rock, and its treads as pale lines ruled across it, so both take the face's rock.
     float sus = 0.0;
-    if (s.mat == 0 && wf > 0.0 && s.H > SEA + 20.0 && shadows != 2) {
+    // A planar wall is its own plane already: the slope under the stairs is the ground's, and column by column it would
+    // turn each face of a jogging wall its own way.
+    if (s.mat == 0 && wf > 0.0 && s.H > SEA + 20.0 && shadows != 2 && !planar) {
         float R2 = max(16.0, 2.0 * cs);
         float2 g2 = float2(groundSmoothL(x.tr, k, p.xz + float2(R2, 0)) - groundSmoothL(x.tr, k, p.xz - float2(R2, 0)),
                            groundSmoothL(x.tr, k, p.xz + float2(0, R2)) - groundSmoothL(x.tr, k, p.xz - float2(0, R2))) / (2.0 * R2);
@@ -4256,7 +5306,8 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // A riser face only a column wide (a jog in a step edge) is a lone cube face: lit, it is a bright cube; in shade,
     // stone against sand, a dark notch. With the footprint it fades to the tread it stands for, colour and light.
     float lone = 0.0;
-    if (h.normal.y == 0 && s.mat == 0 && wn < 1.0 && shadows != 2) {
+    // A planar wall's jogs are its plane's.
+    if (h.normal.y == 0 && s.mat == 0 && wn < 1.0 && shadows != 2 && !planar) {
         int2 t = h.normal.x != 0 ? int2(0, 1) : int2(1, 0), o = h.normal.xz;
         float run = float(groundL(x.tr, k, h.voxel.xz + t) > groundL(x.tr, k, h.voxel.xz + t + o) + 0.5)
                   + float(groundL(x.tr, k, h.voxel.xz - t) > groundL(x.tr, k, h.voxel.xz - t + o) + 0.5);
@@ -4287,9 +5338,10 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     float hiSun = smoothstep(0.15, 0.45, L.key.y) * (1.0 - L.night);
     float sh = 1.0;
     if (shadows > 0 && ndl > 0.0 && L.shadows && x.shadowMode != 3.0) {
-        // Keep the origin inside the hit voxel's footprint so boundary columns can't self-shadow.
-        float3 so = p + n * 0.02;
-        so.xz = clamp(so.xz, float2(h.voxel.xz) * cs + 0.002, float2(h.voxel.xz) * cs + (cs - 0.002));
+        // Keep the origin inside the hit voxel's footprint so boundary columns can't self-shadow. A planar wall's ray
+        // starts out in front of its plane: from a jog's own face it would cross the next column and stripe the wall.
+        float3 so = p + (planar ? s.nrm * 1.5 : float3(n) * 0.02);
+        if (!planar) so.xz = clamp(so.xz, float2(h.voxel.xz) * cs + 0.002, float2(h.voxel.xz) * cs + (cs - 0.002));
         // Prefiltered, the ray starts a step above the column, and single steps shade by their expected cover.
         so.y = mix(so.y, max(so.y, s.H) + 1.0, wf2);
         // With the shadow-height maps the ray only reaches SHADOW_NEAR (contact and cliff shadows); the maps hold every
@@ -4314,7 +5366,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         if (maps) sh = min(sh, shadowMapLit(x, so, mapOnly));
         // Under a roof the roof stands in for the ray: the maps see an overhang only from two texels out, and a traced ray
         // that slips out under the edge on one row and not the next stripes the back wall with sun.
-        if (wf2 > 0.0) sh = mix(sh, min(sh, stairShadow(x.tr, k, p.xz, L.key, d, contact, 0.35, fp > 3.0 || shadows == 2)), wf2);
+        if (wf2 > 0.0 && !planar) sh = mix(sh, min(sh, stairShadow(x.tr, k, p.xz, L.key, d, contact, 0.35, fp > 3.0 || shadows == 2)), wf2);
         float floorSh = mix(mix(0.5, 0.25, hiSun), 0.32, L.gold);
         sh = mix(sh, floorSh + (1.0 - floorSh) * sh, wf);
         sh = mix(sh, 1.0, 0.3 * L.night);
@@ -4331,7 +5383,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     skyFill *= mix(float3(1.0), float3(0.62, 0.58, 0.85), L.gold * L.sunAmt);
     // Under a roof the visibility is taken where the point is, not at its column's centre: column by column it would
     // jump between reaching past the roof's edge and not, striping the wall.
-    float2 svAt = mix((float2(h.voxel.xz + h.normal.xz) + 0.5) * cs, p.xz, max(wf2, ov));
+    float2 svAt = planar ? p.xz + s.nrm.xz * 1.5 : mix((float2(h.voxel.xz + h.normal.xz) + 0.5) * cs, p.xz, max(wf2, ov));
     float svY = wf2 > 0.0 ? mix(p.y, groundSmoothL(x.tr, k, p.xz), wf2) : p.y;
     float sv = x.prof & 16 || roofW >= 1.0 ? 1.0 : skyVisibility(x.tr, k, svAt, svY, lite || fp > 5.0 ? 2 : fp > 2.0 ? 1 : 0);
     // Under a roof the sky comes only through the mouth, an even share well under open shade's: the visibility samples
@@ -4855,7 +5907,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
                               device const Site* sites [[buffer(1)]], device const float4* lampPos [[buffer(2)]],
                               device const float4* lampState [[buffer(3)]], constant int4* refs [[buffer(4)]],
                               device const float4* birds [[buffer(5)]], device const float* horizon [[buffer(6)]],
-                              constant uint* tiles [[buffer(7)]], device const GiantRec* giants [[buffer(8)]]) {
+                              constant uint* tiles [[buffer(7)]], device const GiantRec* giants [[buffer(8)]], constant TowerTable* towers [[buffer(9)]]) {
     float2 ndc = in.uv * 2.0 - 1.0;
     ndc.y = -ndc.y;
     ndc += f.jitter.xy;
@@ -4867,7 +5919,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     float gmax = f.misc.y;
     for (int k = 1; k < levels; k++) gmax = max(gmax, coarse.read(uint2(0), uint(k - 1), coarse.get_num_mip_levels() - 1).r + 1.0);
     if (int(f.shadow.y) & 2) gmax = min(gmax, 260.0);
-    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, cg2, hb, uint(f.mapInfo.w), giants, pvTex };
+    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, cg2, hb, uint(f.mapInfo.w), giants, pvTex, towers, sceneTowers ? towers->n.x : 0 };
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
             2.0 * tanH * f.resolution.w, f.misc.w, makeLight(f.sunDir.xyz),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
@@ -4877,6 +5929,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     {
         int2 ti = clamp(int2(in.uv * float(LAMP_TILES)), int2(0), int2(LAMP_TILES - 1));
         x.tiles = tiles[ti.y * LAMP_TILES + ti.x];
+        x.towers = towers;
     }
 
     // Debug map view: 11 level 4 (+-10k tall, +-16k wide), 12 level 2, 13 level 1; hillshade, height ramp, 100-voxel

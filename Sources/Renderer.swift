@@ -840,10 +840,10 @@ final class Clipmap {
 final class Renderer: NSObject, MTKViewDelegate {
     let device: MTLDevice
     let queue: MTLCommandQueue
-    let scenePipeline: MTLRenderPipelineState
-    // The same with the band test in its DDA (BAND_FC in Shaders/Saver.metal), bound while a giant stands on the map:
-    // compiled in, it costs a little even where no cell is flagged.
-    let sceneBandPipeline: MTLRenderPipelineState
+    // sceneFragment specialised by [towers][bands]: function constant 1 compiles the towers in (only frames with one in
+    // view need them), constant 0 the band test in the DDA (BAND_FC, only while a giant or the jungle is near). Each
+    // costs every pixel a little even unused.
+    let scenePipelines: [[MTLRenderPipelineState]]
     let postPipeline: MTLRenderPipelineState
     let taaPipeline: MTLRenderPipelineState
     private let cloudPipeline: MTLComputePipelineState
@@ -901,6 +901,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
     let world: World
     let clipmap: Clipmap
+    let towers: Towers
     let camera: FlightCamera
     let wildlife: Wildlife
     // Ring of bird buffers, one per frame in flight; the semaphore keeps the CPU from overwriting one the GPU reads.
@@ -946,7 +947,6 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard let queue = device.makeCommandQueue(), let lib = GPU.library(device: device) else { return nil }
         let scene = MTLRenderPipelineDescriptor()
         scene.vertexFunction = lib.makeFunction(name: "fullscreenVertex")
-        scene.fragmentFunction = lib.makeFunction(name: "sceneFragment")
         scene.colorAttachments[0].pixelFormat = .rgba16Float
         let post = MTLRenderPipelineDescriptor()
         post.vertexFunction = lib.makeFunction(name: "fullscreenVertex")
@@ -956,17 +956,17 @@ final class Renderer: NSObject, MTKViewDelegate {
         taa.vertexFunction = lib.makeFunction(name: "fullscreenVertex")
         taa.fragmentFunction = lib.makeFunction(name: "taaFragment")
         taa.colorAttachments[0].pixelFormat = .rgba16Float
-        func bandVariant(_ on: Bool) -> MTLFunction? {
+        func sceneVariant(towers: Bool, bands: Bool) -> MTLRenderPipelineDescriptor {
             let fc = MTLFunctionConstantValues()
-            var v = on
-            fc.setConstantValue(&v, type: .bool, index: 0)
-            return try? lib.makeFunction(name: "sceneFragment", constantValues: fc)
+            var b = bands, t = towers
+            fc.setConstantValue(&b, type: .bool, index: 0)
+            fc.setConstantValue(&t, type: .bool, index: 1)
+            let d = scene.copy() as! MTLRenderPipelineDescriptor
+            d.fragmentFunction = try? lib.makeFunction(name: "sceneFragment", constantValues: fc)
+            return d
         }
-        scene.fragmentFunction = bandVariant(false)
-        let sceneBand = scene.copy() as! MTLRenderPipelineDescriptor
-        sceneBand.fragmentFunction = bandVariant(true)
-        guard let sp = try? device.makeRenderPipelineState(descriptor: scene),
-              let sbp = try? device.makeRenderPipelineState(descriptor: sceneBand),
+        let sceneStates = [false, true].map { t in [false, true].compactMap { b in try? device.makeRenderPipelineState(descriptor: sceneVariant(towers: t, bands: b)) } }
+        guard sceneStates.allSatisfy({ $0.count == 2 }),
               let tp = try? device.makeRenderPipelineState(descriptor: taa),
               let pp = try? device.makeRenderPipelineState(descriptor: post),
               let cf = lib.makeFunction(name: "cloudField").flatMap({ try? device.makeComputePipelineState(function: $0) }),
@@ -980,11 +980,11 @@ final class Renderer: NSObject, MTKViewDelegate {
               let lpos = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.maxLamps * 16, options: .storageModePrivate),
               let lstate = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.maxLamps * 16, options: .storageModePrivate),
               let world = World(device: device, library: lib, seed: seed),
-              let clipmap = Clipmap(device: device, library: lib, seed: seed) else { return nil }
+              let clipmap = Clipmap(device: device, library: lib, seed: seed),
+              let towers = Towers(device: device, library: lib, seed: seed) else { return nil }
         self.device = device
         self.queue = queue
-        scenePipeline = sp
-        sceneBandPipeline = sbp
+        scenePipelines = sceneStates
         postPipeline = pp
         taaPipeline = tp
         cloudPipeline = cf
@@ -1015,6 +1015,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         lightDir = ldT
         self.world = world
         self.clipmap = clipmap
+        self.towers = towers
         // Spec offset displays by 90 s of the same flight; steering reads GPU heights, so displays
         // instead start at different places in the same world.
         camera = FlightCamera(seed: seed &+ UInt32(screenIndex) &* 7919, world: world, far: far)
@@ -1027,8 +1028,16 @@ final class Renderer: NSObject, MTKViewDelegate {
         super.init()
         wildlife.heightAt = { [unowned world] x, z in world.height(x: x, z: z) }
         wildlife.giantsAt = { [unowned world] in world.giants }
+        camera.towersAt = { [unowned towers] in towers.list }
+        // VR_START=x,z,yawDeg: the flight starts there (tests).
+        if let v = ProcessInfo.processInfo.environment["VR_START"]?.split(separator: ",").compactMap({ Double($0) }), v.count >= 3 {
+            camera.start(at: SIMD2(v[0], v[1]), yaw: v[2] * .pi / 180)
+        }
         world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
-        if camera.startNearGiant() { world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z)) }
+        if ProcessInfo.processInfo.environment["VR_START"] == nil, camera.startNearGiant() {
+            world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
+        }
+        towers.update(center: SIMD2(camera.position.x, camera.position.z), queue: queue, wait: true)
         // Placing the camera reads only the far heights, which level 3 holds: the CPU waits for that level alone.
         refreshFar(only: 3)
         camera.placeAtStart()
@@ -1099,6 +1108,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
             clock.advance(step)
             world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
+            towers.update(center: SIMD2(camera.position.x, camera.position.z), queue: queue, wait: world.synchronous)
             // Snapshots simulate long stretches without frames: keep the far heights following the camera.
             if world.synchronous && simTime + (dt * timeScale - remaining) - farSimClock > 2 {
                 farSimClock = simTime + (dt * timeScale - remaining)
@@ -1282,9 +1292,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         sp.colorAttachments[0].storeAction = .store
         if let enc = cb.makeRenderCommandEncoder(descriptor: sp) {
             // The band test only skips through cells inside the 1-voxel map's unmorphed disc (trace in
-            // Shaders/Saver.metal): compiled in it costs ~0.5 ms, so only while bands lie that close.
+            // Shaders/Saver.metal), so it is compiled in only while bands lie that close.
             let bands = world.bandsNear(SIMD2(camera.position.x, camera.position.z), radius: Clipmap.handoff(0) + 40)
-            enc.setRenderPipelineState(bands && Renderer.profile != "noband" ? sceneBandPipeline : scenePipeline)
+            let tb = camera.basis, tanV = tan(25.0 * .pi / 180) * 1.05
+            towers.frameTable(eye: camera.position, fwd: tb.fwd, right: tb.right, up: tb.up, tanH: tanV * Double(aspect), tanV: tanV)
+            enc.setRenderPipelineState(scenePipelines[towers.tableCount > 0 ? 1 : 0][bands && Renderer.profile != "noband" ? 1 : 0])
             enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
             enc.setFragmentBuffer(birdBuf, offset: 0, index: 5)
             enc.setFragmentBuffer(horizonBuf, offset: 0, index: 6)
@@ -1312,6 +1324,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentBytes(&hazeRefs, length: 128, index: 4)
             enc.setFragmentBytes(&tileMasks, length: tileMasks.count * 4, index: 7)
             enc.setFragmentBuffer(world.giantBuffer, offset: 0, index: 8)
+            enc.setFragmentBytes(towers.table, length: Towers.tableBytes, index: 9)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
         }
@@ -1646,6 +1659,14 @@ enum Snapshot {
         r.prepare(outputSize: CGSize(width: w, height: h))
         r.headroom = settings.headroom ?? 0
         let env = ProcessInfo.processInfo.environment
+        // VR_TOWERS=n: lists the towers of the n-cell square of tower cells round the camera's start, nearest first.
+        if let n = Int(env["VR_TOWERS"] ?? "") {
+            let here = SIMD2(r.camera.position.x, r.camera.position.z)
+            for t in r.towers.scan(around: here, cells: n, queue: r.queue).sorted(by: { simd_length($0.pos - here) < simd_length($1.pos - here) }) {
+                print(String(format: "tower %.0f,%.0f dist %.0f kind %d member %d R0 %.0f base %.0f height %.0f top %.0f lit %d moist %.2f temp %.2f",
+                             t.pos.x, t.pos.y, simd_length(t.pos - here), t.kind, t.member, t.radius, t.base, t.height, t.top, t.lit ? 1 : 0, t.moist, t.temp))
+            }
+        }
         // VR_SHOW=kind,distance,height,bearing[,rank]: hold the camera on the rank-th nearest site of a kind
         // (1 henge .. 6 camp), `distance` from it along `bearing` degrees, `height` above the ground there.
         if let spec = env["VR_SHOW"] {
@@ -1686,6 +1707,10 @@ enum Snapshot {
             var walled = 0, walledRun = 0, maxWalledRun = 0, fastClimb = 0, prevY = r.camera.position.y
             var lastY = r.camera.position.y
             var underCrown = 0, giantsSeen = Set<Int>()
+            // Ruined towers: the closest the flight came to a plinth's edge below its top, and the seconds a tower stood in
+            // frame within 9k.
+            var towerEdge = Double.infinity, towerSeen = 0, towerClose = 0
+            var towersMet = Set<SIMD2<Int>>()
             for i in 1...Int(mins * 60) {
                 for _ in 0..<4 { r.simulate(0.25) }
                 let p = r.camera.position
@@ -1696,6 +1721,19 @@ enum Snapshot {
                 minClear = min(minClear, p.y - g)
                 maxY = max(maxY, p.y)
                 if p.y < g + 2 { lows += 1 }
+                var seen = false
+                for t in r.towers.list {
+                    let v = t.pos - SIMD2(p.x, p.z), d = simd_length(v)
+                    if p.y < t.top { towerEdge = min(towerEdge, d - t.radius * 1.42) }
+                    if d < 9000, abs(atan2(sin(atan2(v.x, v.y) - r.camera.yaw), cos(atan2(v.x, v.y) - r.camera.yaw))) < 0.6 {
+                        seen = true
+                        if towersMet.insert(SIMD2(Int(t.pos.x), Int(t.pos.y))).inserted {
+                            print(String(format: "flight tower seen t=%d at %.0f,%.0f member %d dist %.0f", i, t.pos.x, t.pos.y, t.member, d))
+                        }
+                    }
+                    if d < 1500 { towerClose += 1 }
+                }
+                if seen { towerSeen += 1 }
                 let wall = r.camera.wallInFrame()
                 if wall >= 0.4 { walled += 1; walledRun += 1; maxWalledRun = max(maxWalledRun, walledRun) } else { walledRun = 0 }
                 if p.y - (i == 1 ? p.y : prevY) > 6 { fastClimb += 1 }
@@ -1723,7 +1761,9 @@ enum Snapshot {
                     write(bytes: bytes, width: w, height: h, to: path.replacingOccurrences(of: ".png", with: "_m\(i / 60).png"))
                 }
             }
+            print(String(format: "flight towers: closest plinth edge %.0f, seconds with a tower ahead within 9k %d, tower-seconds within 1.5k %d", towerEdge, towerSeen, towerClose))
             print(String(format: "flight done: max climb %.2f/s, min clearance %.1f, max y %.0f (ceiling %.0f), low seconds %d, walled seconds %d (longest %d), seconds climbing over 6/s %d, seconds under a crown %d, giants passed within 1500 %d", maxClimb, minClear, maxY, FlightCamera.ceiling, lows, walled, maxWalledRun, fastClimb, underCrown, giantsSeen.count))
+            if let log = r.popLog { print(log.summary(r.wildlife)) }
             return
         }
         var simulated = 0.0
