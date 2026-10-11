@@ -2549,7 +2549,6 @@ struct Ctx {
     texture2d<float> slowTex;
     float4 slowInfo;
     uint tiles;                   // haze lamps (bits 0-15) and smoke plumes (16-27) that may touch this pixel's screen tile
-    bool inWater;                 // shading what rippled water reflects: detail under the ripples' blur at its mean
 };
 
 // Baked fine cloud field where it covers q, else evaluated.
@@ -2690,7 +2689,8 @@ static float stairShadow(thread const Terrain& tr, int k, float2 p, float3 L, fl
 }
 
 // shadows: 0 none, 1 traced near ray and maps, 2 maps only (reflections: ripples hide contact shadows).
-static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, int shadows) {
+// L: the light (the bed under water takes it refracted); inWater: seen in rippled water.
+static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3 d, Hit h, int shadows, bool inWater = false) {
     float3 p = o + d * h.t;
     float3 n = float3(h.normal);
     int k = h.level;
@@ -2699,7 +2699,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, int shadows)
     float fp = h.t * x.pixelAngle; // voxels per pixel
     // Footprint stretched across a grazing face, for detail that must fade before it aliases along the view.
     float fpA = fp / max(abs(dot(n, d)), 0.15);
-    Surface s = surfaceAt(x.tr, x.st, x.sites, x.lampState, k, h.voxel, h.normal, uv, fp, fpA, p, x.seed, x.time, x.inWater);
+    Surface s = surfaceAt(x.tr, x.st, x.sites, x.lampState, k, h.voxel, h.normal, uv, fp, fpA, p, x.seed, x.time, inWater);
     // Prefilter: from ~1/10 voxel per pixel, relax AO and shadows and give risers their tread colour, so
     // distant stairs read as contour bands, not moire.
     float wf = smoothstep(0.025, 0.20, fp);
@@ -2768,30 +2768,30 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, int shadows)
         lone = (1.0 - 0.5 * run) * smoothstep(0.01, 0.05, fp) * (1.0 - wn) * (1.0 - keep);
     }
     float3 alb = h.normal.y == 0 ? mix(s.albedo, s.tread, max(wf * (1.0 - keep), lone)) : mix(s.albedo, s.face, wf * sus);
-    float deep = x.L.night * smoothstep(0.32, 0.45, -x.L.sun.y);
+    float deep = L.night * smoothstep(0.32, 0.45, -L.sun.y);
     // Moonlight drains colour.
-    alb = mix(alb, float3(dot(alb, float3(0.3, 0.59, 0.11))), 0.4 * x.L.night + 0.1 * deep);
+    alb = mix(alb, float3(dot(alb, float3(0.3, 0.59, 0.11))), 0.4 * L.night + 0.1 * deep);
     // Canopies would otherwise drop to cut-out silhouettes under the moon: lifted toward the luminance of a lifted
     // green crown, never past it, or fall foliage, already several times brighter, glows like candy.
     if (s.mat == 1 || s.mat == 2) {
         float l = dot(alb, float3(0.3, 0.59, 0.11));
-        alb = mix(alb, float3(l), 0.4 * x.L.night * s.autumn);
-        alb *= 1.0 + x.L.night * (clamp(0.17 / max(l, 1e-3), 1.0, 2.4) - 1.0);
+        alb = mix(alb, float3(l), 0.4 * L.night * s.autumn);
+        alb *= 1.0 + L.night * (clamp(0.17 / max(l, 1e-3), 1.0, 2.4) - 1.0);
     }
     // Pale sand, salt and snow would glow under the moon brighter than the sky above them. A knee on albedo
     // above mid-tone, not a cut keyed to the material, so tones keep their order: a stone riser never outshines
     // its sand tread.
-    float kn = 4.5 * x.L.night;
+    float kn = 4.5 * L.night;
     alb *= (1.0 + 0.1 * kn) / (1.0 + kn * dot(alb, float3(0.3, 0.59, 0.11)));
-    float ndl = mix(max(dot(nl, x.L.key), 0.0), max(x.L.key.y, 0.0), lone);
+    float ndl = mix(max(dot(nl, L.key), 0.0), max(L.key.y, 0.0), lone);
     // A low moon lights a step's riser several times brighter than its tread, drawing a highlight line along
     // every step; under the moon only cliffs outshine the ground they stand in.
-    if (h.normal.y == 0 && s.mat == 0) ndl = mix(ndl, min(ndl, max(x.L.key.y, 0.0)), x.L.night * (1.0 - keep));
+    if (h.normal.y == 0 && s.mat == 0) ndl = mix(ndl, min(ndl, max(L.key.y, 0.0)), L.night * (1.0 - keep));
     // Low structure faces (cairns, boats, deck edges, fallen stones) are steps too; uprights and house walls stay walls.
-    if (h.normal.y == 0 && built && drop <= 2.0 && !any(s.nrm != 0.0)) ndl = mix(ndl, min(ndl, max(x.L.key.y, 0.0)), x.L.night);
-    float hiSun = smoothstep(0.15, 0.45, x.L.key.y) * (1.0 - x.L.night);
+    if (h.normal.y == 0 && built && drop <= 2.0 && !any(s.nrm != 0.0)) ndl = mix(ndl, min(ndl, max(L.key.y, 0.0)), L.night);
+    float hiSun = smoothstep(0.15, 0.45, L.key.y) * (1.0 - L.night);
     float sh = 1.0;
-    if (shadows > 0 && ndl > 0.0 && x.L.shadows && x.shadowMode != 3.0) {
+    if (shadows > 0 && ndl > 0.0 && L.shadows && x.shadowMode != 3.0) {
         // Keep the origin inside the hit voxel's footprint so boundary columns can't self-shadow.
         float3 so = p + n * 0.02;
         so.xz = clamp(so.xz, float2(h.voxel.xz) * cs + 0.002, float2(h.voxel.xz) * cs + (cs - 0.002));
@@ -2805,55 +2805,55 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, int shadows)
         sHit.hit = false; sHit.t = 1e9; sHit.iters = 0;
         // Past the 1-voxel map a pixel spans columns: the maps alone, with occluders from two texels out.
         // Under the moon, whose shadows are soft and faint, only near ground keeps the traced ray.
-        bool mapOnly = maps && (shadows == 2 || k >= 1 || h.t > (x.L.night > 0.5 ? 120.0 : 500.0));
-        if (!mapOnly) sHit = trace(x.tr, so, x.L.key, brute ? 6000.0 : maps ? SHADOW_NEAR : 700.0, shadowIters, k);
+        bool mapOnly = maps && (shadows == 2 || k >= 1 || h.t > (L.night > 0.5 ? 120.0 : 500.0));
+        if (!mapOnly) sHit = trace(x.tr, so, L.key, brute ? 6000.0 : maps ? SHADOW_NEAR : 700.0, shadowIters, k);
         // A ray that runs out of steps is still threading terrain toward the sun: count it as blocked there, so a
         // shaded spot never comes out lit.
         sHit.hit = sHit.hit || sHit.iters >= shadowIters;
         // Contact shadows from single-voxel steps draw sawtooth noise; keep them faint, cliffs full.
-        float contact = 0.35 * (1.0 - smoothstep(2.0, 8.0, 0.5 / x.L.key.y));
+        float contact = 0.35 * (1.0 - smoothstep(2.0, 8.0, 0.5 / L.key.y));
         // The lift moves the ray's start about 1 / L.y along it; contact reach moves with it.
-        float reach = wf2 / max(x.L.key.y, 0.05);
+        float reach = wf2 / max(L.key.y, 0.05);
         sh = sHit.hit ? 0.35 * (1.0 - smoothstep(2.0 + reach, 8.0 + reach, sHit.t)) : 1.0;
         if (maps) sh = min(sh, shadowMapLit(x, so, mapOnly));
-        if (wf2 > 0.0) sh = mix(sh, min(sh, stairShadow(x.tr, k, p.xz, x.L.key, d, contact, 0.35, fp > 3.0 || shadows == 2)), wf2);
-        float floorSh = mix(mix(0.5, 0.25, hiSun), 0.32, x.L.gold);
+        if (wf2 > 0.0) sh = mix(sh, min(sh, stairShadow(x.tr, k, p.xz, L.key, d, contact, 0.35, fp > 3.0 || shadows == 2)), wf2);
+        float floorSh = mix(mix(0.5, 0.25, hiSun), 0.32, L.gold);
         sh = mix(sh, floorSh + (1.0 - floorSh) * sh, wf);
-        sh = mix(sh, 1.0, 0.3 * x.L.night);
+        sh = mix(sh, 1.0, 0.3 * L.night);
     }
-    if (!(x.prof & 32) && x.L.sunAmt > 0.0) sh *= mix(1.0, cloudShadow(x, p, x.L.key), x.L.sunAmt);
-    float lowFill = mix(0.9, 1.0, smoothstep(0.1, 0.4, x.L.key.y));
+    if (!(x.prof & 32) && L.sunAmt > 0.0) sh *= mix(1.0, cloudShadow(x, p, L.key), L.sunAmt);
+    float lowFill = mix(0.9, 1.0, smoothstep(0.1, 0.4, L.key.y));
     // Low light: shadows take the cool zenith, against warm key light.
     // High sun: fill is the deep zenith, so shade reads blue against warm key light.
-    float zw = mix(mix(0.55, 0.8, hiSun), 0.85, x.L.gold);
-    float3 skyFill = mix(x.L.horizon, x.L.zenith, saturate(zw + 0.15 * nl.y)) * 0.9 * lowFill * mix(1.0, 0.85, hiSun);
+    float zw = mix(mix(0.55, 0.8, hiSun), 0.85, L.gold);
+    float3 skyFill = mix(L.horizon, L.zenith, saturate(zw + 0.15 * nl.y)) * 0.9 * lowFill * mix(1.0, 0.85, hiSun);
     // Golden hour: shade is the violet dome opposite the sun, well below the key, so hillsides keep dark values.
-    skyFill *= mix(float3(1.0), float3(0.62, 0.58, 0.85), x.L.gold * x.L.sunAmt);
+    skyFill *= mix(float3(1.0), float3(0.62, 0.58, 0.85), L.gold * L.sunAmt);
     float2 svAt = mix((float2(h.voxel.xz + h.normal.xz) + 0.5) * cs, p.xz, wf2);
     float svY = wf2 > 0.0 ? mix(p.y, groundSmoothL(x.tr, k, p.xz), wf2) : p.y;
     if (!(x.prof & 16)) skyFill *= mix(1.0, skyVisibility(x.tr, k, svAt, svY, lite || fp > 5.0 ? 2 : fp > 2.0 ? 1 : 0), mix(0.55, 0.85, hiSun));
     // A wall sees half the dome, and the half it sees is the dimmer horizon side; without this a riser in shade
     // outshines the sunlit tread above it under a low sun.
     skyFill *= 0.5 + 0.5 * saturate(nl.y);
-    float3 bounce = (1.0 - saturate(nl.y)) * 0.35 * alb * x.L.keyCol * max(x.L.key.y, 0.0);
+    float3 bounce = (1.0 - saturate(nl.y)) * 0.35 * alb * L.keyCol * max(L.key.y, 0.0);
     // High sun: risers sit in cooler shade so terraces keep their modelling at noon.
     float3 riserShade = mix(float3(1.0), float3(0.82, 0.86, 0.95),
-                            (h.normal.y == 0 ? 1.0 - saturate(nl.y) : 0.0) * smoothstep(0.3, 0.6, x.L.key.y) * smoothstep(1.5, 4.0, drop));
+                            (h.normal.y == 0 ? 1.0 - saturate(nl.y) : 0.0) * smoothstep(0.3, 0.6, L.key.y) * smoothstep(1.5, 4.0, drop));
     // Night: no pure-black riser feet; a faint indigo ambient keeps the steps readable as stone, not holes.
-    ao = mix(ao, 1.0, 0.25 * x.L.night);
-    skyFill += float3(0.09, 0.12, 0.25) * x.L.night;
+    ao = mix(ao, 1.0, 0.25 * L.night);
+    skyFill += float3(0.09, 0.12, 0.25) * L.night;
     // Deep in the night, land sits below the sky so night reads as night (won night A/B): moonlight is graded
     // to a cool silver and the fill to a deep blue well under it, so slopes facing the moon still model. In
     // early night it is already dark and keeps its contours (darkening lost the dusk A/B).
-    float3 col = alb * (x.L.keyCol * ndl * sh * mix(1.0, 1.1, x.L.night) * mix(float3(1.0), float3(0.40, 0.42, 0.47), deep)
+    float3 col = alb * (L.keyCol * ndl * sh * mix(1.0, 1.1, L.night) * mix(float3(1.0), float3(0.40, 0.42, 0.47), deep)
                         + (skyFill * ao * riserShade + bounce) * mix(float3(1.0), float3(0.19, 0.23, 0.38), deep));
     // Low sun: up-facing treads take a warm sky-dome tint instead of going to charcoal.
-    col += alb * x.L.keyCol * 0.07 * (1.0 - smoothstep(0.05, 0.35, x.L.key.y)) * saturate(nl.y) * (1.0 - x.L.night);
+    col += alb * L.keyCol * 0.07 * (1.0 - smoothstep(0.05, 0.35, L.key.y)) * saturate(nl.y) * (1.0 - L.night);
     // Backlit leaves: a low sun glows through the canopy edges facing away from it.
     if (s.mat == 1) {
-        float back = pow(saturate(dot(d, x.L.key)), 4.0) * (1.0 - smoothstep(0.08, 0.45, x.L.key.y)) * (1.0 - x.L.night);
+        float back = pow(saturate(dot(d, L.key)), 4.0) * (1.0 - smoothstep(0.08, 0.45, L.key.y)) * (1.0 - L.night);
         float graze = 1.0 - abs(dot(n, d));
-        col += alb * mix(float3(0.9, 1.3, 0.3), float3(1.3, 0.9, 0.4), s.autumn) * x.L.keyCol * back * (1.0 - ndl) * (1.0 - abs(n.y)) * graze * graze * sh;
+        col += alb * mix(float3(0.9, 1.3, 0.3), float3(1.3, 0.9, 0.4), s.autumn) * L.keyCol * back * (1.0 - ndl) * (1.0 - abs(n.y)) * graze * graze * sh;
     }
     // Lamplight is added in absolute terms, outside the moonlight grade, so firelit ground stays warm in a blue night.
     if (x.lights.w > 0.0) {
@@ -2876,7 +2876,7 @@ static float3 shade(thread const Ctx& x, float3 o, float3 d, Hit h, int shadows)
 
 // In a morph band the shading also slides to the next level's, reaching it where the geometry does, so the switch
 // at the handoff circle is seamless in colour and light as well as in shape.
-static float3 shadeL(thread const Ctx& x, float3 o, float3 d, Hit h, int shadows) {
+static float3 shadeL(thread const Ctx& x, thread const Light& L, float3 o, float3 d, Hit h, int shadows, bool inWater = false) {
     float3 p = o + d * h.t;
     float w = morphAt(x.tr, h.level, p.xz);
     // One shading per pixel: the next level's with probability w, varying per pixel and frame for TAA to blend.
@@ -2886,9 +2886,9 @@ static float3 shadeL(thread const Ctx& x, float3 o, float3 d, Hit h, int shadows
         int2 c = int2(floor((p.xz - float2(h.normal.xz) * 0.01) / x.tr.lod[h2.level].w));
         h2.voxel = int3(c.x, h.voxel.y, c.y);
         // Each shading traces its own level's shadow: the outer one must match the next level's hits past the circle.
-        return shade(x, o, d, h2, shadows);
+        return shade(x, L, o, d, h2, shadows, inWater);
     }
-    return shade(x, o, d, h, shadows);
+    return shade(x, L, o, d, h, shadows, inWater);
 }
 
 // Converges on the actual sky colour as fog thickens (T -> 0), so fogged land meets the sky with no seam.
@@ -3455,9 +3455,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
                 open = 0.0;
                 // Land the haze all but hides needs no shading.
                 float T = fogTransmittance(x, wp, r, rh.t, 2);
-                Ctx xw = x;
-                xw.inWater = true;
-                refl = applyFogT(x, T < 0.01 || (x.prof & 8) ? float3(0.0) : shadeL(xw, wp, r, rh, x.shadowMode == 1.0 ? 2 : 1), wp, r, T);
+                refl = applyFogT(x, T < 0.01 || (x.prof & 8) ? float3(0.0) : shadeL(x, x.L, wp, r, rh, x.shadowMode == 1.0 ? 2 : 1, true), wp, r, T);
             } else {
                 refl = softCloudSky(x, wp, r);
             }
@@ -3480,13 +3478,13 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             float path = bedPath;
             // Lagoon beds are lit by sunlight refracted steeply down through the surface. Flux per horizontal
             // area is kept (less what the surface reflects), so the light is redistributed from risers to treads.
-            Ctx xr = x;
+            Light Lr = x.L;
             float2 kh = x.L.key.xz / 1.33;
             float3 kr = float3(kh.x, sqrt(max(1.0 - dot(kh, kh), 0.0)), kh.y);
             float ky = max(x.L.key.y, 0.0);
-            xr.L.key = normalize(mix(x.L.key, kr, lagoon));
-            xr.L.keyCol *= mix(1.0, ky / kr.y * (0.98 - 0.98 * pow(1.0 - ky, 5.0)), lagoon);
-            float3 lit = bedShows > 0.003 ? shadeL(xr, o, d, h, 0) : float3(0);
+            Lr.key = normalize(mix(x.L.key, kr, lagoon));
+            Lr.keyCol *= mix(1.0, ky / kr.y * (0.98 - 0.98 * pow(1.0 - ky, 5.0)), lagoon);
+            float3 lit = bedShows > 0.003 ? shadeL(x, Lr, o, d, h, 0) : float3(0);
             under = mix(deep, lit * mix(float3(0.55, 0.8, 0.85), float3(0.9, 0.95, 0.97), salt), exp(-path * mix(0.35, 0.08, salt)));
             if (lagoon > 0.0) {
                 // Clear water over sand: red is absorbed first, so the bed turns aquamarine, then teal, then blue.
@@ -3552,7 +3550,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         tSurf = tw;
     } else if (h.hit) {
         if (f.misc2.z != 2) Tfog = fogTransmittance(x, o, d, h.t);
-        col = (x.prof & 64) || (Tfog >= 0.0 && Tfog < 0.01) ? float3(0.0) : shadeL(x, o, d, h, 1);
+        col = (x.prof & 64) || (Tfog >= 0.0 && Tfog < 0.01) ? float3(0.0) : shadeL(x, x.L, o, d, h, 1);
         tSurf = h.t;
         // Debug: flat level colours, morph bands white.
         if (f.misc2.z == 9) {
