@@ -6318,13 +6318,11 @@ static float3 shadeL(thread const Ctx& x, thread const Light& L, float3 o, float
     float3 p = o + d * h.t;
     float w = morphAt(x.tr, h.level, p.xz);
     // One shading per pixel: the next level's with probability w, varying per pixel and frame for TAA to blend.
+    // Each shading traces its own level's shadow: the outer one must match the next level's hits past the circle.
     if (w > 0.0 && x.dither < w) {
-        Hit h2 = h;
-        h2.level = h.level + 1;
-        int2 c = int2(floor((p.xz - float2(h.normal.xz) * 0.01) / x.tr.lod[h2.level].w));
-        h2.voxel = int3(c.x, h.voxel.y, c.y);
-        // Each shading traces its own level's shadow: the outer one must match the next level's hits past the circle.
-        return shade(x, L, o, d, h2, shadows, inWater);
+        int2 c = int2(floor((p.xz - float2(h.normal.xz) * 0.01) / x.tr.lod[h.level + 1].w));
+        h.level += 1;
+        h.voxel = int3(c.x, h.voxel.y, c.y);
     }
     return shade(x, L, o, d, h, shadows, inWater);
 }
