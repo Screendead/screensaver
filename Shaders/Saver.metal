@@ -1235,7 +1235,7 @@ static inline int hamletStyle(thread const Lie& L) {
 }
 
 static inline int campStyle(thread const Lie& L) {
-    if (L.lagoon > 0.3) return ST_PALM;
+    if (L.lagoon > 0.3 && L.autumn < 0.3) return ST_PALM;
     if (L.painted > 0.35) return ST_TIPI;
     if ((L.salt > 0.15 && L.salt < 0.7) || steppe(L) || L.desert > 0.3) return ST_CARAVAN;
     if (L.conifer > 0.5) return ST_LEANTO;
