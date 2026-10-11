@@ -535,7 +535,7 @@ final class World {
             buf.origin = o
             buf.globalMax = top + 1
             buf.siteList = World.readSites(buf.sites)
-            buf.lamps = Dictionary(uniqueKeysWithValues: buf.siteList.flatMap { $0.lamps.map { ($0.index, $0) } })
+            buf.lamps = Dictionary(buf.siteList.flatMap { $0.lamps.map { ($0.index, $0) } }, uniquingKeysWith: { $1 })
             buf.giantList = World.readGiants(buf.giants)
             buf.jungleGrid = stride(from: 0, through: World.size, by: 64).flatMap { z in
                 stride(from: 0, through: World.size, by: 64).map { x in
