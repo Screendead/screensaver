@@ -508,7 +508,7 @@ static inline Col terrainColumnBase(int2 w, uint seed) {
 // decided at its centre alone (climate, provinces), so every map and ring decides it alike.
 constant float TOWER_CELL = 9000.0;
 // Chance a cell holds a group where the climate weighs 1 (wet, warm country weighs 1.5).
-constant float TOWER_P = 0.45;
+constant float TOWER_P = 0.6;
 constant float TOWER_GROUP_R = 1500.0;
 constant int TOWER_MEMBERS = 4;
 // The widest base apothem any member can draw (drums), for spacing a group.
@@ -576,24 +576,56 @@ static inline Tower towerMember(TowerGroup g, int m) {
     return T;
 }
 
-// Whether the group stands: lowland (it out-scales the land there; beside a province's walls it is dwarfed), never on
-// a salt pan, most often in wet, warm country, where the jungle has half reclaimed it.
-static inline bool towerGroupStands(TowerGroup g, uint seed) {
+// The field megaLift's provinces rise from (they stand where it passes 0.5; keep in step with megaLift), and whether a
+// tepui stands within d of p: what a tower group asks instead of megaLift itself, which every column of the group would
+// otherwise evaluate many times over.
+static inline float towerProvinceField(float2 p, uint seed) {
+    float2 cw = float2(fbm2(p / 7000.0, 2, seed + 200u), fbm2(p / 7000.0 + 71.3, 2, seed + 201u)) * 3000.0;
+    return fbm2((p + cw) / 16000.0, 3, seed + 202u) * 1.6 + 0.5;
+}
+
+static inline bool towerNearTepui(float2 p, float d, uint seed) {
+    const float CELL = 30000.0;
+    int2 c0 = int2(floor(p / CELL));
+    for (int j = -1; j <= 1; j++)
+        for (int i = -1; i <= 1; i++) {
+            int2 cell = c0 + int2(i, j);
+            uint hc = hash2i(cell, seed + 240u);
+            if (hashf(hc) >= 0.35) continue;
+            float2 c = (float2(cell) + 0.25 + 0.5 * float2(hashf(pcg(hc)), hashf(pcg(hc + 1u)))) * CELL;
+            if (length(p - c) < 1500.0 + 1300.0 + 520.0 + d) return true;
+        }
+    return false;
+}
+
+// Whether the group fits its country: lowland well clear of the provinces (it out-scales the land there; beside a
+// province's walls it is dwarfed) and of the tepuis, never on a salt pan, most often in wet, warm country, where the
+// jungle has half reclaimed it.
+static inline bool towerGroupFits(TowerGroup g, uint seed, thread float& lag) {
     Climate cl = climate(g.c, seed);
     if (saltAmount(cl) > 0.1) return false;
-    float2 p = g.c + seedOffset(seed);
-    float lag = lagoonAmount(cl);
-    if (megaLift(p, lag, seed).U > 10.0) return false;
-    for (int i = 0; i < 8; i++) {
-        float2 dir = float2(cos(float(i) * 0.785398), sin(float(i) * 0.785398));
-        if (megaLift(p + dir * 1500.0, lag, seed).U > 100.0 || megaLift(p + dir * 3000.0, lag, seed).U > 300.0) return false;
-    }
     float wgt = mix(1.0, 1.5, smoothstep(0.45, 0.65, cl.moist) * smoothstep(0.4, 0.55, cl.temp));
     wgt *= mix(1.0, 0.5, smoothstep(0.35, 0.7, desertAmount(cl)));
     wgt *= mix(1.0, 0.3, smoothstep(0.32, 0.2, cl.temp));
-    // Most stand on dry land; some in a lake or a river's bed, more often in lagoon country.
-    if (hashf(g.h) < TOWER_P * wgt && terrainColumnBase(int2(floor(g.c)), seed).h < SEA + 2.0) wgt *= mix(0.3, 1.0, lag);
-    return hashf(g.h) < TOWER_P * wgt;
+    if (hashf(g.h) >= TOWER_P * wgt) return false;
+    float2 p = g.c + seedOffset(seed);
+    if (towerProvinceField(p, seed) > 0.46) return false;
+    for (int i = 0; i < 4; i++) {
+        float a = float(i) * 1.5707963 + 0.785398;
+        if (towerProvinceField(p + float2(cos(a), sin(a)) * 2500.0, seed) > 0.5) return false;
+    }
+    if (towerNearTepui(p, 2500.0, seed)) return false;
+    lag = lagoonAmount(cl);
+    return true;
+}
+
+// Whether the group stands: it fits, and most stand on dry land; some in a lake or a river's bed, more often in lagoon
+// country.
+static inline bool towerGroupStands(TowerGroup g, uint seed) {
+    float lag = 0.0;
+    if (!towerGroupFits(g, seed, lag)) return false;
+    if (terrainColumnBase(int2(floor(g.c)), seed).h >= SEA + 2.0 || lag >= 1.0) return true;
+    return hashf(pcg(g.h + 5u)) < mix(0.3, 1.0, lag);
 }
 
 // A member whose ground stands higher than this (a group's edge reaching up a province's slopes) is not built.
@@ -885,11 +917,14 @@ static inline bool towerNear(float2 wf, float margin, uint seed) {
 }
 
 // The towers' own vegetation, the hook stage-3 vegetation replaces: extra grove density on a tower's plinth, ledges
-// and rubble in wet country, which groveDensity adds.
+// and rubble in wet country, which groveDensity adds. Planting asks it some 18 times a column, so it asks only whether
+// the group fits, not the ground under it (a group dropped for standing in water, or a member for high ground, still
+// thickens the wood there a little).
 static inline float towerOvergrowth(float2 w, float wet, uint seed) {
     Tower T;
     TowerGroup tg;
-    if (wet <= 0.0 || !towerFind(w + 0.5, 0.0, seed, T, tg) || !towerGroupStands(tg, seed) || towerBase(T, seed) > TOWER_BASE_MAX) return 0.0;
+    float lag;
+    if (wet <= 0.0 || !towerFind(w + 0.5, 0.0, seed, T, tg) || !towerGroupFits(tg, seed, lag)) return 0.0;
     return 0.35 * wet * smoothstep(T.R0 * 2.6, T.R0 * 1.5, length(w + 0.5 - T.c));
 }
 
