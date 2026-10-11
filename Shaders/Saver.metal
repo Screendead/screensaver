@@ -2417,8 +2417,8 @@ static inline float morphAt(thread const Terrain& tr, int k, float2 p) {
     return smoothstep(tr.lod[k].x, tr.lod[k].z, length(p - tr.cam));
 }
 
-// Whether world xz w lies on a tower's plinth. Out of line: the trace's inner loop asks it only beside a tower's walls.
-static __attribute__((noinline)) bool towerWallAt(constant TowerTable* tt, float2 w) { return towerIndexAt(tt, w) >= 0; }
+// Whether world xz w lies on a tower's plinth.
+static inline bool towerWallAt(constant TowerTable* tt, float2 w) { return towerIndexAt(tt, w) >= 0; }
 
 // Morphed (H, gapLo, gapHi): across the band a column slides to its parent's height and its gap to the parent's (opening
 // from the parent's floor where it has none), or closes from the top where the parent has none, so at the handoff the
