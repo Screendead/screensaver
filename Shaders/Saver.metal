@@ -6774,6 +6774,16 @@ constant float3 SEAGLOW_BLUE = float3(0.023, 0.147, 1.0);
 constant float3 SEAGLOW_TURQ = float3(0.028, 0.768, 0.630);
 constant float3 SEAGLOW_PINK = float3(1.0, 0.115, 0.578);
 
+// Value noise in about [-0.5, 0.5]: perlin2's gradients cost a sine and cosine per corner, too dear for every water pixel.
+static inline float seaNoise(float2 p, uint s) {
+    float2 i = floor(p), f = p - i;
+    int2 c = int2(i);
+    float2 u = f * f * (3.0 - 2.0 * f);
+    float a = hashf(hash2i(c, s)), b = hashf(hash2i(c + int2(1, 0), s));
+    float cc = hashf(hash2i(c + int2(0, 1), s)), d = hashf(hash2i(c + int2(1, 1), s));
+    return mix(mix(a, b, u.x), mix(cc, d, u.x), u.y) - 0.5;
+}
+
 // Bioluminescence from dusk to night: bacteria blooming in some seas, lit along the swell's crests and brightest where
 // they break over the shallows, and below the surface sparse jellies, plankton swirls and rare rays. wp: the surface
 // point (frame-local), ww: its world xz, k: its level; depth: the depth of the bed the view ray met (large if none).
@@ -6782,8 +6792,8 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
     // Voxels per pixel along the foreshortened view: detail hands over to its mean before it shrinks to a pixel.
     float fpv = tw * x.pixelAngle / max(-d.y, 0.1);
     float3 c = 0;
-    float b2 = perlin2(ww * (1.0 / 230.0), x.seed + 71u);
-    float bloom = smoothstep(0.04, 0.22, perlin2(ww * (1.0 / 900.0), x.seed + 70u) + 0.45 * b2);
+    float b2 = seaNoise(ww * (1.0 / 230.0), x.seed + 71u);
+    float bloom = smoothstep(0.0, 0.15, seaNoise(ww * (1.0 / 900.0), x.seed + 70u) + 0.45 * b2);
     if (bloom > 0.0) {
         // The bed's depth on the 4-voxel level: a broad ramp off the shore, which a lake's one-step shelf lacks. Surf on
         // the fine depth alone would be a line tracing the shore's stairs. The fine depth, smooth across its voxel steps
@@ -6793,7 +6803,7 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
         float mc = kc < x.tr.levels - 1 ? morphAt(x.tr, kc, wp.xz) : 0.0;
         if (mc > 0.0) broad = mix(broad, SEA - groundSmoothL(x.tr, kc + 1, wp.xz), mc);
         float fine = 3.0;
-        if (broad < 2.5) {
+        if (broad < 1.6) {
             fine = SEA - groundSmoothL(x.tr, k, wp.xz);
             float mw = k < x.tr.levels - 1 ? morphAt(x.tr, k, wp.xz) : 0.0;
             if (mw > 0.0) fine = mix(fine, SEA - groundSmoothL(x.tr, k + 1, wp.xz), mw);
@@ -6801,17 +6811,17 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
         float2 wd = float2(0.8, 0.6);
         float along = dot(ww, wd), across = ww.x * wd.y - ww.y * wd.x;
         // Wave fronts across the wind, bent by a slow warp and lit in broken runs where they break.
-        float warp = perlin2(ww * 0.012, x.seed + 72u);
+        float warp = seaNoise(ww * 0.012, x.seed + 72u);
         float ph = along * 0.33 + 4.0 * warp - t * 0.9;
         float crest = pow(0.5 + 0.5 * sin(ph), 14.0);
-        crest *= smoothstep(0.0, 0.3, perlin2(float2(along * 0.05 + t * 0.04, across * 0.02), x.seed + 79u));
+        crest *= smoothstep(-0.05, 0.15, seaNoise(float2(along * 0.05 + t * 0.04, across * 0.02), x.seed + 79u));
         float spark = mix(smoothstep(0.02, 0.3, e0), 0.3, saturate(fpv * 2.0));
         crest = mix(crest * (0.55 + 0.6 * spark), 0.04, saturate(fpv * 0.6));
         // Surf: crests break and brighten over the shallows, and a faint wash laps in to the waterline.
         float sh = smoothstep(0.0, 1.0, broad) * (1.0 - smoothstep(1.2, 2.7, broad));
         float lap = 0.5 + 0.5 * sin(broad * 2.6 - t * 1.3 + 8.0 * warp);
         float glow = (crest * (0.25 + 1.1 * sh) + 0.06 * sh * lap * lap * (0.3 + spark)) * smoothstep(0.0, 0.9, fine);
-        float3 hue = mix(SEAGLOW_TURQ, SEAGLOW_BLUE, smoothstep(-0.25, 0.2, b2));
+        float3 hue = mix(SEAGLOW_TURQ, SEAGLOW_BLUE, smoothstep(-0.15, 0.15, b2));
         hue = mix(hue, SEAGLOW_TURQ * 1.2, saturate(glow * 1.5));
         c += hue * bloom * glow;
     }
@@ -6828,18 +6838,20 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
             if (hashf(h) < 0.07) {
                 float ph = hashf(pcg(h)) * 6.2831853;
                 float2 cc = (float2(cell) + 0.5) * 16.0 + 4.5 * float2(sin(t * 0.05 + ph), cos(t * 0.037 + ph * 1.7));
-                float pulse = 0.5 + 0.5 * pow(sin(t * 1.1 + ph * 3.0), 2.0);
-                float r = (0.9 + 0.7 * hashf(pcg(h + 1u))) * (1.0 + 0.12 * pulse);
-                float2 v = (q - cc) / r;
-                float rho = length(v);
-                // The bell's rim, its core, and a few tentacles trailing behind its drift.
-                float2 back = -normalize(float2(cos(t * 0.05 + ph), -sin(t * 0.037 + ph * 1.7) * 0.74) + 1e-4);
-                float along = dot(v, back), side = v.x * back.y - v.y * back.x;
-                float tent = smoothstep(0.9, 1.2, along) * smoothstep(4.0, 1.2, along)
-                           * smoothstep(0.55, 0.85, cos(side * 9.0 + sin(along * 2.0 - t * 1.5) * 1.2)) * step(abs(side), 0.7);
-                float body = exp(-pow((rho - 0.8) * 4.0, 2.0)) + 0.45 * exp(-rho * rho * 3.0) + 0.1 * exp(-rho * rho * 0.3);
-                float3 jc = (h & 64u) ? SEAGLOW_PINK : SEAGLOW_TURQ;
-                g += jc * (body * pulse + 0.35 * tent) * 0.45 * smoothstep(260.0, 140.0, tw);
+                if (length_squared(q - cc) < 64.0) {
+                    float pulse = 0.5 + 0.5 * pow(sin(t * 1.1 + ph * 3.0), 2.0);
+                    float r = (0.9 + 0.7 * hashf(pcg(h + 1u))) * (1.0 + 0.12 * pulse);
+                    float2 v = (q - cc) / r;
+                    float rho = length(v);
+                    // The bell's rim, its core, and a few tentacles trailing behind its drift.
+                    float2 back = -normalize(float2(cos(t * 0.05 + ph), -sin(t * 0.037 + ph * 1.7) * 0.74) + 1e-4);
+                    float along = dot(v, back), side = v.x * back.y - v.y * back.x;
+                    float tent = smoothstep(0.9, 1.2, along) * smoothstep(4.0, 1.2, along)
+                               * smoothstep(0.55, 0.85, cos(side * 9.0 + sin(along * 2.0 - t * 1.5) * 1.2)) * step(abs(side), 0.7);
+                    float body = exp(-pow((rho - 0.8) * 4.0, 2.0)) + 0.45 * exp(-rho * rho * 3.0) + 0.1 * exp(-rho * rho * 0.3);
+                    float3 jc = (h & 64u) ? SEAGLOW_PINK : SEAGLOW_TURQ;
+                    g += jc * (body * pulse + 0.35 * tent) * 0.45 * smoothstep(260.0, 140.0, tw);
+                }
             }
         }
         // Plankton: a swirl of sparks in some 48-voxel cells, just under the surface.
@@ -6875,21 +6887,23 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
                 float dir = (h & 128u) ? 1.0 : -1.0;
                 float an = t * 0.012 * dir + ph;
                 float2 cc = (float2(cell) + 0.5) * 140.0 + 38.0 * float2(cos(an), sin(an));
-                float2 fw = dir * float2(-sin(an), cos(an));
                 float2 v = q - cc;
-                float u = dot(v, fw), s = v.x * fw.y - v.y * fw.x;
-                float W = 7.5 * (1.0 + 0.1 * sin(t * 0.7 + ph)), L = 4.5;
-                // Wingtips swept back from a rounded head, the trailing edge cut in between tip and body; dv: the distance
-                // outside the outline, in voxels (inside negative).
-                float a = min(abs(s) / W, 1.0);
-                float uf = L * (1.0 - a * a) - 2.3 * a, ub = -2.4 + 1.1 * sin(3.14159 * a);
-                float dv = max((abs(s) - W), max(u - uf, ub - u));
-                float edge = exp(-pow(dv * 1.8, 2.0));
-                float inner = smoothstep(0.3, -1.2, dv);
-                float spots = inner * smoothstep(0.8, 0.95, sin(s * 1.1) * sin(u * 1.4 + 0.5));
-                float tail = smoothstep(0.3, 0.08, abs(s)) * step(u, -2.4) * smoothstep(-10.0, -2.4, u);
-                float3 rc = SEAGLOW_TURQ * (edge + 0.15 * inner + 0.5 * tail) + SEAGLOW_PINK * spots * 0.6;
-                g += rc * 0.22 * smoothstep(420.0, 220.0, tw);
+                if (dot(v, v) < 196.0) {
+                    float2 fw = dir * float2(-sin(an), cos(an));
+                    float u = dot(v, fw), s = v.x * fw.y - v.y * fw.x;
+                    float W = 7.5 * (1.0 + 0.1 * sin(t * 0.7 + ph)), L = 4.5;
+                    // Wingtips swept back from a rounded head, the trailing edge cut in between tip and body; dv: the distance
+                    // outside the outline, in voxels (inside negative).
+                    float a = min(abs(s) / W, 1.0);
+                    float uf = L * (1.0 - a * a) - 2.3 * a, ub = -2.4 + 1.1 * sin(3.14159 * a);
+                    float dv = max((abs(s) - W), max(u - uf, ub - u));
+                    float edge = exp(-pow(dv * 1.8, 2.0));
+                    float inner = smoothstep(0.3, -1.2, dv);
+                    float spots = inner * smoothstep(0.8, 0.95, sin(s * 1.1) * sin(u * 1.4 + 0.5));
+                    float tail = smoothstep(0.3, 0.08, abs(s)) * step(u, -2.4) * smoothstep(-10.0, -2.4, u);
+                    float3 rc = SEAGLOW_TURQ * (edge + 0.15 * inner + 0.5 * tail) + SEAGLOW_PINK * spots * 0.6;
+                    g += rc * 0.22 * smoothstep(420.0, 220.0, tw);
+                }
             }
         }
         c += g * near;
