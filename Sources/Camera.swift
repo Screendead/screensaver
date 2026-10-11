@@ -10,7 +10,8 @@ final class FlightCamera {
     private var yawRate: Double = 0
     private var yawAccel: Double = 0
     private var climbRate: Double = 0
-    private(set) var terms: [Double] = [0, 0, 0, 0, 0, 0]
+    var tracing = false
+    private(set) var terms: [Double] = []
     private var time: Double = 0
     private(set) var surveyAmount: Double = 0
     private var facing: Double = 0
@@ -40,6 +41,7 @@ final class FlightCamera {
     private var avoidRate: Double = 0
     private var nextRoute: Double = 0
     private var routeYaw: Double?
+    private var routeSide = 0.0
     private var blockedAhead: Double = 0
     // 0...1, eased: how much a slope close by fills the frame (looked down onto, or rising beside the flight).
     private var hug: Double = 0
@@ -106,10 +108,17 @@ final class FlightCamera {
         var b = 0.0
         for dist in [40.0, 60.0, 80.0, 105.0, 135.0, 170.0, 210.0, 260.0, 320.0, 400.0, 500.0, 650.0, 850.0, 1100.0, 1500.0] {
             let q = SIMD2(position.x, position.z) + dir * dist
-            // The flight's width: a pillar between samples must still count.
+            // The flight's width, every 4 voxels at most: a needle between samples must still count.
             let w = min(dist * 0.12, 30)
             let l = q + side * w, r = q - side * w
-            let g = dist < 400 ? max(hSteer(q.x, q.y), hSteer(l.x, l.y), hSteer(r.x, r.y)) : max(hFar(q.x, q.y), towerTop(q.x, q.y))
+            var g = dist < 400 ? max(hSteer(q.x, q.y), hSteer(l.x, l.y), hSteer(r.x, r.y)) : max(hFar(q.x, q.y), towerTop(q.x, q.y))
+            if dist < 400 {
+                let k = (w / 4).rounded(.up)
+                for i in stride(from: 1 - k, through: k - 1, by: 1) where i != 0 {
+                    let o = q + side * (w * i / k)
+                    g = max(g, h(o.x, o.y))
+                }
+            }
             let allow = min(FlightCamera.ceiling - 30, position.y + 0.18 * dist)
             b += max(0, g - allow) / (1 + dist / 250)
         }
@@ -336,6 +345,10 @@ final class FlightCamera {
             }
         }
         position.y = max(position.y, footprintMax(position.x, position.z, radius: 24) + 30)
+        // Spires just ahead are already cleared at a 3/s climb, so the first seconds are not a scramble over them.
+        for d in stride(from: 32.0, through: 320.0, by: 32.0) {
+            position.y = max(position.y, hFar(position.x + sin(yaw) * d, position.z + cos(yaw) * d) + 20 - 0.2 * d)
+        }
     }
 
     func step(dt: Double) {
@@ -346,16 +359,21 @@ final class FlightCamera {
         let p = SIMD2(position.x, position.z)
 
         // Steer toward the lower side of a look-ahead point, so the flight follows valleys.
-        var steer = 0.0
+        var steer = 0.0, steerRidge = 0.0
+        // Ridges are run only where they are below the flight: a pillar or massif above it is not a ridge to turn onto.
+        let ridgeTop = position.y - 20
         for (dist, weight) in [(90.0, 0.5), (180.0, 0.35), (280.0, 0.15)] {
             let a = p + fwdFlat * dist
             let l = a + left * dist * 0.35, r = a - left * dist * 0.35
-            steer += weight * (h(r.x, r.y) - h(l.x, l.y))
+            let hr = h(r.x, r.y), hl = h(l.x, l.y)
+            steer += weight * (hr - hl)
+            steerRidge += weight * (min(hr, ridgeTop) - min(hl, ridgeTop))
         }
         // A slow mode: mostly follow valleys, but about a third of the time run ridges or cut across.
         let mode = wander(time + 2000, 0.35)
         let m01 = min(max((mode + 0.2) / 0.6, 0), 1)
         let steerSign = m01 * m01 * (3 - 2 * m01) * 2 - 1
+        if steerSign < 0 { steer = steerRidge }
         // When the sun or moon is low, turn toward it so its disc and water glitter come into frame.
         let key = sun.y > -0.05 ? sun : SIMD3(-sun.x, max(-sun.y * 0.7, 0.08), -sun.z)
         let keyYaw = atan2(key.x, key.z)
@@ -410,14 +428,18 @@ final class FlightCamera {
             let here = blocked(yaw)
             blockedAhead = here
             if here > 2 {
-                var best = (yaw, here)
+                // A turn once begun is kept unless the other side is clearly more open: re-choosing each second between two
+                // near-equal sides cancels the turn and leaves the flight climbing the face between them.
+                var best = (yaw, here, 0.0)
                 for off in [0.25, -0.25, 0.5, -0.5, 0.8, -0.8, 1.2, -1.2, 1.7, -1.7] {
-                    let b = blocked(yaw + off) + abs(off) * 2
-                    if b < best.1 { best = (yaw + off, b) }
+                    let b = blocked(yaw + off) + abs(off) * 2 + (off * routeSide < 0 ? 3 : 0)
+                    if b < best.1 { best = (yaw + off, b, off > 0 ? 1 : -1) }
                 }
                 routeYaw = best.0
+                if best.2 != 0 { routeSide = best.2 }
             } else {
                 routeYaw = nil
+                routeSide = 0
             }
         }
         // Walls close beside or ahead push the heading away, so the flight keeps a frame's width off a massif's face
@@ -501,14 +523,23 @@ final class FlightCamera {
         // Further along the path the flight is turning onto, out to ~25 s ahead, land is met at a planned 2 voxels/s (the
         // 3/s cap is the reserve), so a pillar or needle field is climbed from far off and the flight holds its height
         // across the gaps rather than dipping into each. The corridor is sampled on the 4-voxel grid the heights are
-        // maxima over, so no needle slips between samples.
+        // maxima over, so no needle slips between samples. Out to ~40 s, the corridor widened by the path's uncertainty
+        // gives the steady climb that clears it on arrival (plan): a spire field taller than the 3/s cap can reach is
+        // climbed early at up to 5/s, not late by the wall override.
         let reach = min(max(v * 25, 150), 400)
-        for dist in stride(from: 114.0, through: reach, by: 4.0) {
+        var plan = 0.0
+        for dist in stride(from: 114.0, through: min(max(v * 40, 240), 600), by: 4.0) {
             let a = yaw + yawRate * dist / v * 0.5
             let c = p + SIMD2(sin(a), cos(a)) * dist, side = SIMD2(cos(a), -sin(a))
-            var g = -Double.infinity
-            for o in stride(from: -8.0, through: 8.0, by: 4.0) { g = max(g, h(c.x + side.x * o, c.y + side.y * o)) }
-            ahead = max(ahead, g - 13.2 - (dist - 110) * 2 / v)
+            let w = 8 + ((dist - 114) * 0.015).rounded() * 4
+            var g = -Double.infinity, gw = -Double.infinity
+            for o in stride(from: -w, through: w, by: 4.0) {
+                let q = h(c.x + side.x * o, c.y + side.y * o)
+                gw = max(gw, q)
+                if abs(o) <= 8 { g = max(g, q) }
+            }
+            if dist <= reach { ahead = max(ahead, g - 13.2 - (dist - 110) * 2 / v) }
+            plan = max(plan, (gw + 20 - position.y) / max(dist / v - 4, 1))
         }
         // Dense slopes close up read as block fields; climb over rough ground so they read as contours.
         var lo = Double.infinity, hi = -Double.infinity
@@ -566,11 +597,14 @@ final class FlightCamera {
         var target = min(base + min(rimLift, max(0, liftTop - base)), FlightCamera.ceiling)
         // Relief rising ahead is met early, at the slow climb, so the flight arrives over a massif's shoulder rather
         // than having to leap it: land over 280 within 1.5k ahead sets a floor, eased with distance.
-        var regional = -Double.infinity
+        // The second-highest sample sets it: one karst pillar alone in a 32-voxel cell does not switch it on.
+        var regional = -Double.infinity, top = -Double.infinity
         for dist in stride(from: 250.0, through: 1500.0, by: 125.0) {
             for off in [-0.3, 0.0, 0.3] {
                 let g = hFar(position.x + sin(yaw + off) * dist, position.z + cos(yaw + off) * dist)
-                if g > 280 { regional = max(regional, g + 30 - 0.15 * (dist - 250)) }
+                guard g > 280 else { continue }
+                let f = g + 30 - 0.15 * (dist - 250)
+                if f > top { regional = top; top = f } else { regional = max(regional, f) }
             }
         }
         target = max(target, min(regional, FlightCamera.ceiling))
@@ -581,17 +615,20 @@ final class FlightCamera {
             let rise = footprintMax(position.x + fwdFlat.x * dist, position.z + fwdFlat.y * dist, radius: dist == 0 ? 14 : 8) + 12 - position.y
             if rise > 0 { need = max(need, rise / max((dist - 8) / v, 0.5)) }
         }
-        // Vertical speed eases toward a rate that can still stop at the target (sinks capped at 6/s), changing by at most
-        // 1.2 voxels/s each second, so a climb or a dive never starts or stops with a kick; only a wall's need ramps faster.
+        // Vertical speed eases toward a rate that can still stop at the target, changing by at most 1.2 voxels/s each
+        // second, so a climb or a dive never starts or stops with a kick; only a wall's need ramps faster. Sinks are
+        // capped at 6/s near the ground and at a constant angular rate (0.04 of the height) higher up.
         let err = target - position.y
         let accel = need > 3 ? 6.0 : 1.2
-        var want = err >= 0 ? min(0.3 * err, (2 * accel * err).squareRoot(), 3) : max(0.3 * err, -(2 * accel * -err).squareRoot(), -6)
+        let sink = min(max(6, 0.04 * agl), 15)
+        var want = err >= 0 ? min(0.3 * err, (2 * accel * err).squareRoot(), 3) : max(0.3 * err, -(2 * accel * -err).squareRoot(), -sink)
+        if plan * 1.2 > 3 { want = max(want, min(plan * 1.2, 5)) }
         if need > 3 { want = max(want, min(need, 40)) }
         climbRate += max(-accel * dt, min(accel * dt, want - climbRate))
         position.y += climbRate * dt
         let floor = footprintMax(position.x, position.z, radius: 4) + 8
-        terms = [target, climbRate, need, rimLift, regional, ahead]
-        if position.y < floor { position.y = floor; climbRate = max(climbRate, 0); terms[2] = -1 }
+        if tracing { terms = [target, climbRate, need, rimLift, regional, ahead, plan, blockedAhead, routeYaw.map { FlightCamera.angleDiff($0, yaw) } ?? 0] }
+        if position.y < floor { position.y = floor; climbRate = max(climbRate, 0); if tracing { terms[2] = -1 } }
 
         // Survey/vista cycle: the horizon sweeps the whole frame every few minutes so no region of the
         // screen stays sky (or land) for long. Smoothstep dwells at each extreme.

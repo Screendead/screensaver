@@ -1738,6 +1738,7 @@ enum Snapshot {
         // writing a frame each minute next to the screenshot path. VR_FTRACE=1 also prints every 0.25 s: time, x, z, y, ground,
         // yaw and the altitude terms (target, climb rate, need (-1: floor clamp), rim lift, regional floor, ahead).
         if let mins = Double(env["VR_FLIGHT"] ?? "") {
+            r.camera.tracing = env["VR_FTRACE"] != nil
             var maxClimb = 0.0, minClear = Double.infinity, maxY = 0.0, lows = 0
             var walled = 0, walledRun = 0, maxWalledRun = 0, fastClimb = 0, prevY = r.camera.position.y
             var lastY = r.camera.position.y
