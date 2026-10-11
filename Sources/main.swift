@@ -34,6 +34,16 @@ enum SystemState {
         CGDisplayIsAsleep(CGMainDisplayID()) != 0
     }
 
+    // NSCursor.hide only takes effect for the active app, and macOS often refuses to activate a background agent.
+    // This private connection property lets it hide the cursor anyway.
+    static func allowCursorHidingInBackground() {
+        typealias MainConn = @convention(c) () -> Int32
+        typealias SetProp = @convention(c) (Int32, Int32, CFString, CFTypeRef) -> Int32
+        guard let h = dlopen(nil, RTLD_NOW), let m = dlsym(h, "_CGSDefaultConnection"), let p = dlsym(h, "CGSSetConnectionProperty") else { return }
+        let conn = unsafeBitCast(m, to: MainConn.self)()
+        _ = unsafeBitCast(p, to: SetProp.self)(conn, conn, "SetsCursorInBackground" as CFString, kCFBooleanTrue)
+    }
+
     static func onBattery() -> Bool {
         guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let type = IOPSGetProvidingPowerSourceType(info)?.takeUnretainedValue() as String? else { return false }
@@ -162,6 +172,7 @@ final class SaverController {
 
         NSApp.activate(ignoringOtherApps: true)
         windows.first?.makeKey()
+        SystemState.allowCursorHidingInBackground()
         NSCursor.hide()
         NSApp.presentationOptions = [.hideDock, .hideMenuBar]
 
