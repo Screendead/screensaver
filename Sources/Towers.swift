@@ -90,8 +90,8 @@ final class Towers {
                 }
                 self.inFlight = false
             }
-            cb.commit()
             if wait {
+                cb.commit()
                 cb.waitUntilCompleted()
                 done(cb.status == .completed)
             } else {
@@ -99,6 +99,7 @@ final class Towers {
                     let ok = b.status == .completed
                     DispatchQueue.main.async { done(ok) }
                 }
+                cb.commit()
             }
         }
     }
