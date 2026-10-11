@@ -298,7 +298,7 @@ static inline Mega megaLift(float2 p, float lagoon, uint seed) {
             bool useB = shaftB > shaft;
             float baseT = P * M * (useB ? hB : hv);
             float F = useB ? cB : c1, tF = (useB ? thrB : thr) + 0.01;
-            if (wK > 0.5 && baseT > 110.0 && F > tF && F < tF + 0.2 && thin < 0.5) {
+            if (wK > 0.5 && baseT > 110.0 && F > tF && F < tF + 0.4 && thin < 0.5) {
                 float2 e1 = float2(1, 0), e2 = float2(0, 1);
                 float2 k1 = float2(perlin2((p + e1) / 60.0, seed + 231u), perlin2((p + e1) / 60.0 + 7.7, seed + 232u)) * 14.0;
                 float2 k2 = float2(perlin2((p + e2) / 60.0, seed + 231u), perlin2((p + e2) / 60.0 + 7.7, seed + 232u)) * 14.0;
@@ -306,10 +306,10 @@ static inline Mega megaLift(float2 p, float lagoon, uint seed) {
                 float Fz = useB ? perlin2((p + e2 + k2 * 2.5) / 130.0, seed + 245u) : perlin2((p + e2 + k2) / 52.0, seed + 233u);
                 float grad = max(length(float2(Fx - F, Fz - F)), 1e-6);
                 float delta = (F - tF) / grad;
-                float D = 2.0 + 5.0 * saturate(perlin2(p / 150.0, seed + 265u) + 0.5);
+                float D = 4.0 + 8.0 * saturate(perlin2(p / 150.0, seed + 265u) + 0.5);
                 if (delta < D) {
                     float v = delta / D;
-                    float hn = 5.0 + 7.0 * saturate(perlin2(p / 120.0, seed + 266u) + 0.5);
+                    float hn = 8.0 + 12.0 * saturate(perlin2(p / 120.0, seed + 266u) + 0.5);
                     g.notchH = hn * sqrt(1.0 - v * v);
                     g.notchFoot = wK * max(baseT * (useB ? 0.12 : 0.05), ped + baseT * (useB ? 0.06 : 0.025));
                 }
@@ -625,7 +625,7 @@ static inline float groveDensity(float2 w, float g, uint seed) {
 
 struct Tree { bool ok; int2 c; float g; int lo; int top; int kind; };
 
-static Tree treeInCell(texture2d<float, access::read> src, int2 cell, int2 origin, uint seed) {
+static Tree treeInCell(texture2d<float, access::read> src, texture2d<uint, access::read> gx, int2 cell, int2 origin, uint seed) {
     Tree t;
     t.ok = false;
     uint h = hash2i(cell, seed + 92u);
@@ -642,7 +642,15 @@ static Tree treeInCell(texture2d<float, access::read> src, int2 cell, int2 origi
     for (int k = 0; k < 8; k++) {
         int2 o2 = int2(round(float2(cos(float(k) * 0.785398), sin(float(k) * 0.785398)) * 2.0));
         int2 q = clamp(t.c + o2, int2(0), int2(n - 1));
-        if (src.read(uint2(q)).r > t.g + 8.0) return t;
+        float4 cq = src.read(uint2(q));
+        if (cq.r > t.g + 8.0) return t;
+        // Nor beside carved rock (a shelter's mouth, a notch): planting skips its columns, which would bite the crown.
+        if (cq.b > cq.g && (gapFlags(gx.read(uint2(q))) & GAP_CARVED) != 0u) return t;
+    }
+    for (int k = 0; k < 4; k++) {
+        int2 q = clamp(t.c + int2(k & 1 ? 2 : -2, k & 2 ? 2 : -2), int2(0), int2(n - 1));
+        float4 cq = src.read(uint2(q));
+        if (cq.b > cq.g && (gapFlags(gx.read(uint2(q))) & GAP_CARVED) != 0u) return t;
     }
     float2 w = float2(t.c + origin);
     if (hashf(pcg(h)) > groveDensity(w, t.g, seed)) return t;
@@ -687,6 +695,7 @@ static inline int2 canopySpan(Tree t, int2 o) {
 // voxel; g then holds the ground height (b = g on trunks and buried canopies, b = w under a floating canopy).
 kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
                        texture2d<float, access::write> dst [[texture(1)]],
+                       texture2d<uint, access::read> gx [[texture(2)]],
                        constant int4& info [[buffer(0)]],
                        constant uint& row0 [[buffer(1)]],
                        uint2 g [[thread_position_in_grid]]) {
@@ -705,7 +714,7 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
     bool trunk = false;
     for (int j = -1; j <= 1; j++)
         for (int i = -1; i <= 1; i++) {
-            Tree t = treeInCell(src, home + int2(i, j), info.xy, uint(info.w));
+            Tree t = treeInCell(src, gx, home + int2(i, j), info.xy, uint(info.w));
             if (!t.ok) continue;
             int2 o = p - t.c;
             if (abs(o.x) > 2 || abs(o.y) > 2) continue;
@@ -1039,6 +1048,7 @@ static Lie survey(texture2d<float, access::read> hm, int2 c, int2 cw, uint seed)
 // Site at one world cell: a type chosen by two broad Perlin fields (where people live now, and where an older
 // culture built) and by the lie of the land at the best of nine candidate centres, then its parts.
 kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
+                       texture2d<uint, access::read> gx [[texture(1)]],
                        device Site* sites [[buffer(0)]],
                        constant int4& info [[buffer(1)]],
                        uint2 gid [[thread_position_in_grid]]) {
@@ -1190,6 +1200,18 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
         addPart(G, makePart(P_CLEAR, 0, int2(0), int2(8, 0), 0, 0, 0, 0), 9.0);
         age = 0.1;
         ok = true;
+    }
+    // No part may stand on carved rock (a shelter or notch): stamping skips such columns, which would leave the site
+    // with pieces missing. Every second column suffices, as cleanup leaves no carved gap a single column wide; the reach
+    // is capped where the reads stay inside every map that holds the cell.
+    if (ok && G.np > 0) {
+        int R = min(int(ceil(G.r)), 60);
+        for (int j = -R; j <= R && ok; j += 2)
+            for (int i = -R; i <= R; i += 2) {
+                if (i * i + j * j > R * R) continue;
+                int2 q = c + int2(i, j);
+                if (colArch(hm, q) && (gapFlags(gx.read(uint2(q))) & GAP_CARVED) != 0u) { ok = false; break; }
+            }
     }
     if (!ok || G.np == 0) {
         G.s.head.z = 0;
@@ -2349,6 +2371,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     s.canopy = tree ? 0.55 : 1.0;
     s.H = H;
     float hx0, hx1, hz0, hz1;
+    float4 frontCol = 0.0;
     if (k == 0) {
         // The neighbours' whole columns: their ground, and whether any holds a gap, from the same reads.
         float4 a0 = columnL(tr, 0, v.xz + int2(-1, 0)), a1 = columnL(tr, 0, v.xz + int2(1, 0));
@@ -2361,10 +2384,12 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         for (int i = 0; i < 5; i++)
             if (cs5[i].b > cs5[i].g && cs5[i].a == 0.0) s.gapSpan = float2(min(s.gapSpan.x, cs5[i].g), max(s.gapSpan.y, cs5[i].b));
         s.gapNear = s.gapSpan.y > s.gapSpan.x;
+        frontCol = n.x < 0 ? a0 : n.x > 0 ? a1 : n.z < 0 ? a2 : a3;
     } else {
         hx0 = groundL(tr, k, v.xz + int2(-1, 0)); hx1 = groundL(tr, k, v.xz + int2(1, 0));
         hz0 = groundL(tr, k, v.xz + int2(0, -1)); hz1 = groundL(tr, k, v.xz + int2(0, 1));
         float4 fr = n.y == 0 ? columnL(tr, k, v.xz + n.xz) : float4(0);
+        frontCol = fr;
         s.gapNear = col.z > col.y || fr.z > fr.y;
         s.gapSpan = float2(min(col.z > col.y ? col.y : 1e9, fr.z > fr.y ? fr.y : 1e9), max(col.z > col.y ? col.z : -1e9, fr.z > fr.y ? fr.z : -1e9));
     }
@@ -2396,7 +2421,10 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         birch = birchAmount(w, seed);
         fallLeaf = autumnLeaf(w, birch, seed);
     }
-    bool underGap = !tree && !built && col.z > col.y && float(v.y) < col.z;
+    // A side face looking into a rock gap (a shelter's back wall) is rock under a roof too: by its neighbours' tops it
+    // would read as a low riser and take the tread colour, column by column.
+    bool underGap = !tree && !built && ((col.z > col.y && float(v.y) < col.z)
+                    || (n.y == 0 && frontCol.a == 0.0 && frontCol.b > frontCol.g && float(v.y) >= frontCol.g && float(v.y) < frontCol.b));
 
     float salt = saltAmount(c);
     float rimW = smoothstep(0.05, 0.4, salt);
@@ -2954,6 +2982,20 @@ static inline bool hollowAt(thread const Terrain& tr, int k, int2 c, float y) {
     return (y >= e.x && y < e.y) || (y >= e.z && y < e.w);
 }
 
+// The share of open shade's sky light reaching under a roof.
+constant float ROOF_SKY = 0.55;
+
+// hollowAt as the trace sees it: the column morphed toward the next level's.
+static inline bool hollowAtMorph(thread const Terrain& tr, int k, int2 c, float y) {
+    if (columnL(tr, k, c).a != 0.0) return false;
+    float3 col = columnMorph(tr, k, c);
+    if (col.z <= col.y) return false;
+    if (y >= col.y && y < col.z) return true;
+    if (k > 0 || y >= col.y) return false;
+    float4 e = extraGapsMorph(tr, c);
+    return (y >= e.x && y < e.y) || (y >= e.z && y < e.w);
+}
+
 // Near p at height y: x, the share of the ground under a roof (per column, whether it or a 4-neighbour is hollow at y,
 // bilinear over the four columns nearest p); yz, which way the hollow lies (its share's gradient over those four). A
 // function of position alone, never of which way a face turns, so the jogging faces of a wall under a roof all agree,
@@ -3005,13 +3047,17 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // Taken just over half a column into the air in front of the face: on the face, or exactly half a column out, the
     // footprint's split between rock and air turns on rounding.
     // Floors are asked just above, undersides just below.
-    float3 rf = 0.0;
-    if (s.mat == 0) {
-        // Only near the gaps' heights: a lip's top or the sheer wall under a shelter lies outside every gap around it.
-        // Extra gaps lie under the principal ones, so below those only the floor of the map bounds them.
-        if (s.gapNear && p.y < s.gapSpan.y + 1.5 && (p.y > s.gapSpan.x - 1.5 || k == 0)) rf = roofField(x.tr, k, p.xz, p.y + 0.5 * n.y);
+    float roofW = 0.0;
+    // Only near the gaps' heights: a lip's top or the sheer wall under a shelter lies outside every gap around it.
+    // Extra gaps lie under the principal ones, so below those only the floor of the map bounds them.
+    if (s.mat == 0 && s.gapNear && p.y < s.gapSpan.y + 1.5 && (p.y > s.gapSpan.x - 1.5 || k == 0)) {
+        // A wall is under a roof when the column in front of it is hollow at its height: every face of a jogging back
+        // wall then agrees, where a share sampled at the face fell part way at each jog and striped the wall.
+        if (h.normal.y == 0) roofW = hollowAtMorph(x.tr, k, h.voxel.xz + h.normal.xz, float(h.voxel.y) + 0.5) ? 1.0 : 0.0;
+        else if (h.normal.y > 0) roofW = roofField(x.tr, k, p.xz, p.y + 0.5).x;
     }
-    float roofW = rf.x;
+    // An underside is its own roof: a share fading toward the lip's edge would light the edge's undersides as a pale line.
+    if (s.mat == 0 && h.normal.y < 0) roofW = 1.0;
     // Faces under a roof, and undersides, are not stairs on a heightfield: no heightfield prefilter applies to them. A
     // lip's front and top are ordinary wall and ground.
     float ov = s.mat == 0 ? max(roofW, h.normal.y < 0 ? 1.0 : 0.0) : 0.0;
@@ -3035,20 +3081,13 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         nS = h.normal.y != 0 ? g : normalize(mix(nS, g, wt));
     }
     float3 nl = normalize(mix(normalize(n - float3(s.slope.x, 0.0, s.slope.y)), nS, wn));
-    // A wall under a roof faces the hollow in front of it: its direction is where the hollow share rises, over a few
-    // columns, so its jogging faces light as one wall rather than striping light and dark.
-    if (ov > 0.0 && h.normal.y == 0 && wf > 0.0) {
-        float2 gw = rf.yz;
-        // Only toward the face's own side: a hollow behind the face (a pillar standing in a cave) says nothing of it.
-        float3 nw = float3(gw.x, 0.0, gw.y) * rsqrt(max(dot(gw, gw), 1e-6));
-        if (dot(gw, gw) > 1e-3 && dot(nw, n) > 0.2) nl = normalize(mix(nl, nw, ov * wf));
-    }
     if (any(s.nrm != 0.0)) nl = s.nrm;
     nl = normalize(mix(nl, float3(0, 1, 0), s.level));
     // Coarse levels are always past the footprint where corner AO is fully replaced.
     // Seen in water (reflections, the bed) the surface is rippled out of focus: no corner AO, a coarse sky visibility.
     bool lite = shadows != 1;
-    float ao = (s.level < 1.0 ? mix(k == 0 && !lite ? mix(cornerAO(x.tr.hm, x.tr.size, h.voxel, h.normal, uv), 0.85, wf) : 0.85, 1.0, s.level) : 1.0) * s.canopy;
+    // A wall under a roof skips corner AO too: every jog of a back wall is a concave corner, a dark line per column.
+    float ao = (s.level < 1.0 ? mix(k == 0 && !lite && !(h.normal.y == 0 && roofW > 0.0) ? mix(cornerAO(x.tr.hm, x.tr.size, h.voxel, h.normal, uv), 0.85, wf) : 0.85, 1.0, s.level) : 1.0) * s.canopy;
     float drop = s.H - min(min(s.nh.x, s.nh.y), min(s.nh.z, s.nh.w));
     // Cliffs several pixels tall keep their strata; only sub-pixel stairs take the tread colour. Keyed to the
     // column's deepest drop, not this face's: the faces of a wall running diagonal to the grid alternate
@@ -3138,11 +3177,12 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         if (maps) sh = min(sh, shadowMapLit(x, so, mapOnly));
         // Under a roof the roof stands in for the ray: the maps see an overhang only from two texels out, and a traced ray
         // that slips out under the edge on one row and not the next stripes the back wall with sun.
-        sh = min(sh, 1.0 - roofW);
         if (wf2 > 0.0) sh = mix(sh, min(sh, stairShadow(x.tr, k, p.xz, L.key, d, contact, 0.35, fp > 3.0 || shadows == 2)), wf2);
         float floorSh = mix(mix(0.5, 0.25, hiSun), 0.32, L.gold);
         sh = mix(sh, floorSh + (1.0 - floorSh) * sh, wf);
         sh = mix(sh, 1.0, 0.3 * L.night);
+        // After the lifts, which stand for light slipping between distant steps: none slips under a roof.
+        sh = min(sh, 1.0 - roofW);
     }
     if (!(x.prof & 32) && L.sunAmt > 0.0) sh *= mix(1.0, cloudShadow(x, p, L.key), L.sunAmt);
     float lowFill = mix(0.9, 1.0, smoothstep(0.1, 0.4, L.key.y));
@@ -3156,25 +3196,26 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // jump between reaching past the roof's edge and not, striping the wall.
     float2 svAt = mix((float2(h.voxel.xz + h.normal.xz) + 0.5) * cs, p.xz, max(wf2, ov));
     float svY = wf2 > 0.0 ? mix(p.y, groundSmoothL(x.tr, k, p.xz), wf2) : p.y;
-    float sv = x.prof & 16 ? 1.0 : skyVisibility(x.tr, k, svAt, svY, lite || fp > 5.0 ? 2 : fp > 2.0 ? 1 : 0);
-    // Under a roof the sky comes only through the mouth: the visibility counts in full, and the deeper in, the less.
-    // (The visibility samples only six voxels out: in a shelter it reads the roof all round, so the mouth's share has a floor.)
-    float svr = mix(sv, max(sv, 0.4), roofW);
-    skyFill *= mix(1.0, svr * mix(1.0, 0.6 + 0.4 * svr, roofW), mix(mix(0.55, 0.85, hiSun), 1.0, roofW));
+    float sv = x.prof & 16 || roofW >= 1.0 ? 1.0 : skyVisibility(x.tr, k, svAt, svY, lite || fp > 5.0 ? 2 : fp > 2.0 ? 1 : 0);
+    // Under a roof the sky comes only through the mouth, an even share well under open shade's: the visibility samples
+    // only six voxels out, so in a shelter it reads the roof all round and varies column by column with the back wall's
+    // jogs, striping it.
+    skyFill *= mix(1.0 - mix(0.55, 0.85, hiSun) * (1.0 - sv), ROOF_SKY, roofW);
     // A wall sees half the dome, and the half it sees is the dimmer horizon side; without this a riser in shade
     // outshines the sunlit tread above it under a low sun.
     skyFill *= 0.5 + 0.5 * saturate(nl.y);
-    float3 bounce = (1.0 - saturate(nl.y)) * 0.35 * alb * L.keyCol * max(L.key.y, 0.0);
-    // Light bounced into a hollow comes in through its mouth, off the lit ground outside: dim, never black; an underside
-    // stays well under the lit top of its slab.
-    bounce *= mix(1.0, 0.7 + 0.2 * sv, ov);
+    // Light bounced into a hollow comes in through its mouth, off the lit ground outside, which a low sun still lights
+    // face on where it reaches the shelter's own floor: dim, never black; an underside stays well under the lit top of
+    // its slab.
+    float keyUp = mix(max(L.key.y, 0.0), max(L.key.y, 0.3) * saturate(L.key.y * 10.0), ov);
+    float3 bounce = (1.0 - saturate(nl.y)) * 0.35 * alb * L.keyCol * keyUp;
     // High sun: risers sit in cooler shade so terraces keep their modelling at noon.
     float3 riserShade = mix(float3(1.0), float3(0.82, 0.86, 0.95),
                             (h.normal.y == 0 ? 1.0 - saturate(nl.y) : 0.0) * smoothstep(0.3, 0.6, L.key.y) * smoothstep(1.5, 4.0, drop) * (1.0 - ov));
     // Night: no pure-black riser feet; a faint indigo ambient keeps the steps readable as stone, not holes.
     ao = mix(ao, 1.0, 0.25 * L.night);
     // Night: a cave mouth stays a dark hole.
-    skyFill += float3(0.09, 0.12, 0.25) * L.night * mix(1.0, 0.3 + 0.7 * sv, roofW);
+    skyFill += float3(0.09, 0.12, 0.25) * L.night * mix(1.0, ROOF_SKY, roofW);
     // Deep in the night, land sits below the sky so night reads as night (won night A/B): moonlight is graded
     // to a cool silver and the fill to a deep blue well under it, so slopes facing the moon still model. In
     // early night it is already dark and keeps its contours (darkening lost the dusk A/B).

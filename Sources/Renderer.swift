@@ -119,6 +119,9 @@ final class World {
         // levels[0] is the column texture, levels[m] for m >= 1 the max mips.
         let levels: [MTLTexture]
         let climate: MTLTexture
+        // The climate texture's memory seen as rgba16Uint: the raw extra gaps between generation and cleanup, which run
+        // before anything writes the climate (structures are stamped into it next).
+        let rawGaps: MTLTexture
         let structTex: MTLTexture
         let sites: MTLBuffer
         var origin = SIMD2<Int32>(Int32.min, Int32.min)
@@ -135,7 +138,7 @@ final class World {
             xd.usage = [.shaderRead, .shaderWrite, .pixelFormatView]
             xd.storageMode = .private
             let cd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: World.size, height: World.size, mipmapped: false)
-            cd.usage = [.shaderRead, .shaderWrite]
+            cd.usage = [.shaderRead, .shaderWrite, .pixelFormatView]
             cd.storageMode = .private
             let sd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Uint, width: World.size, height: World.size, mipmapped: false)
             sd.usage = [.shaderRead, .shaderWrite]
@@ -148,6 +151,7 @@ final class World {
                   let sb = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.siteStride, options: .storageModeShared) else { return nil }
             tex = t
             climate = c
+            rawGaps = c.makeTextureView(pixelFormat: .rgba16Uint)!
             structTex = st
             sites = sb
             hmax = x
@@ -174,8 +178,6 @@ final class World {
     private let sitePipeline: MTLComputePipelineState
     private let stampPipeline: MTLComputePipelineState
     private let scratch: [MTLTexture]
-    // The raw extra gaps, between generation and cleanup.
-    private let gapScratch: MTLTexture
     // Max mips 1 and 2 of the plain heights (r) and solid floors (g) for the CPU readback: the map's own mips from 1 up also bound the
     // level-1 columns, which the camera must not steer by.
     private let cpuMips: [MTLTexture]
@@ -206,12 +208,6 @@ final class World {
               let clean = pipeline("cleanupColumns"),
               let plant = pipeline("plantTrees"), let clim = pipeline("bakeClimate"), let place = pipeline("placeSites"), let stamp = pipeline("stampStructures"),
               let s0 = device.makeTexture(descriptor: sd), let s1 = device.makeTexture(descriptor: sd), let q = device.makeCommandQueue(),
-              let gs = device.makeTexture(descriptor: { () -> MTLTextureDescriptor in
-                  let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Uint, width: World.size, height: World.size, mipmapped: false)
-                  d.usage = [.shaderRead, .shaderWrite]
-                  d.storageMode = .private
-                  return d
-              }()),
               let a = Buffer(device: device), let b = Buffer(device: device) else { return nil }
         var mips: [MTLTexture] = []
         for l in 1...World.cpuLevel {
@@ -236,7 +232,6 @@ final class World {
         sitePipeline = place
         stampPipeline = stamp
         scratch = [s0, s1]
-        gapScratch = gs
         buffers = [a, b]
     }
 
@@ -282,17 +277,18 @@ final class World {
                 case 0:
                     enc.setComputePipelineState(genPipeline)
                     enc.setTexture(scratch[0], index: 0)
-                    enc.setTexture(gapScratch, index: 1)
+                    enc.setTexture(buf.rawGaps, index: 1)
                 case 1:
                     enc.setComputePipelineState(cleanupPipeline)
                     enc.setTexture(scratch[0], index: 0)
                     enc.setTexture(scratch[1], index: 1)
-                    enc.setTexture(gapScratch, index: 2)
+                    enc.setTexture(buf.rawGaps, index: 2)
                     enc.setTexture(buf.gx, index: 3)
                 case 2:
                     if band == 0 {
                         enc.setComputePipelineState(sitePipeline)
                         enc.setTexture(scratch[1], index: 0)
+                        enc.setTexture(buf.gx, index: 1)
                         enc.setBuffer(buf.sites, offset: 0, index: 0)
                         enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 1)
                         enc.dispatchThreads(MTLSize(width: World.siteGrid, height: World.siteGrid, depth: 1),
@@ -316,6 +312,7 @@ final class World {
                     enc.setComputePipelineState(plantPipeline)
                     enc.setTexture(buf.climate, index: 0)
                     enc.setTexture(buf.levels[0], index: 1)
+                    enc.setTexture(buf.gx, index: 2)
                 default:
                     enc.setComputePipelineState(climatePipeline)
                     enc.setTexture(buf.climate, index: 0)
