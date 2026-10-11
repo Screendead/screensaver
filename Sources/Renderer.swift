@@ -226,7 +226,7 @@ final class World {
     private let bandTopPipeline: MTLComputePipelineState
     private let bandReducePipeline: MTLComputePipelineState
     private let bandFlagPipeline: MTLComputePipelineState
-    private let scratch: [MTLTexture]
+    private let scratch: MTLTexture
     // Max mips 1 and 2 of the plain heights (r) and solid floors (g) for the CPU readback: the map's own mips from 1 up also bound the
     // level-1 columns, which the camera must not steer by.
     private let cpuMips: [MTLTexture]
@@ -279,7 +279,7 @@ final class World {
               let clean = pipeline("cleanupColumns"),
               let plant = pipeline("plantTrees"), let clim = pipeline("bakeClimate"), let place = pipeline("placeSites"), let stamp = pipeline("stampStructures"),
               let bTop = pipeline("bandTop"), let bRed = pipeline("bandReduce"), let bFlag = pipeline("bandFlag"), let pg = pipeline("placeGiants"),
-              let s0 = device.makeTexture(descriptor: sd), let s1 = device.makeTexture(descriptor: sd), let q = device.makeCommandQueue(),
+              let s0 = device.makeTexture(descriptor: sd), let q = device.makeCommandQueue(),
               let a = Buffer(device: device), let b = Buffer(device: device) else { return nil }
         var mips: [MTLTexture] = []
         for l in 1...World.cpuLevel {
@@ -307,7 +307,7 @@ final class World {
         bandTopPipeline = bTop
         bandReducePipeline = bRed
         bandFlagPipeline = bFlag
-        scratch = [s0, s1]
+        scratch = s0
         buffers = [a, b]
     }
 
@@ -377,7 +377,7 @@ final class World {
                 switch pass {
                 case 0:
                     enc.setComputePipelineState(genPipeline)
-                    enc.setTexture(scratch[0], index: 0)
+                    enc.setTexture(scratch, index: 0)
                     enc.setTexture(buf.rawGaps, index: 1)
                 case 1:
                     if band < 2 {
@@ -393,14 +393,14 @@ final class World {
                                             threadsPerThreadgroup: MTLSize(width: 8, height: 4, depth: 1))
                     }
                     enc.setComputePipelineState(cleanupPipeline)
-                    enc.setTexture(scratch[0], index: 0)
-                    enc.setTexture(scratch[1], index: 1)
+                    enc.setTexture(scratch, index: 0)
+                    enc.setTexture(buf.tex, index: 1)
                     enc.setTexture(buf.rawGaps, index: 2)
                     enc.setTexture(buf.gx, index: 3)
                 case 2:
                     if band == 0 {
                         enc.setComputePipelineState(sitePipeline)
-                        enc.setTexture(scratch[1], index: 0)
+                        enc.setTexture(buf.tex, index: 0)
                         enc.setTexture(buf.gx, index: 1)
                         enc.setBuffer(buf.sites, offset: 0, index: 0)
                         enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 1)
@@ -409,10 +409,10 @@ final class World {
                                             threadsPerThreadgroup: MTLSize(width: 6, height: 6, depth: 1))
                     }
                     // Stamping follows cleanup, which would strip lintel and eave gaps, and precedes planting, so
-                    // trees avoid it. It writes into the climate texture, free until the climate pass: scratch 0 must
+                    // trees avoid it. It writes into the climate texture, free until the climate pass: the scratch must
                     // keep the raw columns for the max mips.
                     enc.setComputePipelineState(stampPipeline)
-                    enc.setTexture(scratch[1], index: 0)
+                    enc.setTexture(buf.tex, index: 0)
                     enc.setTexture(buf.climate, index: 1)
                     enc.setTexture(buf.structTex, index: 2)
                     enc.setBuffer(buf.sites, offset: 0, index: 0)
@@ -431,14 +431,14 @@ final class World {
                     enc.setBuffer(buf.giants, offset: 0, index: 2)
                 default:
                     // Mip 1 of the finished columns, a band of its rows per climate piece (it builds the level-1 forest
-                    // it bounds, too costly for one piece). Scratch 0 still holds the raw columns that level 1 averages.
+                    // it bounds, too costly for one piece). The scratch still holds the raw columns that level 1 averages.
                     var rows1 = UInt32(band * rows / 2)
                     enc.setComputePipelineState(reduceBasePipeline)
                     enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
                     enc.setBuffer(buf.giants, offset: 0, index: 1)
                     enc.setBytes(&rows1, length: MemoryLayout<UInt32>.stride, index: 2)
                     enc.setTexture(buf.levels[0], index: 0)
-                    enc.setTexture(scratch[0], index: 1)
+                    enc.setTexture(scratch, index: 1)
                     enc.setTexture(buf.levels[1], index: 2)
                     enc.dispatchThreads(MTLSize(width: World.size >> 1, height: rows / 2, depth: 1), threadsPerThreadgroup: tg)
                     enc.setComputePipelineState(climatePipeline)
