@@ -6851,7 +6851,9 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
             float2 fq = float2(dot(ww, wd) * 0.55, (ww.x * wd.y - ww.y * wd.x) * 0.26);
             float fl = seaNoise(fq + float2(-t * 0.6, t * 0.25), x.seed + 82u);
             // Runs of a crest a dozen voxels long, the rest of it calm.
-            cr *= smoothstep(-0.3, 0.1, seaNoise(fq * float2(0.2, 0.3) + float2(t * 0.05, 7.3), x.seed + 83u));
+            cr *= smoothstep(-0.15, 0.15, seaNoise(fq * float2(0.2, 0.3) + float2(t * 0.05, 7.3), x.seed + 83u));
+            // The surf breaks up again every few voxels whatever way the shore runs, so it never draws its outline.
+            if (sh > 0.0) cr *= mix(1.0, smoothstep(-0.1, 0.2, seaNoise(ww * 0.16 + float2(0, t * 0.1), x.seed + 85u)), sh);
             float fleck = smoothstep(0.05 - 0.15 * sh, 0.28, fl) * (0.3 + 1.1 * smoothstep(0.05, 0.4, e0));
             // Close up the foam is a grain of sparks rather than smooth blobs.
             if (fa < 0.4) fleck *= mix(0.45 + 1.1 * smoothstep(0.0, 0.45, seaNoise(ww * 2.3 + float2(t * 0.3, -t * 0.2), x.seed + 84u)), 1.0, fa * 2.5);
@@ -6896,7 +6898,7 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
                     float3 jc = (h & 192u) == 192u ? mix(SEAGLOW_PINK, SEAGLOW_BLUE, 0.35) : mix(SEAGLOW_TURQ, SEAGLOW_BLUE, 0.3);
                     jc = mix(jc, SEAGLOW_BLUE, saturate(dj * 0.25));
                     float lum = (r * r) / (re * re) * exp(-dj * 0.3);
-                    g += jc * (body + 0.12 * tent) * lum * 0.3 * smoothstep(260.0, 140.0, tw) * fj;
+                    g += jc * (body + 0.22 * tent) * lum * 0.3 * smoothstep(260.0, 140.0, tw) * fj;
                 }
             }
         }
@@ -6921,7 +6923,7 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
                     float dots = mix(smoothstep(0.22, 0.42, seaNoise(vr * 3.5, x.seed + 77u)), 0.1, saturate(fpv * 2.5));
                     float body = exp(-rr * rr * 2.0);
                     float3 pc = mix(SEAGLOW_TURQ, SEAGLOW_BLUE, 0.4 + 0.6 * saturate(rr));
-                    g += pc * body * (0.05 + (0.2 + 0.8 * arms) * dots) * 0.16 * smoothstep(320.0, 160.0, tw) * fp;
+                    g += pc * body * (0.05 + (0.3 + 0.7 * arms) * dots) * 0.11 * smoothstep(320.0, 160.0, tw) * fp;
                 }
             }
         }
