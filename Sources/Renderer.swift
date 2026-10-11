@@ -1484,6 +1484,7 @@ enum Snapshot {
             // Ruined towers: the closest the flight came to a plinth's edge below its top, and the seconds a tower stood in
             // frame within 9k.
             var towerEdge = Double.infinity, towerSeen = 0, towerClose = 0
+            var towersMet = Set<SIMD2<Int>>()
             for i in 1...Int(mins * 60) {
                 for _ in 0..<4 { r.simulate(0.25) }
                 let p = r.camera.position
@@ -1498,7 +1499,12 @@ enum Snapshot {
                 for t in r.towers.list {
                     let v = t.pos - SIMD2(p.x, p.z), d = simd_length(v)
                     if p.y < t.top { towerEdge = min(towerEdge, d - t.radius * 1.42) }
-                    if d < 9000, abs(atan2(sin(atan2(v.x, v.y) - r.camera.yaw), cos(atan2(v.x, v.y) - r.camera.yaw))) < 0.6 { seen = true }
+                    if d < 9000, abs(atan2(sin(atan2(v.x, v.y) - r.camera.yaw), cos(atan2(v.x, v.y) - r.camera.yaw))) < 0.6 {
+                        seen = true
+                        if towersMet.insert(SIMD2(Int(t.pos.x), Int(t.pos.y))).inserted {
+                            print(String(format: "flight tower seen t=%d at %.0f,%.0f member %d dist %.0f", i, t.pos.x, t.pos.y, t.member, d))
+                        }
+                    }
                     if d < 1500 { towerClose += 1 }
                 }
                 if seen { towerSeen += 1 }

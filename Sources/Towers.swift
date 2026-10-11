@@ -17,7 +17,7 @@ struct TowerInfo {
 
 // Rare ruined towers. Whether a group stands turns on the climate and the provinces at its centre, so placeTowers
 // decides it on the GPU for a square of world cells round the camera's; the list feeds the camera, and the records
-// nearest the camera are the shader's table (fragment buffer 8).
+// nearest the camera are the shader's table (fragment buffer 9; stage 3's giants hold 8).
 final class Towers {
     // Must match TOWER_CELL, TOWER_MEMBERS and TOWER_TABLE (and TowerRec's 64 bytes) in Shaders/Saver.metal.
     static let cell = 9000.0, members = 4, tableSize = 16, recordSize = 64
@@ -80,18 +80,24 @@ final class Towers {
             inFlight = true
             let n = Towers.grid
             encode(cb, into: buffer, first: c &- Int32(n / 2), n: n)
-            let done = { [weak self] in
+            // A failed placement keeps the old list and is tried again on the next update.
+            let done = { [weak self] (ok: Bool) in
                 guard let self else { return }
-                self.list = Towers.parse(self.buffer, count: n * n * Towers.members)
-                self.cellAt = c
+                if ok {
+                    self.list = Towers.parse(self.buffer, count: n * n * Towers.members)
+                    self.cellAt = c
+                }
                 self.inFlight = false
             }
             cb.commit()
             if wait {
                 cb.waitUntilCompleted()
-                done()
+                done(cb.status == .completed)
             } else {
-                cb.addCompletedHandler { _ in DispatchQueue.main.async(execute: done) }
+                cb.addCompletedHandler { b in
+                    let ok = b.status == .completed
+                    DispatchQueue.main.async { done(ok) }
+                }
             }
         }
     }

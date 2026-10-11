@@ -209,7 +209,7 @@ final class FlightCamera {
         for f in towerFlanks() {
             let a = abs(FlightCamera.angleDiff(f.bearing, heading))
             guard a < 0.35 else { continue }
-            let w = (0.55 * (1 - night) + (f.tower.lit ? 0.3 : 0.1) * night) * (1 - a / 0.35) * min(1, (9000 - f.d) / 2000)
+            let w = (0.3 * (1 - night) + (f.tower.lit ? 0.2 : 0.06) * night) * (1 - a / 0.35) * min(1, (9000 - f.d) / 2000)
             best = max(best, w)
         }
         return best
