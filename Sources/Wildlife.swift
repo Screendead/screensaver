@@ -127,8 +127,12 @@ final class Wildlife {
     private(set) var spawnMs = 0.0
     private let noiseSeed: UInt32
     var heightAt: (Double, Double) -> Double? = { _, _ in nil }
+    // The CPU cell under world (x, z) with its islands (World.column): top, ground islands aside, lowest underside.
+    var columnAt: (Double, Double) -> (top: Double, ground: Double, under: Double?)? = { _, _ in nil }
     // Giant trees on the loaded map (world coordinates).
     var giantsAt: () -> [GiantInfo] = { [] }
+    // Floating islands round the camera.
+    var islesAt: () -> [IslandInfo] = { [] }
 
     init(seed: UInt32) {
         state = UInt64(seed) &* 0x9E37_79B9_7F4A_7C15 ^ 0xD1B5_4A32_D192_ED03
@@ -163,6 +167,14 @@ final class Wildlife {
     }
 
     private func ground(_ x: Double, _ z: Double) -> Double { heightAt(x, z) ?? 200 }
+    // The ground as a bird at height y meets it: well under an island, the land beneath it; else the island's top.
+    private func ground(_ x: Double, _ z: Double, at y: Double) -> Double {
+        guard let c = columnAt(x, z) else { return 200 }
+        if let u = c.under, y < u - 12 { return c.ground }
+        return c.top
+    }
+    // The land with every island lifted away.
+    private func groundBare(_ x: Double, _ z: Double) -> Double { columnAt(x, z)?.ground ?? 200 }
     // Highest a flock flies over ground g: under the cloud base, unless the ground itself rises past it.
     private func topAlt(over g: Double, clearance c: Double) -> Double {
         max(FlightCamera.ceiling - 20, g + 2 * c)
@@ -183,7 +195,7 @@ final class Wildlife {
             for k in 0..<(r == 0 ? 1 : 8) {
                 let a = Double(k) * .pi / 4
                 let q = p + SIMD2(sin(a), cos(a)) * r
-                if ground(q.x, q.y) <= 20, r < bestD { best = q; bestD = r }
+                if groundBare(q.x, q.y) <= 20, r < bestD { best = q; bestD = r }
             }
             if best != nil { return best }
         }
@@ -324,12 +336,16 @@ final class Wildlife {
         let fl = Wildlife.flight(kind)
         let c2 = SIMD2(c.x, c.z)
         let r = simd_length(p - c2)
-        let minAlt = ground(p.x, p.y) + (kind == .gull ? 4 : 1) * fl.clearance + (kind == .raptor ? 25 : 0) + (kind == .starling ? 25 : 0)
+        let minAlt = groundBare(p.x, p.y) + (kind == .gull ? 4 : 1) * fl.clearance + (kind == .raptor ? 25 : 0) + (kind == .starling ? 25 : 0)
         var alt = max(c.y + r * tan(elev), minAlt)
         for k in 1...10 {
             let sfrac = 0.1 + 0.09 * Double(k)
             let q = c2 + (p - c2) * sfrac
-            alt = max(alt, c.y + (ground(q.x, q.y) + 4 - c.y) / sfrac)
+            alt = max(alt, c.y + (groundBare(q.x, q.y) + 4 - c.y) / sfrac)
+        }
+        // An island there: under it with room to spare, else over it.
+        if let col = columnAt(p.x, p.y), let u = col.under, alt > u - 20 - fl.clearance {
+            alt = u - 20 - fl.clearance >= minAlt ? u - 20 - fl.clearance : max(alt, col.top + fl.clearance)
         }
         return alt
     }
@@ -346,7 +362,7 @@ final class Wildlife {
 
     // Where advance() would put a bird at p: never closer to the ground than it allows.
     private func aboveGround(_ p: SIMD3<Double>) -> SIMD3<Double> {
-        SIMD3(p.x, max(p.y, ground(p.x, p.z) + 2), p.z)
+        SIMD3(p.x, max(p.y, ground(p.x, p.z, at: p.y) + 2), p.z)
     }
 
     // Room left in the bird buffer, so the renderer's caps never drop a bird that is drawn.
@@ -647,6 +663,22 @@ final class Wildlife {
                 f.anchor.z += away.y * 12 * w * dt
             }
         }
+        // Islands: flown round where the flock is level with one, flown under or over otherwise.
+        for s in islesAt() where f.anchor.y > s.keel - 40 && f.anchor.y < s.top + 20 {
+            let d = SIMD2(f.anchor.x - s.pos.x, f.anchor.z - s.pos.y), l = simd_length(d)
+            let near = s.reach + 140
+            guard l < near, l > 1 else { continue }
+            let away = d / l, fd = SIMD2(sin(f.heading), cos(f.heading))
+            let w = 1 - l / near
+            if simd_dot(fd, away) < 0.3 {
+                let side: Double = fd.x * away.y - fd.y * away.x > 0 ? -1 : 1
+                f.heading += side * 0.6 * w * dt
+            }
+            if l < s.reach + 30 {
+                f.anchor.x += away.x * 12 * w * dt
+                f.anchor.z += away.y * 12 * w * dt
+            }
+        }
         if (f.kind == .starling || (f.kind == .bat && arrived)) && !f.leaving {
             // These hold to one spot: the anchor circles slowly about where it arrived.
             f.heading += 0.12 * dt
@@ -671,17 +703,20 @@ final class Wildlife {
         if !arrived && f.kind != .starling { f.altitude += f.climb * dt }
         let vA = f.dir * f.speed + SIMD3(0, arrived || f.kind == .starling ? 0 : f.climb, 0)
         f.anchor += vA * dt
-        var gAhead = ground(f.anchor.x, f.anchor.z)
+        let ay = f.anchor.y
+        var gAhead = ground(f.anchor.x, f.anchor.z, at: ay)
         for d in [20.0, 45.0, 80.0] {
-            gAhead = max(gAhead, ground(f.anchor.x + vA.x / max(f.speed, 0.1) * d, f.anchor.z + vA.z / max(f.speed, 0.1) * d) - d * 0.15)
+            gAhead = max(gAhead, ground(f.anchor.x + vA.x / max(f.speed, 0.1) * d, f.anchor.z + vA.z / max(f.speed, 0.1) * d, at: ay) - d * 0.15)
         }
         // Birds spread to either side of the anchor (raptors circle ~35 out): a tall crown beside its track lifts the
         // flock too, so its birds pass over the canopy rather than climbing out of it one by one.
         let sideV = simd_normalize(SIMD2(-vA.z, vA.x) + 1e-9) * 35
-        gAhead = max(gAhead, ground(f.anchor.x + sideV.x, f.anchor.z + sideV.y), ground(f.anchor.x - sideV.x, f.anchor.z - sideV.y))
+        gAhead = max(gAhead, ground(f.anchor.x + sideV.x, f.anchor.z + sideV.y, at: ay), ground(f.anchor.x - sideV.x, f.anchor.z - sideV.y, at: ay))
         // Ground-relative: flocks rise with the land (over a wall, before it) and otherwise keep under the clouds.
         let lift = gAhead + fl.clearance * (f.kind == .raptor ? 2 : 1.5)
-        let yT = max(min(f.altitude, FlightCamera.ceiling - 20), lift)
+        var yT = max(min(f.altitude, FlightCamera.ceiling - 20), lift)
+        // Under an island the flock keeps below its underside.
+        if let c = columnAt(f.anchor.x, f.anchor.z), let u = c.under, ay < u - 12 { yT = min(yT, max(u - 20 - fl.clearance, c.ground + fl.clearance)) }
         f.anchor.y += (yT - f.anchor.y) * min(1, dt * (yT > f.anchor.y && lift > f.anchor.y - 5 ? 1.5 : 0.4))
 
         // Murmuration: a falcon-like disturbance loops through the flock, so it folds, splits and pulses.
@@ -762,12 +797,15 @@ final class Wildlife {
             let wy: Double = 0.35 * sin(wt * 0.87 + ph * 2.3)
             let wz: Double = sin(wt * 0.97 + ph * 3.1) + 0.5 * sin(wt * 2.29 + ph * 0.7)
             acc += SIMD3(wx, wy, wz) * fl.wander * (f.kind == .bat && !arrived ? 0.3 : 1)
-            // Terrain: climb away from ground ahead, and keep well under the cloud base.
+            // Terrain: climb away from ground ahead, and keep well under the cloud base, and under an island's underside.
             let look = b.pos + b.vel * 1.2, look2 = b.pos + b.vel * 2.5
-            let g = max(ground(b.pos.x, b.pos.z), ground(look.x, look.z), ground(look2.x, look2.z) - 3)
+            let by = b.pos.y
+            let g = max(ground(b.pos.x, b.pos.z, at: by), ground(look.x, look.z, at: by), ground(look2.x, look2.z, at: by) - 3)
             let clear = fl.clearance
             if b.pos.y < g + clear { acc.y += (g + clear - b.pos.y) * 4 }
-            if b.pos.y > 215 { acc.y -= (b.pos.y - 215) * 2 }
+            let roof = max(215, g + clear + 10)
+            if b.pos.y > roof { acc.y -= (b.pos.y - roof) * 2 }
+            if let c = columnAt(look.x, look.z), let u = c.under, by < u - 12, by > u - 12 - clear { acc.y -= (by - (u - 12 - clear)) * 4 }
 
             b.vel += acc * dt
             var s = simd_length(b.vel)
@@ -778,10 +816,19 @@ final class Wildlife {
             b.vel.y = max(-maxY, min(maxY, b.vel.y))
             b.pos += b.vel * dt
             // Never into the ground. Its 4x4 maximum steps by whole voxels from cell to cell, so a bird under it
-            // climbs out at its top speed rather than jumping onto it.
-            if let h = heightAt(b.pos.x, b.pos.z), b.pos.y < h + 1.5 {
-                b.pos.y = min(h + 1.5, b.pos.y + fl.maxSpeed * dt)
-                b.vel.y = max(b.vel.y, maxY)
+            // climbs out at its top speed rather than jumping onto it; one caught in an island's rock leaves by the nearer
+            // of its top and underside.
+            if let c = columnAt(b.pos.x, b.pos.z) {
+                if let u = c.under, b.pos.y >= u - 12, b.pos.y < c.top + 1.5, b.pos.y - u < c.top - b.pos.y {
+                    b.pos.y = max(u - 12, b.pos.y - fl.maxSpeed * dt)
+                    b.vel.y = min(b.vel.y, -maxY)
+                } else {
+                    let h = c.under.map { b.pos.y < $0 - 12 ? c.ground : c.top } ?? c.top
+                    if b.pos.y < h + 1.5 {
+                        b.pos.y = min(h + 1.5, b.pos.y + fl.maxSpeed * dt)
+                        b.vel.y = max(b.vel.y, maxY)
+                    }
+                }
             }
 
             // Wingbeats in bursts between glides; a climbing bird keeps flapping.
