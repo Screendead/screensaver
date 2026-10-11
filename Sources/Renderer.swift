@@ -878,6 +878,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     let scenePipelines: [[MTLRenderPipelineState]]
     let postPipeline: MTLRenderPipelineState
     let taaPipeline: MTLRenderPipelineState
+    // The glowing bugs (bioFragment), drawn over the scene in its pass from late dusk.
+    private let bioPipeline: MTLRenderPipelineState
     private let cloudPipeline: MTLComputePipelineState
     // Shadow-height maps (see bakeShadowHeight in Shaders/Saver.metal): near and far cascades, a band rebaked per frame.
     private let shadowPipeline: MTLComputePipelineState
@@ -988,6 +990,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         taa.vertexFunction = lib.makeFunction(name: "fullscreenVertex")
         taa.fragmentFunction = lib.makeFunction(name: "taaFragment")
         taa.colorAttachments[0].pixelFormat = .rgba16Float
+        let bio = scene.copy() as! MTLRenderPipelineDescriptor
+        bio.fragmentFunction = lib.makeFunction(name: "bioFragment")
         func sceneVariant(towers: Bool, bands: Bool) -> MTLRenderPipelineDescriptor {
             let fc = MTLFunctionConstantValues()
             var b = bands, t = towers
@@ -1000,6 +1004,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         let sceneStates = [false, true].map { t in [false, true].compactMap { b in try? device.makeRenderPipelineState(descriptor: sceneVariant(towers: t, bands: b)) } }
         guard sceneStates.allSatisfy({ $0.count == 2 }),
               let tp = try? device.makeRenderPipelineState(descriptor: taa),
+              let bp = try? device.makeRenderPipelineState(descriptor: bio),
               let pp = try? device.makeRenderPipelineState(descriptor: post),
               let cf = lib.makeFunction(name: "cloudField").flatMap({ try? device.makeComputePipelineState(function: $0) }),
               let csf = lib.makeFunction(name: "cloudSlowField").flatMap({ try? device.makeComputePipelineState(function: $0) }),
@@ -1019,6 +1024,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         scenePipelines = sceneStates
         postPipeline = pp
         taaPipeline = tp
+        bioPipeline = bp
         cloudPipeline = cf
         slowPipeline = csf
         shadowPipeline = shP
@@ -1360,6 +1366,10 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentBuffer(world.giantBuffer, offset: 0, index: 8)
             enc.setFragmentBytes(towers.table, length: Towers.tableBytes, index: 9)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            if f.sunDir.y < 0.04 {
+                enc.setRenderPipelineState(bioPipeline)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            }
             enc.endEncoding()
         }
         let tpd = MTLRenderPassDescriptor()

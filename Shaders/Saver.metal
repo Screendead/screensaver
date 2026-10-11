@@ -6078,6 +6078,81 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
     }
 }
 
+// MARK: - Bioluminescence
+
+// Shared with the sea's glow: deep blue, turquoise and pink (#2a6bff, #2fe3d0, #ff5fc8), linear.
+constant float3 BIO_LAND[3] = { float3(0.023, 0.147, 1.0), float3(0.028, 0.768, 0.630), float3(1.0, 0.114, 0.578) };
+
+// One glowing spot per cell of face coordinates q, present with chance pr: a soft core and halo round a hashed centre,
+// held off the cell's edges so it never needs a neighbour cell. Once the core nears a pixel it widens and dims, keeping
+// its light, so it never shrinks to a speck that sparkles. hues: the chances of blue and turquoise; pink takes the rest.
+// w: the spot's draw against pr, in [0, 1) (2 for none), which the caller compares with the ground's own share.
+static float4 bioSpot(float2 q, int plane, float cell, float pr, float r, float fp, uint salt, float time, float2 hues) {
+    float2 ci = floor(q / cell);
+    uint hh = hash3i(int3(int2(ci), plane), salt);
+    float u = hashf(hh);
+    if (u >= pr) return float4(0, 0, 0, 2);
+    uint h1 = pcg(hh), h2 = pcg(h1), h3 = pcg(h2), h4 = pcg(h3);
+    float m = 0.35 * cell;
+    float2 c = ci * cell + m + (cell - 2.0 * m) * float2(hashf(h1), hashf(h2));
+    float dd = length(q - c);
+    if (dd >= m) return float4(0, 0, 0, 2);
+    float rr = r * (0.6 + 0.8 * hashf(h3));
+    float re = max(rr, 0.8 * fp);
+    float e2 = dd * dd / (re * re);
+    float g = (2.0 * exp(-e2) + 0.5 * exp(-e2 / 9.0)) * (rr * rr) / (re * re) * (1.0 - smoothstep(0.6 * m, m, dd));
+    float hp = hashf(h4);
+    float3 hue = hp < hues.x ? BIO_LAND[0] : hp < hues.x + hues.y ? BIO_LAND[1] : BIO_LAND[2];
+    return float4(hue * g * (0.75 + 0.25 * sin(time * (0.4 + 0.5 * hashf(pcg(h4))) + 6.283 * hp)), u / pr);
+}
+
+// Glowing fungus on trunk feet, speckled leaves (thickest under a giant's crown) and glowing plants on the forest floor:
+// in the forest provinces and on giants, thinly in other damp woods, in patches. Whether a spot is there is fixed by
+// place; distance only dims it.
+static float3 bioGlow(texture2d<float> hm, texture2d<uint> st, texture2d<float> clim, texture2d<float> pv,
+                      int2 origin, uint seed, float time, int mat, int3 v, int3 n, float3 p, float fp) {
+    int size = int(hm.get_width());
+    float4 col4 = hm.read(uint2(clamp(v.xz, int2(0), int2(size - 1))), 0);
+    // Multi-run columns are emergents and old-growth trees as well as giants; only giants carry a palette.
+    bool multi = col4.a == GIANT_A;
+    uint gsb = multi ? st.read(uint2(clamp(v.xz, int2(0), int2(size - 1)))).r : 0u;
+    bool giant = multi && ((gsb >> 28) & 7u) != 0u;
+    // Giants carry their glow farther than the scatter elsewhere, which far off would mass into a sprinkled carpet.
+    float far = giant ? 1.0 : 1.0 - smoothstep(0.25, 0.5, fp);
+    if (far <= 0.0) return 0;
+    int3 vw = v + int3(origin.x, 0, origin.y);
+    float3 wp = p + float3(float(origin.x), 0.0, float(origin.y));
+    float2 q = n.y != 0 ? wp.xz : float2(n.x != 0 ? wp.z : wp.x, wp.y);
+    int plane = n.x != 0 ? vw.x * 2 + n.x : n.z != 0 ? vw.z * 2 + n.z : n.y;
+    float fade = far;
+    // Per kind: cell, chance, radius, hue chances (blue, turquoise; pink the rest).
+    float4 k4;
+    float2 hues;
+    if (mat == 2 || mat == 3) {
+        if (n.y != 0) return 0;
+        float top = giant ? 16.0 : 4.0, hb = p.y - (multi ? float(gsb & 2047u) : col4.g);
+        if (hb > top) return 0;
+        fade *= 1.0 - smoothstep(0.4 * top, top, hb);
+        k4 = giant ? float4(3.0, 0.6, 0.5, 0) : float4(2.0, 0.45, 0.3, 0);
+        hues = float2(0.3, 0.2);
+    } else if (mat == 1) {
+        k4 = float4(giant ? 2.5 : 4.0, giant ? (n.y < 0 ? 0.6 : 0.06) : 0.015, 0.35, 1);
+        hues = float2(0.25, 0.6);
+    } else if (mat == 0 && n.y > 0) {
+        k4 = float4(6.0, 0.1, 0.5, 2);
+        hues = float2(0.25, 0.4);
+        plane = 0;
+    } else return 0;
+    float4 sp = bioSpot(q, plane, k4.x, k4.y, k4.z, fp, seed + 701u + uint(k4.w), time, hues);
+    if (sp.w >= 1.0) return 0;
+    if (giant) return sp.rgb * fade;
+    Climate c = climateAt(clim, float2(v.xz) + 0.5, pv, origin);
+    float prov = smoothstep(0.1, 0.5, provinceAmount(c));
+    float wet = k4.w == 2.0 ? prov : max(prov, 0.3 * smoothstep(0.4, 0.65, c.moist));
+    wet *= (1.0 - smoothstep(0.42, 0.18, c.temp)) * smoothstep(0.05, 0.4, perlin2(float2(vw.xz) / 70.0, seed + 704u));
+    return sp.w < wet ? sp.rgb * fade : float3(0);
+}
+
 // shadows: 0 none, 1 traced near ray and maps, 2 maps only (reflections: ripples hide contact shadows).
 // L: the light (the bed under water takes it refracted); inWater: seen in rippled water.
 static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3 d, Hit h, int shadows, bool inWater = false) {
@@ -6325,6 +6400,10 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
             col += s.albedo * Lm * ((face * mix(1.0, ao, 0.5)) / (1.0 + dy * dy) + glow) * x.lights.w;
         }
     }
+    // From late dusk; gone before the 1-voxel ring's morph band. Not in reflections, whose ripples would sparkle it.
+    float bio = smoothstep(0.04, -0.12, L.sun.y) * (1.0 - smoothstep(0.5, 1.0, fp));
+    if (bio > 0.0 && k == 0 && shadows == 1 && s.mat < 4)
+        col += bioGlow(x.tr.hm, x.st, x.tr.clim, x.tr.pv, x.origin, x.seed, x.time, s.mat, h.voxel, h.normal, p, fp) * bio;
     return col + s.emit;
 }
 
@@ -6782,6 +6861,102 @@ static float3 hazeAndSmoke(thread const Ctx& x, float3 col, device const Site* s
         }
     }
     return col;
+}
+
+// Glowing bugs drifting in and around the foliage after dusk: at most one in each MOTE_CELL cube, kept far enough inside
+// it that its drift and halo never reach a neighbour, so a ray visits only the cubes it crosses. Whether a bug is there
+// is decided at its anchor, so drifting over a column edge never switches it.
+constant float MOTE_CELL = 6.0;
+constant float MOTE_REACH = 50.0;
+
+static float3 bioMotes(texture2d<float> hm, texture2d<float> hx, texture2d<float> clim, texture2d<float> pv,
+                       int2 origin, uint seed, float time, float pixelAngle, float3 o, float3 d, float tEnd) {
+    tEnd = min(tEnd, MOTE_REACH);
+    // Bugs keep within 8 of the column tops (plus drift and halo): the ray is clipped to below the highest top round the
+    // camera, which leaves out the sky and the open air a camera flies through.
+    int2 lim = int2(hx.get_width(8), hx.get_height(8)) - 1;
+    uint2 b0 = uint2(clamp(int2(floor(o.xz - MOTE_REACH)) >> 8, int2(0), lim)), b1 = uint2(clamp(int2(floor(o.xz + MOTE_REACH)) >> 8, int2(0), lim));
+    float yLim = max(max(abs(hx.read(b0, 8).r), abs(hx.read(uint2(b1.x, b0.y), 8).r)),
+                     max(abs(hx.read(uint2(b0.x, b1.y), 8).r), abs(hx.read(b1, 8).r))) + 10.0;
+    float t0 = 2.0;
+    if (o.y > yLim) {
+        if (d.y >= 0.0) return 0;
+        t0 = max(t0, (o.y - yLim) / -d.y);
+    }
+    if (d.y > 0.0) tEnd = min(tEnd, (yLim - o.y) / d.y);
+    if (t0 >= tEnd) return 0;
+    float2 org = float2(origin);
+    float3 wo = o + float3(org.x, 0.0, org.y);
+    float3 pc = (wo + d * t0) / MOTE_CELL;
+    int3 c = int3(floor(pc));
+    int3 stp = int3(d.x >= 0.0 ? 1 : -1, d.y >= 0.0 ? 1 : -1, d.z >= 0.0 ? 1 : -1);
+    float3 ad = max(abs(d), 1e-6);
+    float3 tDelta = MOTE_CELL / ad;
+    float3 tMax = (select(pc - float3(c), float3(c) + 1.0 - pc, d >= 0.0)) * tDelta;
+    tMax += t0;
+    float3 sum = 0;
+    float t = t0;
+    for (int i = 0; i < 24 && t < tEnd; i++) {
+        uint hh = pcg(uint(c.x) * 1597334677u ^ uint(c.y) * 3812015801u ^ uint(c.z) * 2798796415u ^ (seed + 710u));
+        if (hashf(hh) < 0.5) {
+            uint h1 = pcg(hh), h2 = pcg(h1), h3 = pcg(h2);
+            float3 a = float3(c) * MOTE_CELL + 1.3 + (MOTE_CELL - 2.6) * float3(hashf(h1), hashf(h2), hashf(h3));
+            float3 va = a - wo;
+            float ta = dot(va, d);
+            // The drift moves a bug at most 1.2 from its anchor.
+            float ra = 3.0 * max(0.1, 0.8 * (ta + 1.2) * pixelAngle) + 1.2;
+            if (ta > -0.7 && ta < tEnd + 1.2 && dot(va, va) - ta * ta < ra * ra) {
+                uint h4 = pcg(h3), h5 = pcg(h4);
+                float ph = 6.283 * hashf(h4);
+                float3 m = a + 0.8 * float3(sin(time * 0.31 + ph), 0.5 * sin(time * 0.47 + 1.7 * ph), sin(time * 0.23 + 2.3 * ph));
+                float3 v = m - wo;
+                float tm = dot(v, d);
+                float re = max(0.1, 0.8 * tm * pixelAngle);
+                float d2 = dot(v, v) - tm * tm;
+                if (tm > 0.5 && tm < tEnd && d2 < 9.0 * re * re) {
+                    float2 ml = a.xz - org;
+                    float4 col4 = hm.read(uint2(clamp(int2(floor(ml)), int2(0), int2(hm.get_width() - 1))), 0);
+                    bool veg = col4.a > 0.0 || col4.a == GIANT_A;
+                    float above = a.y - col4.r;
+                    if (above < 8.0 && above > (veg ? -25.0 : -1.0)) {
+                        Climate cl = climateAt(clim, ml, pv, origin);
+                        float w = max(smoothstep(0.1, 0.5, provinceAmount(cl)), veg ? 0.2 * smoothstep(0.35, 0.6, cl.moist) : 0.0)
+                                * (1.0 - smoothstep(0.42, 0.18, cl.temp));
+                        if (hashf(h5) < w) {
+                            float e2 = d2 / (re * re);
+                            float g = (3.0 * exp(-e2) + 0.4 * exp(-e2 / 9.0)) * (0.1 * 0.1) / (re * re);
+                            // Each flashes on its own slow rhythm, fading in and out over a second or so.
+                            float blink = 0.15 + 0.85 * smoothstep(0.3, 1.0, sin(time * (0.5 + 0.6 * hashf(pcg(h5))) + ph));
+                            float hp = hashf(pcg(h5 + 1u));
+                            float3 hue = hp < 0.2 ? BIO_LAND[0] : hp < 0.75 ? BIO_LAND[1] : BIO_LAND[2];
+                            sum += hue * g * blink * smoothstep(3.0, 10.0, tm) * (1.0 - smoothstep(0.65 * MOTE_REACH, MOTE_REACH, tm));
+                        }
+                    }
+                }
+            }
+        }
+        if (tMax.x < tMax.y && tMax.x < tMax.z) { t = tMax.x; tMax.x += tDelta.x; c.x += stp.x; }
+        else if (tMax.y < tMax.z) { t = tMax.y; tMax.y += tDelta.y; c.y += stp.y; }
+        else { t = tMax.z; tMax.z += tDelta.z; c.z += stp.z; }
+    }
+    return sum;
+}
+
+// The bugs: a second draw over the scene from late dusk (Renderer), adding their glow along each pixel's ray to the depth
+// the scene left in alpha. In the scene pass itself, even skipped, they cost a busy night scene ~0.5 ms.
+fragment float4 bioFragment(VOut in [[stage_in]], float4 dst [[color(0)]], constant Frame& f [[buffer(0)]],
+                            texture2d<float> hm [[texture(0)]], texture2d<float> clim [[texture(2)]],
+                            texture2d<float> hx [[texture(12)]], texture2d<float> pvTex [[texture(16)]]) {
+    float a = smoothstep(0.04, -0.12, f.sunDir.y);
+    if (a <= 0.0) return dst;
+    float2 ndc = in.uv * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+    ndc += f.jitter.xy;
+    float tanH = f.camPos.w;
+    float3 d = normalize(f.camFwd.xyz + f.camRight.xyz * ndc.x * tanH * f.camFwd.w + f.camUp.xyz * ndc.y * tanH);
+    float3 g = bioMotes(hm, hx, clim, pvTex, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, 2.0 * tanH * f.resolution.w,
+                        f.camPos.xyz, d, abs(dst.a));
+    return float4(dst.rgb + g * a, dst.a);
 }
 
 fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0)]],
