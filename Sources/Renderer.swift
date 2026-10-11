@@ -156,6 +156,8 @@ final class World {
         var cpuFloors: [Float] = []
         var siteList: [SiteInfo] = []
         var giantList: [GiantInfo] = []
+        // Whether the jungle's roof (Shaders/Saver.metal jungleCanopy) may stand on this map.
+        var jungle = false
 
         init?(device: MTLDevice) {
             let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: World.size, height: World.size, mipmapped: false)
@@ -238,11 +240,11 @@ final class World {
     var giantBuffer: MTLBuffer { buffers[active].giants }
     var sites: [SiteInfo] { buffers[active].siteList }
     var giants: [GiantInfo] { buffers[active].giantList }
-    // Whether any cell of the active map's band mips is flagged: some giant's reach meets it.
+    // Whether any cell of the active map's band mips may be flagged: some giant's reach meets it, or the jungle's roof.
     var bandsOnMap: Bool {
         let b = buffers[active]
         let lo = SIMD2(Double(b.origin.x), Double(b.origin.y)) - GiantInfo.reach, hi = lo + Double(World.size) + 2 * GiantInfo.reach
-        return b.giantList.contains { all($0.pos .> lo) && all($0.pos .< hi) }
+        return b.jungle || b.giantList.contains { all($0.pos .> lo) && all($0.pos .< hi) }
     }
 
     init?(device: MTLDevice, library: MTLLibrary, seed: UInt32) {
@@ -454,6 +456,11 @@ final class World {
             buf.globalMax = top + 1
             buf.siteList = World.readSites(buf.sites)
             buf.giantList = World.readGiants(buf.giants)
+            buf.jungle = stride(from: 0, through: World.size, by: 64).contains { x in
+                stride(from: 0, through: World.size, by: 64).contains { z in
+                    Provinces.at(Double(Int(o.x) + x), Double(Int(o.y) + z), seed: self.seed).0 > 0.1
+                }
+            }
             if Renderer.logTiming || World.logSites {
                 for g in buf.giantList { print(String(format: "giant at (%.0f, %.0f) ground %.0f top %.0f", g.pos.x, g.pos.y, g.ground, g.top)) }
             }

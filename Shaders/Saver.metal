@@ -784,7 +784,6 @@ static void giantIntervals(thread const Giant& g, float2 wq, float gl, int lod, 
     float2 q = wq - g.c;
     float d = length(q);
     float G = g.G;
-    r.n = 0;
     // Everything that reads the table relies on this bound.
     if (d > GIANT_REACH - 1.0) return;
     // Trunk: marched up from the ground (its radius is not monotone in height once fluted).
@@ -907,15 +906,14 @@ static void giantIntervals(thread const Giant& g, float2 wq, float gl, int lod, 
     }
 }
 
-// The column a giant makes at world column wq over ground gl: up to four solid runs (the lowest from the ground), as
-// (top, principal gap) plus two extra gaps and per-run material. False if nothing of it stands over this column.
-struct GCol { float H, gl, gh; float4 e; float leafStart; uint mats; };
+// A vegetation column from its solid intervals over ground gl: up to four solid runs (the lowest from the ground), as
+// (top, principal gap) plus two extra gaps, the run count n, the top run's first leaf, and per run (the first three) a
+// material: leaf, vine or wood by covered height; for the top run, that of its part below the first leaf. False if
+// nothing stands over the ground.
+struct GCol { float H, gl, gh; float4 e; float leafStart; uint mats; int n; };
 
-static bool giantColumn(thread const Giant& g, float2 wq, float gl, float tlo, float thi, thread GCol& o, int lod = 0) {
-    GRuns r;
-    giantIntervals(g, wq, gl, lod, r);
+static bool runsColumn(thread GRuns& r, float gl, thread GCol& o) {
     if (r.n == 0) return false;
-    gAdd(r, tlo, thi, GM_LEAF);
     // Sort by start.
     for (int i = 1; i < r.n; i++) {
         float a = r.lo[i], b = r.hi[i];
@@ -924,8 +922,7 @@ static bool giantColumn(thread const Giant& g, float2 wq, float gl, float tlo, f
         while (j >= 0 && r.lo[j] > a) { r.lo[j + 1] = r.lo[j]; r.hi[j + 1] = r.hi[j]; r.m[j + 1] = r.m[j]; j--; }
         r.lo[j + 1] = a; r.hi[j + 1] = b; r.m[j + 1] = m;
     }
-    // Merge into runs, the ground run first; gaps under two voxels close. Per run: material (leaf beats vine beats
-    // wood by covered height) and the lowest leaf.
+    // Merge into runs, the ground run first; gaps under two voxels close.
     float RL[8], RH[8], leafLo[8], leafH[8], vineH[8];
     int n = 1;
     RL[0] = 0.0; RH[0] = gl; leafLo[0] = 1e9; leafH[0] = 0; vineH[0] = 0;
@@ -951,18 +948,142 @@ static bool giantColumn(thread const Giant& g, float2 wq, float gl, float tlo, f
         for (int i = best; i < n - 1; i++) { RL[i] = RL[i + 1]; RH[i] = RH[i + 1]; leafLo[i] = leafLo[i + 1]; leafH[i] = leafH[i + 1]; vineH[i] = vineH[i + 1]; }
         n--;
     }
+    o.n = n;
     o.H = RH[n - 1];
     o.gl = n >= 2 ? RH[n - 2] : 0.0;
     o.gh = n >= 2 ? RL[n - 1] : 0.0;
     o.e = float4(n >= 3 ? RH[n - 3] : 0.0, n >= 3 ? RL[n - 2] : 0.0, n >= 4 ? RH[n - 4] : 0.0, n >= 4 ? RL[n - 3] : 0.0);
     o.leafStart = leafLo[n - 1] < 1e8 ? max(leafLo[n - 1], RL[n - 1]) : o.H;
     o.mats = 0u;
-    for (int i = 0; i < min(n - 1, 3); i++) {
-        float len = RH[i] - max(RL[i], i == 0 ? gl : RL[i]);
-        uint m = leafH[i] > 0.4 * len ? uint(GM_LEAF) : vineH[i] > 0.4 * len ? uint(GM_VINE) : uint(GM_WOOD);
+    for (int i = 0; i < min(n, 3); i++) {
+        float lo = max(RL[i], i == 0 ? gl : RL[i]);
+        uint m;
+        if (i == n - 1) m = vineH[i] > 0.4 * (o.leafStart - lo) ? uint(GM_VINE) : uint(GM_WOOD);
+        else m = leafH[i] > 0.4 * (RH[i] - lo) ? uint(GM_LEAF) : vineH[i] > 0.4 * (RH[i] - lo) ? uint(GM_VINE) : uint(GM_WOOD);
         o.mats |= m << (2u * uint(i));
     }
     return true;
+}
+
+// The column a giant makes at world column wq over ground gl, with any other intervals already in r (the jungle's).
+static bool giantColumn(thread const Giant& g, float2 wq, float gl, thread GRuns& r, thread GCol& o, int lod = 0) {
+    giantIntervals(g, wq, gl, lod, r);
+    return runsColumn(r, gl, o);
+}
+
+// MARK: - Jungle
+
+// A jungle is a roof, not a crowd of separate trees: rounded crowns packed one to a JUNGLE_CELL cell over a lower, lumpy
+// fill, a dozen and more voxels above the ground and a few thick, opened by clearings that widen toward the province's
+// edge until the roof breaks into groves; emergents (one to an EMERGENT_CELL cell, about half of them) break through it
+// on tall trunks with flat, layered umbrella crowns. Every part is a closed-form function of position and of the ground
+// under it, so the coarse rings rebuild the same forest.
+constant float JUNGLE_CELL = 8.0;
+constant float EMERGENT_CELL = 26.0;
+
+struct JCan { float lo, hi; bool trunk; };
+
+// The roof over world column centre w, on ground gs (smoothed over a few columns); empty (hi <= lo) where open. Crowns
+// are cauliflower domes; at a clearing's edge the crowns and the fill hang down to the ground in a wall of leaves, so the
+// roof never stands on bare poles where it can be seen from the side.
+static JCan jungleCanopy(float2 w, float gs, float J, uint seed) {
+    JCan o;
+    o.lo = 0.0; o.hi = 0.0; o.trunk = false;
+    if (J < 0.15) return o;
+    float2 so = seedOffset(seed), p = w + so;
+    float base = gs + 14.0 + 5.0 * perlin2(p / 110.0, seed + 321u);
+    // Clearings: about one part in eight deep in the province, most of the land at its edge.
+    float thr = mix(0.45, -0.38, smoothstep(0.15, 0.8, J));
+    float lump = 1.2 * perlin2(p / 2.6, seed + 325u) + 1.0 * perlin2(p / 6.0, seed + 327u);
+    float hi = -1e9, lo = 1e9;
+    int2 c0 = int2(floor(w / JUNGLE_CELL));
+    for (int j = -1; j <= 1; j++)
+        for (int i = -1; i <= 1; i++) {
+            int2 cc = c0 + int2(i, j);
+            uint h = hash2i(cc, seed + 322u);
+            float2 ctr = (float2(cc) + 0.2 + 0.6 * float2(hashf(h), hashf(pcg(h)))) * JUNGLE_CELL;
+            float R = 3.5 + 4.0 * hashf(pcg(h + 1u));
+            float2 dq = w - ctr;
+            float d2 = dot(dq, dq);
+            if (d2 >= R * R) continue;
+            float open = perlin2((ctr + so) / 52.0, seed + 323u) - thr;
+            if (open < 0.0) continue;
+            float dome = sqrt(1.0 - d2 / (R * R));
+            float lift = 5.0 * hashf(pcg(h + 2u)) - 1.0;
+            hi = max(hi, base + lift + 0.85 * R * dome + lump * dome);
+            lo = min(lo, open < 0.1 ? -1e9 : base + lift - 2.0 - 1.5 * dome);
+            if (d2 < 0.5 && hashf(pcg(h + 3u)) < 0.3) o.trunk = true;
+        }
+    float open = perlin2(p / 52.0, seed + 323u) - thr - 0.08;
+    if (open >= 0.0) {
+        hi = max(hi, base - 0.5 + 1.5 * perlin2(p / 5.0, seed + 324u));
+        lo = min(lo, open < 0.06 ? -1e9 : base - 4.5);
+    }
+    if (hi < max(lo, gs) + 1.0) return o;
+    o.lo = max(floor(lo + 0.5), -1.0);
+    o.hi = max(floor(hi + 0.5), o.lo + 1.0);
+    return o;
+}
+
+// One emergent's crown pad j (of up to 3): centre (xz relative to the trunk, y above its ground) and radius in w,
+// thickness in T.
+static inline float4 emergentPad(uint h, int j, float R, float y0, thread float& T) {
+    T = 6.0 + 4.0 * hashf(pcg(h + 10u));
+    if (j == 0) return float4(0.0, y0, 0.0, R);
+    uint hj = pcg(h + 20u + uint(j) * 7u);
+    float a = hashf(hj) * 6.2831853;
+    float2 o = float2(cos(a), sin(a)) * R * (0.45 + 0.25 * hashf(pcg(hj)));
+    T *= 0.8;
+    return float4(o.x, y0 - 3.0 - 5.0 * hashf(pcg(hj + 1u)), o.y, R * (0.5 + 0.2 * hashf(pcg(hj + 2u))));
+}
+
+// The emergent of cell cc, if it has one: trunk position (world), its crown's height above the ground, crown radius
+// and pad count.
+static inline bool emergentIn(int2 cc, uint seed, float J, thread float2& ctr, thread float& y0, thread float& R, thread int& pads, thread uint& h) {
+    h = hash2i(cc, seed + 330u);
+    if (hashf(h) > 0.22 * smoothstep(0.6, 0.85, J)) return false;
+    ctr = floor((float2(cc) + 0.25 + 0.5 * float2(hashf(pcg(h + 1u)), hashf(pcg(h + 2u)))) * EMERGENT_CELL) + 0.5;
+    // Only out of a closed roof: alone in a clearing it would be a crown on a pole.
+    if (perlin2((ctr + seedOffset(seed)) / 52.0, seed + 323u) < mix(0.45, -0.38, smoothstep(0.15, 0.8, J)) + 0.25) return false;
+    y0 = 25.0 + 15.0 * hashf(pcg(h + 3u));
+    R = 8.0 + 6.0 * hashf(pcg(h + 4u));
+    pads = 1 + int(hashf(pcg(h + 5u)) * 2.99);
+    return true;
+}
+
+// The intervals emergent e (trunk ground gt) adds to world column centre w: its trunk, and its crown's noise-edged,
+// domed pads. lod >= 1 (coarse rings): the trunk only where it fills the column.
+static void emergentIntervals(float2 w, float2 ctr, float gt, float y0, float R, int pads, uint h, uint seed, int lod, thread GRuns& r) {
+    float2 q = w - ctr;
+    float d = length(q);
+    float tr = R > 9.5 ? 1.2 : 0.75;
+    if (d < tr + (lod > 0 ? 0.0 : 0.0)) gAdd(r, gt, gt + y0, GM_WOOD);
+    float2 p = w + seedOffset(seed);
+    for (int j = 0; j < pads; j++) {
+        float T;
+        float4 P = emergentPad(h, j, R, y0, T);
+        float2 dq = q - P.xz;
+        float dd = length(dq);
+        if (dd > P.w * 1.35) continue;
+        float2 u2 = dq / max(dd, 1e-3);
+        float edge = P.w * (1.0 + 0.30 * perlin2(u2 * 1.7 + float(j) * 4.1 + hashf(h) * 50.0, seed + 331u));
+        if (dd >= edge) continue;
+        float u = dd / edge;
+        // Domed and lumpy on top, a sagging, ragged underside: a cloud of leaves, not a plate.
+        float lumps = 1.6 * perlin2(p / 3.2, seed + 332u) + 1.2 * perlin2(p / 7.0, seed + 333u);
+        float top = gt + P.y + T * 0.6 * sqrt(1.0 - u * u) + lumps * sqrt(1.0 - u * u);
+        float bot = gt + P.y - T * 0.35 * sqrt(1.0 - u * u) + 1.2 * perlin2(p / 4.5, seed + 334u);
+        if (top > bot + 1.0) gAdd(r, floor(bot), floor(top) + 1.0, GM_LEAF);
+        // A limb out to each side pad.
+        if (j > 0 && lod == 0) {
+            float2 a = float2(0), b = P.xz;
+            float t = saturate(dot(q - a, b - a) / max(dot(b - a, b - a), 1e-3));
+            if (length(q - (a + (b - a) * t)) < 0.7) {
+                float yl = gt + mix(y0 - 6.0, P.y, t);
+                gAdd(r, yl - 0.5, yl + 1.0, GM_WOOD);
+            }
+        }
+    }
 }
 
 // Grove density: a low-frequency Perlin field gated by climate; zero on sand, snow, desert and water.
@@ -986,8 +1107,8 @@ static inline float groveDensity(float2 w, float g, uint seed) {
                 * smoothstep(0.2, 0.45, perlin2(p / 60.0, seed + 113u));
     // Lone trees dot even dry grassland; groves need moisture.
     float dens = (0.02 * open + mix(0.32, 0.45, autumn) * dense * wet + 0.35 * scrub) * band;
-    // The forest provinces are dense throughout.
-    dens = max(dens, 0.62 * provinceAmount(c) * band);
+    // Old-growth country is forest throughout; the jungle grows its own roof (jungleCanopy), and groves round its edge.
+    dens = max(dens, 0.62 * c.old * band);
     return dens;
 }
 
@@ -1059,6 +1180,21 @@ static inline int2 canopySpan(Tree t, int2 o) {
     return int2(0);
 }
 
+// Writes a vegetation column built by runsColumn over ground G: as a tree column (w = first leaf, g the ground, b = g on
+// trunks and buried canopies, b = w under a floating canopy) where it is one, else as a multi-run column (GIANT_A, its
+// ground and materials in st, extra gaps in gx).
+static void writeVeg(GCol gc, float G, uint2 gid, texture2d<float, access::write> dst, texture2d<uint, access::read_write> gx,
+                     texture2d<uint, access::write> st) {
+    bool simple = gc.n == 1 || (gc.n == 2 && gc.gl == G && gc.leafStart == gc.gh);
+    if (simple && (gc.mats >> (2u * uint(gc.n - 1)) & 3u) != uint(GM_VINE) && G < 2047.0) {
+        dst.write(float4(gc.H, G, gc.n == 2 ? gc.gh : G, max(gc.leafStart, G)), gid);
+        return;
+    }
+    dst.write(float4(gc.H, gc.gl, gc.gh, GIANT_A), gid);
+    gx.write(uint4(uint(gc.e.x), uint(gc.e.y), uint(gc.e.z) | (GAP_GIANT << 11), uint(gc.e.w)), gid);
+    st.write(uint4(ST_GIANT | uint(G) | (uint(gc.leafStart) << 11) | (gc.mats << 22), 0, 0, 0), gid);
+}
+
 // Runs after cleanupColumns, which would clamp one-column trunks away. Tree columns set w = first leaf
 // voxel; g then holds the ground height (b = g on trunks and buried canopies, b = w under a floating canopy).
 kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
@@ -1074,48 +1210,93 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
     if (gid.x >= n || gid.y >= n) return;
     float4 col = src.read(gid);
     // Structures pass through; a clearing keeps its mark unless a canopy spreads over it.
+    bool cleared = col.a < 0.0;
     col.a = min(col.a, 0.0);
     bool built = col.a < 0.0 && -col.a < col.r;
     if (built || col.b > col.g) { dst.write(col, gid); return; }
     int2 p = int2(gid);
     int2 wc = p + info.xy;
+    uint seed = uint(info.w);
+    float2 w = float2(wc) + 0.5;
     Giant gi;
-    bool isGiant = giantAt(giants, float2(wc) + 0.5, 0.0, gi);
+    bool isGiant = giantAt(giants, w, 0.0, gi);
     // A crown reaches out over water.
     if (col.r < SEA + 2.0 && !isGiant) { dst.write(col, gid); return; }
-    int2 home = int2(floor(float2(wc) / float(TREE_CELL)));
-    int lo = 100000, hi = 0;
-    bool trunk = false;
-    if (col.r >= SEA + 2.0)
-    for (int j = -1; j <= 1; j++)
-        for (int i = -1; i <= 1; i++) {
-            Tree t = treeInCell(src, gx, home + int2(i, j), info.xy, uint(info.w));
-            if (!t.ok) continue;
-            int2 o = p - t.c;
-            if (abs(o.x) > 2 || abs(o.y) > 2) continue;
-            int2 s = canopySpan(t, o);
-            // Shrubs hug the ground they spill onto rather than hovering over a lower step.
-            if (t.kind == 0) s += int(col.r) - t.lo;
-            if (s.y <= s.x) continue;
-            lo = min(lo, s.x);
-            hi = max(hi, s.y);
-            if (all(o == 0) && t.kind != 0) trunk = true;
-        }
     float G = col.r;
-    if (isGiant) {
-        GCol gc;
-        float tlo = trunk ? G : float(lo), thi = float(hi) > G ? float(hi) : 0.0;
-        if (giantColumn(gi, float2(wc) + 0.5, G, tlo, thi, gc)) {
-            dst.write(float4(gc.H, gc.gl, gc.gh, GIANT_A), gid);
-            gx.write(uint4(uint(gc.e.x), uint(gc.e.y), uint(gc.e.z) | (GAP_GIANT << 11), uint(gc.e.w)), gid);
-            st.write(uint4(ST_GIANT | uint(G) | (uint(gc.leafStart) << 11) | (gc.mats << 22), 0, 0, 0), gid);
+    GRuns rr;
+    rr.n = 0;
+    float J = col.r >= SEA + 2.0 ? provinces(w + seedOffset(seed), seed).x : 0.0;
+    if (J >= 0.15) {
+        // The roof follows the ground smoothed over a few columns, and keeps off cliffs.
+        float gs = 0.0, gmin = 1e9, gmax = -1e9;
+        for (int k = 0; k < 9; k++) {
+            int2 q = clamp(p + int2(k % 3 - 1, k / 3 - 1) * 3, int2(0), int2(int(n) - 1));
+            float h = src.read(uint2(q)).r;
+            gs += h; gmin = min(gmin, h); gmax = max(gmax, h);
+        }
+        gs /= 9.0;
+        uint hc = hash2i(wc, seed + 326u);
+        int2 e0 = int2(floor(w / EMERGENT_CELL));
+        bool eTrunk = false;
+        for (int j = -1; j <= 1; j++)
+            for (int i = -1; i <= 1; i++) {
+                float2 ec;
+                float y0, R;
+                int pads;
+                uint eh;
+                if (!emergentIn(e0 + int2(i, j), seed, J, ec, y0, R, pads, eh)) continue;
+                if (length_squared(w - ec) > (1.35 * R + 0.75 * R) * (1.35 * R + 0.75 * R)) continue;
+                int2 tq = int2(floor(ec)) - info.xy;
+                if (any(tq < 0) || any(tq >= int(n))) continue;
+                float4 tc = src.read(uint2(tq));
+                // On level ground only: not on a ledge, in water, or among buildings.
+                if (tc.r < SEA + 2.0 || tc.b > tc.g || tc.a < 0.0 || abs(tc.r - gs) > 6.0) continue;
+                eTrunk = eTrunk || length(w - ec) < (R > 9.5 ? 1.2 : 0.75);
+                emergentIntervals(w, ec, tc.r, y0, R, pads, eh, seed, 0, rr);
+            }
+        // A trunk column is bark through the roof (merged with it, its leaves would start at the roof's underside).
+        if (gmax - gmin < 12.0 && !cleared && !eTrunk) {
+            JCan cn = jungleCanopy(w, gs, J, seed);
+            if (cn.hi > cn.lo) {
+                gAdd(rr, cn.lo, cn.hi, GM_LEAF);
+                // Its crowns stand on poles; lianas hang from it.
+                if (cn.trunk) gAdd(rr, G, cn.lo, GM_WOOD);
+                else if (hashf(hc) < 0.02) gAdd(rr, G, cn.lo, GM_VINE);
+            } else if (hashf(hc) < 0.3) {
+                // Ferns and saplings in the clearings.
+                gAdd(rr, G, G + 1.0 + floor(2.5 * hashf(pcg(hc))), GM_LEAF);
+            }
+        }
+    } else if (col.r >= SEA + 2.0) {
+        int2 home = int2(floor(float2(wc) / float(TREE_CELL)));
+        int lo = 100000, hi = 0;
+        bool trunk = false;
+        for (int j = -1; j <= 1; j++)
+            for (int i = -1; i <= 1; i++) {
+                Tree t = treeInCell(src, gx, home + int2(i, j), info.xy, seed);
+                if (!t.ok) continue;
+                int2 o = p - t.c;
+                if (abs(o.x) > 2 || abs(o.y) > 2) continue;
+                int2 s = canopySpan(t, o);
+                // Shrubs hug the ground they spill onto rather than hovering over a lower step.
+                if (t.kind == 0) s += int(col.r) - t.lo;
+                if (s.y <= s.x) continue;
+                lo = min(lo, s.x);
+                hi = max(hi, s.y);
+                if (all(o == 0) && t.kind != 0) trunk = true;
+            }
+        if (!isGiant) {
+            if (float(hi) <= G) { dst.write(col, gid); return; }
+            float leaf = max(float(lo), G);
+            bool floating = !trunk && leaf > G;
+            dst.write(float4(float(hi), G, floating ? leaf : G, leaf), gid);
             return;
         }
+        if (float(hi) > G) gAdd(rr, trunk ? G : float(lo), float(hi), GM_LEAF);
     }
-    if (float(hi) <= G) { dst.write(col, gid); return; }
-    float leaf = max(float(lo), G);
-    bool floating = !trunk && leaf > G;
-    dst.write(float4(float(hi), G, floating ? leaf : G, leaf), gid);
+    GCol gc;
+    if (isGiant ? giantColumn(gi, w, G, rr, gc) : runsColumn(rr, G, gc)) writeVeg(gc, G, gid, dst, gx, st);
+    else dst.write(col, gid);
 }
 
 // Height a column is solid from the ground up: under an arch's gap, a canopy, a building's openings or a cave only the
@@ -1152,6 +1333,9 @@ kernel void bandTop(texture2d<float, access::read> src [[texture(0)]],
         if (e.y - e.x > g.y - g.x) g = e.xy;
         if (e.w - e.z > g.y - g.x) g = e.zw;
         if (g.y - g.x >= 4.0) b = g;
+    } else if (c.a > 0.0 && c.b - c.g >= 4.0) {
+        // Under a floating canopy (the jungle's roof).
+        b = c.gb;
     }
     dst.write(float4(b, 0, 0), gid);
 }
@@ -2052,7 +2236,9 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
         float4 sLow = 0.0, sUp = 0.0;   // (sum lo, sum hi, count, -)
         for (int i = 0; i < 4; i++) {
             GCol gc;
-            if (giantColumn(gi, float2(b + o4[i]) + 0.5, hs4[i], 0.0, 0.0, gc, k)) {
+            GRuns rr;
+            rr.n = 0;
+            if (giantColumn(gi, float2(b + o4[i]) + 0.5, hs4[i], rr, gc, k)) {
                 nT += 1.0;
                 sH += gc.H;
                 float2 gs[3] = { gc.e.zw, gc.e.xy, float2(gc.gl, gc.gh) };
@@ -3109,7 +3295,8 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
                 else { runHi = g0[i]; found = true; }
             }
             float leafStart = float((gsb >> 11) & 2047u);
-            gm = ri == nG ? (y >= leafStart ? GM_LEAF : GM_WOOD) : int((gsb >> (22u + 2u * uint(ri))) & 3u);
+            int rm = ri < 3 ? int((gsb >> (22u + 2u * uint(ri))) & 3u) : GM_WOOD;
+            gm = ri == nG && y >= leafStart ? GM_LEAF : rm;
             if (ri == nG && gm == GM_LEAF) runLo = leafStart;
         } else {
             float2 q = float2(v.xz * int(cs) + mapOrigin) + 0.5 * cs - gi.c;
@@ -4500,6 +4687,14 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         if (f.misc2.z != 2) Tfog = fogTransmittance(x, o, d, h.t);
         col = (x.prof & 64) || (Tfog >= 0.0 && Tfog < 0.01) ? float3(0.0) : shadeL(x, x.L, o, d, h, 1);
         tSurf = h.t;
+        // DEBUG15 (temporary): column classes on the 1-voxel map.
+        if (f.misc2.z == 15 && h.level == 0) {
+            float4 c4 = hm.read(uint2(clamp(h.voxel.xz, int2(0), int2(f.mapInfo.z - 1))));
+            float y = float(h.voxel.y);
+            float3 dc = c4.a == GIANT_A ? float3(1, 0.2, 0.1) : c4.a > 0.0 ? (y >= c4.a ? float3(0.1, 0.8, 0.1) : float3(0.6, 0.35, 0.1)) : float3(0.4);
+            float l = dot(col, float3(0.3, 0.59, 0.11));
+            return float4(dc * (0.3 + 2.0 * l), h.t);
+        }
         // Debug: flat level colours, morph bands white.
         if (f.misc2.z == 9) {
             const float3 flat[5] = { float3(1, 0, 0), float3(0, 1, 0), float3(0, 0, 1), float3(1, 1, 0), float3(1, 0, 1) };
