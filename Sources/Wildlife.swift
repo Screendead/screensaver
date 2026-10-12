@@ -272,7 +272,7 @@ final class Wildlife {
             print(String(format: "TRACE t=%.0f sunY=%.2f ", time, sunY) + desc.joined(separator: " | "))
         }
     }
-    static let trace = ProcessInfo.processInfo.environment["VR_BIRDTRACE"] != nil
+    static var trace: Bool { Knobs.current.birdTrace }
 
     // Birds inside a generous view frustum (terrain occlusion ignored) and the nearest; for the snapshot report.
     private func visible(_ f: Flock, camera: FlightCamera, aspect: Double = 1.8, tanHalf: Double = 0.52) -> (count: Int, nearest: Double) {

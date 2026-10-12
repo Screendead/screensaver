@@ -64,6 +64,73 @@ final class GPU {
         render[key] = p
         return p
     }
+
+    func fullscreen(_ fragment: MTLFunction?, _ format: MTLPixelFormat) -> MTLRenderPipelineDescriptor {
+        let d = MTLRenderPipelineDescriptor()
+        d.vertexFunction = library.makeFunction(name: "fullscreenVertex")
+        d.fragmentFunction = fragment
+        d.colorAttachments[0].pixelFormat = format
+        return d
+    }
+
+    func scene(towers: Bool, bands: Bool) -> MTLRenderPipelineState? {
+        pipeline(GPU.sceneKey(towers, bands)) { sceneDescriptor(towers, bands) }
+    }
+
+    private static func sceneKey(_ towers: Bool, _ bands: Bool) -> String { "scene \(towers) \(bands)" }
+
+    private func sceneDescriptor(_ towers: Bool, _ bands: Bool) -> MTLRenderPipelineDescriptor {
+        let fc = MTLFunctionConstantValues()
+        var b = bands, t = towers
+        fc.setConstantValue(&b, type: .bool, index: 0)
+        fc.setConstantValue(&t, type: .bool, index: 1)
+        return fullscreen(try? library.makeFunction(name: "sceneFragment", constantValues: fc), .rgba16Float)
+    }
+
+    func taa() -> MTLRenderPipelineState? {
+        pipeline("taa") { fullscreen(library.makeFunction(name: "taaFragment"), .rgba16Float) }
+    }
+
+    func post(_ format: MTLPixelFormat, dither: Bool) -> MTLRenderPipelineState? {
+        pipeline(GPU.postKey(format, dither)) { postDescriptor(format, dither) }
+    }
+
+    static func postKey(_ format: MTLPixelFormat, _ dither: Bool) -> String { "post \(format.rawValue) \(dither)" }
+
+    private func postDescriptor(_ format: MTLPixelFormat, _ dither: Bool) -> MTLRenderPipelineDescriptor {
+        let fc = MTLFunctionConstantValues()
+        var d = dither
+        fc.setConstantValue(&d, type: .bool, index: 2)
+        return fullscreen(try? library.makeFunction(name: "postFragment", constantValues: fc), format)
+    }
+
+    // Creates every kernel's pipeline and the render pipelines for `output` at once. On a cold shader cache (any shader
+    // edit) creating them one by one takes ~17 s; the compiler service builds concurrent requests in parallel.
+    func prewarm(output: MTLPixelFormat) {
+        let group = DispatchGroup(), lock = NSLock()
+        var kernels: [String: MTLComputePipelineState] = [:], renders: [String: MTLRenderPipelineState] = [:]
+        let functions = library.functionNames.filter { compute[$0] == nil }.compactMap { library.makeFunction(name: $0) }
+        var descriptors = ["taa": fullscreen(library.makeFunction(name: "taaFragment"), .rgba16Float),
+                           GPU.postKey(output, true): postDescriptor(output, true)]
+        for t in [false, true] { for b in [false, true] { descriptors[GPU.sceneKey(t, b)] = sceneDescriptor(t, b) } }
+        for f in functions where f.functionType == .kernel {
+            group.enter()
+            device.makeComputePipelineState(function: f) { p, _ in
+                lock.lock(); kernels[f.name] = p; lock.unlock()
+                group.leave()
+            }
+        }
+        for (key, d) in descriptors where render[key] == nil {
+            group.enter()
+            device.makeRenderPipelineState(descriptor: d) { p, _ in
+                lock.lock(); renders[key] = p; lock.unlock()
+                group.leave()
+            }
+        }
+        group.wait()
+        compute.merge(kernels) { a, _ in a }
+        render.merge(renders) { a, _ in a }
+    }
 }
 
 // Must match ShadowBake in Shaders/Saver.metal.
@@ -401,7 +468,7 @@ final class World {
     // Encodes the next `pieces` pieces of the job: each pass (heights, cleanup, structures, trees, climate) a band of
     // rows at a time, finishing every band of a pass before the next pass reads its neighbours, then the max mips.
     // Sites are placed once, ahead of the first structure band: they read the cleaned map, and every band stamps them.
-    static let timePieces = ProcessInfo.processInfo.environment["VR_PIECES"] != nil
+    static var timePieces: Bool { Knobs.current.pieces }
 
     @discardableResult
     private func advance(pieces: Int, wait: Bool, timed: Bool = false) -> Double {
@@ -549,7 +616,7 @@ final class World {
             if World.logSites {
                 var counts = [Int](repeating: 0, count: 7)
                 for site in buf.siteList { counts[site.kind.rawValue] += 1 }
-                if ProcessInfo.processInfo.environment["VR_SITES"] == "3" {
+                if Knobs.current.env["VR_SITES"] == "3" {
                     // Parts as kind (2 house, 10 round) and dwelling style.
                     let raw = buf.sites.contents()
                     for site in buf.siteList {
@@ -622,7 +689,7 @@ final class World {
         return SIMD2<Int32>(Int32(floor((center.x - half) / 64)) * 64, Int32(floor((center.y - half) / 64)) * 64)
     }
 
-    static let logSites = ProcessInfo.processInfo.environment["VR_SITES"] != nil
+    static var logSites: Bool { Knobs.current.sites }
 
     private static func readSites(_ buf: MTLBuffer) -> [SiteInfo] {
         let raw = buf.contents()
@@ -1002,13 +1069,13 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var sceneSize = (width: 0, height: 0)
     let popLog: PopLog? = PopLog.enabled ? PopLog() : nil
     private(set) var aspect: Float = 16.0 / 10.0
-    static let logTiming = ProcessInfo.processInfo.environment["VR_TIMING"] != nil
-    static let profile = ProcessInfo.processInfo.environment["VR_PROFILE"] ?? ""
-    static let fullCoarse = ProcessInfo.processInfo.environment["VR_COARSE_FULL"] != nil
+    static var logTiming: Bool { Knobs.current.timing }
+    static var profile: String { Knobs.current.profile }
+    static var fullCoarse: Bool { Knobs.current.fullCoarse }
     // VR_CHUNKED: snapshots update the coarse rings a chunk per frame, as live.
-    static let chunkedCoarse = ProcessInfo.processInfo.environment["VR_CHUNKED"] != nil
+    static var chunkedCoarse: Bool { Knobs.current.chunkedCoarse }
     // VR_LODSHIFT=v moves the LOD rings' centre v voxels ahead of the camera: frames differing only in it isolate pops.
-    static let lodShift = Float(ProcessInfo.processInfo.environment["VR_LODSHIFT"] ?? "") ?? 0
+    static var lodShift: Float { Knobs.current.lodShift }
     fileprivate var exposure: Double = 1.5
     // Holds the time of day fixed for snapshots, so exposure and the shot director see the rendered sun.
     var pinnedPhase: Double?
@@ -1023,33 +1090,12 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
 
     init?(gpu: GPU, outputFormat: MTLPixelFormat, seed: UInt32, screenIndex: Int, battery: Bool, dither: Bool = true) {
-        let device = gpu.device, lib = gpu.library
+        let device = gpu.device
         guard let queue = device.makeCommandQueue() else { return nil }
-        func fullscreen(_ fragment: MTLFunction?, _ format: MTLPixelFormat) -> MTLRenderPipelineDescriptor {
-            let d = MTLRenderPipelineDescriptor()
-            d.vertexFunction = lib.makeFunction(name: "fullscreenVertex")
-            d.fragmentFunction = fragment
-            d.colorAttachments[0].pixelFormat = format
-            return d
-        }
-        func sceneVariant(towers: Bool, bands: Bool) -> MTLRenderPipelineState? {
-            gpu.pipeline("scene \(towers) \(bands)") {
-                let fc = MTLFunctionConstantValues()
-                var b = bands, t = towers
-                fc.setConstantValue(&b, type: .bool, index: 0)
-                fc.setConstantValue(&t, type: .bool, index: 1)
-                return fullscreen(try? lib.makeFunction(name: "sceneFragment", constantValues: fc), .rgba16Float)
-            }
-        }
-        let sceneStates = [false, true].map { t in [false, true].compactMap { b in sceneVariant(towers: t, bands: b) } }
+        let sceneStates = [false, true].map { t in [false, true].compactMap { b in gpu.scene(towers: t, bands: b) } }
         guard sceneStates.allSatisfy({ $0.count == 2 }),
-              let tp = gpu.pipeline("taa", { fullscreen(lib.makeFunction(name: "taaFragment"), .rgba16Float) }),
-              let pp = gpu.pipeline("post \(outputFormat.rawValue) \(dither)", {
-                  let fc = MTLFunctionConstantValues()
-                  var d = dither
-                  fc.setConstantValue(&d, type: .bool, index: 2)
-                  return fullscreen(try? lib.makeFunction(name: "postFragment", constantValues: fc), outputFormat)
-              }),
+              let tp = gpu.taa(),
+              let pp = gpu.post(outputFormat, dither: dither),
               let cf = gpu.pipeline("cloudField"),
               let csf = gpu.pipeline("cloudSlowField"),
               let shP = gpu.pipeline("bakeShadowHeight"),
@@ -1112,11 +1158,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         wildlife.giantsAt = { [unowned(unsafe) world] in world.giants }
         camera.towersAt = { [unowned(unsafe) towers] in towers.list }
         // VR_START=x,z,yawDeg: the flight starts there (tests).
-        if let v = ProcessInfo.processInfo.environment["VR_START"]?.split(separator: ",").compactMap({ Double($0) }), v.count >= 3 {
+        if let v = Knobs.current.env["VR_START"]?.split(separator: ",").compactMap({ Double($0) }), v.count >= 3 {
             camera.start(at: SIMD2(v[0], v[1]), yaw: v[2] * .pi / 180)
         }
         world.placeGiants(around: SIMD2(camera.position.x, camera.position.z))
-        if ProcessInfo.processInfo.environment["VR_START"] == nil, camera.startNearGiant() {
+        if Knobs.current.env["VR_START"] == nil, camera.startNearGiant() {
             world.placeGiants(around: SIMD2(camera.position.x, camera.position.z))
         }
         let pre = SIMD2(camera.position.x, camera.position.z)
@@ -1742,13 +1788,16 @@ final class Renderer: NSObject, MTKViewDelegate {
 
 // Offscreen render to PNG, for checking visuals without a display.
 enum Snapshot {
-    static func run(settings: Settings, path: String) {
-        guard let device = MTLCreateSystemDefaultDevice(), let gpu = GPU(device: device),
+    // False if the renderer could not start or a PNG could not be written.
+    static func run(settings: Settings, path: String, gpu shared: GPU? = nil) -> Bool {
+        guard let gpu = shared ?? MTLCreateSystemDefaultDevice().flatMap({ GPU(device: $0) }),
               let r = Renderer(gpu: gpu, outputFormat: .rgba8Unorm, seed: settings.seed == 0 ? 1 : settings.seed,
                                screenIndex: 0, battery: settings.forceBattery, dither: !settings.noDither) else {
             FileHandle.standardError.write("renderer init failed\n".data(using: .utf8)!)
-            return
+            return false
         }
+        let device = gpu.device
+        var wrote = true
         r.debugMode = settings.debugMode
         r.timeScale = settings.timeScale
         r.world.synchronous = true
@@ -1762,7 +1811,7 @@ enum Snapshot {
         r.pinnedPhase = settings.phase
         r.prepare(outputSize: CGSize(width: w, height: h))
         r.headroom = settings.headroom ?? 0
-        let env = ProcessInfo.processInfo.environment
+        let env = Knobs.current.env
         // VR_TOWERS=n: lists the towers of the n-cell square of tower cells round the camera's start, nearest first.
         if let n = Int(env["VR_TOWERS"] ?? "") {
             let here = SIMD2(r.camera.position.x, r.camera.position.z)
@@ -1862,13 +1911,13 @@ enum Snapshot {
                     }
                     var bytes = [UInt8](repeating: 0, count: w * h * 4)
                     tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
-                    write(bytes: bytes, width: w, height: h, to: path.replacingOccurrences(of: ".png", with: "_m\(i / 60).png"))
+                    wrote = write(bytes: bytes, width: w, height: h, to: path.replacingOccurrences(of: ".png", with: "_m\(i / 60).png")) && wrote
                 }
             }
             print(String(format: "flight towers: closest plinth edge %.0f, seconds with a tower ahead within 9k %d, tower-seconds within 1.5k %d", towerEdge, towerSeen, towerClose))
             print(String(format: "flight done: max climb %.2f/s, min clearance %.1f, max y %.0f (ceiling %.0f), low seconds %d, walled seconds %d (longest %d), seconds climbing over 6/s %d, seconds under a crown %d, giants passed within 1500 %d", maxClimb, minClear, maxY, FlightCamera.ceiling, lows, walled, maxWalledRun, fastClimb, underCrown, giantsSeen.count))
             if let log = r.popLog { print(log.summary(r.wildlife)) }
-            return
+            return wrote
         }
         var simulated = 0.0
         for t in settings.screenshotTimes.sorted() {
@@ -1879,8 +1928,8 @@ enum Snapshot {
             }
             if let phase = settings.phase { r.clock.phase = phase }
             simulated = t
-            if let d = Double(ProcessInfo.processInfo.environment["VR_BIRDTEST"] ?? "") { r.wildlife.testPattern(camera: r.camera, distance: d) }
-            if let d = Double(ProcessInfo.processInfo.environment["VR_MURMUR"] ?? "") { r.wildlife.testMurmuration(camera: r.camera, distance: d) }
+            if let d = Double(env["VR_BIRDTEST"] ?? "") { r.wildlife.testPattern(camera: r.camera, distance: d) }
+            if let d = Double(env["VR_MURMUR"] ?? "") { r.wildlife.testMurmuration(camera: r.camera, distance: d) }
             var times: [Double] = []
             // VR_BENCH=n renders n still frames (gpu= is their minimum): more frames ride out the GPU's clock ramp.
             let frames = env["VR_MOTION"] != nil ? Int(env["VR_MOTION_FRAMES"] ?? "") ?? 48 : Int(env["VR_BENCH"] ?? "") ?? 12
@@ -1900,17 +1949,18 @@ enum Snapshot {
                 if Renderer.logTiming { print(String(format: "frame %d gpu %.2f ms cam (%.1f, %.1f, %.1f)%@", i, times.last!, r.camera.position.x, r.camera.position.y, r.camera.position.z, r.clipmap.idle ? "" : " (coarse job pending)")) }
                 if i >= frames - dump {
                     tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
-                    write(bytes: bytes, width: w, height: h, to: out.replacingOccurrences(of: ".png", with: "_f\(i - frames + dump).png"))
+                    wrote = write(bytes: bytes, width: w, height: h, to: out.replacingOccurrences(of: ".png", with: "_f\(i - frames + dump).png")) && wrote
                 }
             }
             tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
-            write(bytes: bytes, width: w, height: h, to: out)
+            wrote = write(bytes: bytes, width: w, height: h, to: out) && wrote
             let seen = r.wildlife.inView(camera: r.camera, aspect: Double(w) / Double(h), tanHalf: tan(25.0 * .pi / 180))
             print(String(format: "t=%.0f phase=%.3f sunY=%.2f exposure=%.2f cam=(%.0f,%.0f,%.0f) yaw=%.1f pitch=%.1f gpu=%.2fms mem=%.0fMB birds=%d flocks=%d near=%.0f %@ -> %@", t, r.clock.phase,
                          r.clock.sunDirection.y, r.exposure, r.camera.position.x, r.camera.position.y, r.camera.position.z, r.camera.yaw * 180 / .pi, r.camera.pitch * 180 / .pi, times.min()!,
                          Double(device.currentAllocatedSize) / 1048576, seen.count, seen.flocks, seen.nearest.isFinite ? seen.nearest : -1, Snapshot.sitesInView(r), out))
         }
         if let log = r.popLog { print(log.summary(r.wildlife)) }
+        return wrote
     }
 
     // Sites within 700 voxels whose centre falls inside the frame (not tested for occlusion).
@@ -1931,13 +1981,13 @@ enum Snapshot {
         return "sites=\(seen.count)[\(seen.joined(separator: " "))]"
     }
 
-    static func write(bytes: [UInt8], width: Int, height: Int, to path: String) {
+    static func write(bytes: [UInt8], width: Int, height: Int, to path: String) -> Bool {
         let cs = CGColorSpace(name: CGColorSpace.sRGB)!
         let provider = CGDataProvider(data: Data(bytes) as CFData)!
         let img = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4, space: cs,
                           bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue), provider: provider,
                           decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
         let rep = NSBitmapImageRep(cgImage: img)
-        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))
+        return (try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: path))) != nil
     }
 }
