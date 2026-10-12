@@ -247,7 +247,7 @@ static inline float reefNoise(float2 p, uint s) {
 static inline float reefRegion(float2 p, float lagoonRaw, uint seed) {
     float r = smoothstep(-0.06, 0.06, reefNoise(p / 520.0, seed + 140u) + 0.14) * smoothstep(0.45, 0.65, lagoonRaw);
     if (r <= 0.0) return 0.0;
-    float ch = abs(reefNoise(p / 75.0, seed + 141u) + 0.25 * reefNoise(p / 21.0, seed + 142u));
+    float ch = abs(reefNoise(p / 75.0, seed + 141u));
     return r * smoothstep(0.03, 0.06, ch);
 }
 
@@ -263,11 +263,16 @@ struct Coral { float rise; int kind; float tip; uint h; };
 
 static inline float byteOf(uint h, uint k) { return float((h >> (8u * k)) & 255u) / 255.0; }
 
+// One pcg per colony and per column: the shading asks again for every reef pixel. reefMix spreads a hash's bits
+// into a second word.
+static inline uint reefHash(int2 c, uint s) { return pcg(uint(c.x) * 1597334677u ^ uint(c.y) * 3812015801u ^ s); }
+static inline uint reefMix(uint h) { h *= 0x9e3779b1u; return h ^ (h >> 15); }
+
 // The colony of REEF_CELL cell c, if any: its centre cc (world xz), kind, size 0..1 and hash h2.
 static inline bool coralColony(int2 c, uint seed, thread float2& cc, thread int& kind, thread float& sz, thread uint& h2) {
-    uint h = hash2i(c, seed + 150u);
+    uint h = reefHash(c, seed + 150u);
     if (hashf(h) > 0.82) return false;
-    h2 = pcg(h);
+    h2 = reefMix(h);
     cc = (float2(c) + 0.2 + 0.6 * float2(byteOf(h2, 0), byteOf(h2, 1))) * REEF_CELL;
     float k01 = byteOf(h2, 2);
     kind = k01 < 0.34 ? CORAL_BOULDER : k01 < 0.70 ? CORAL_STAG : k01 < 0.86 ? CORAL_TABLE : CORAL_FAN;
@@ -294,8 +299,15 @@ static inline Coral coralAt(int2 w, uint seed, bool glow, float time, bool top, 
     float2 q = float2(w) + 0.5;
     int2 c0 = int2(floor(q / REEF_CELL - 0.5));
     float3 bestHue = 0;
+    // Staghorn branches by column; every kind's shape is worked out and one picked, as branching by kind would run
+    // them all one after another wherever neighbouring pixels differ.
+    uint hb = reefHash(w, seed + 151u);
+    float stagB = byteOf(hb, 0), stagH = byteOf(hb, 1);
     for (int j = 0; j < 2; j++)
         for (int i = 0; i < 2; i++) {
+            // A colony reaches 3 from its centre, which keeps to the middle 0.6 of its cell.
+            float2 lo = (float2(c0 + int2(i, j)) + 0.2) * REEF_CELL;
+            if (length_squared(q - clamp(q, lo, lo + 0.6 * REEF_CELL)) > 3.3 * 3.3) continue;
             float2 cc;
             int kind;
             float sz;
@@ -303,38 +315,26 @@ static inline Coral coralAt(int2 w, uint seed, bool glow, float time, bool top, 
             if (!coralColony(c0 + int2(i, j), seed, cc, kind, sz, h2)) continue;
             float2 v = q - cc;
             float dd = length(v);
-            float rise = 0, tip = 0, R = 0;
-            if (kind == CORAL_BOULDER) {
-                R = 1.4 + 1.4 * sz;
-                float Hc = 1.0 + floor(2.2 * sz + 0.5);
-                if (dd < R) { rise = floor(Hc * sqrt(1.0 - dd * dd / (R * R)) + 0.65); tip = step(Hc - 0.5, rise); }
-            } else if (kind == CORAL_STAG) {
-                R = 1.8 + 1.2 * sz;
-                if (dd < R) {
-                    uint hb = hash2i(w, seed + 151u);
-                    float b = byteOf(hb, 0);
-                    float Hb = 1.0 + floor(2.99 * byteOf(hb, 1) * (1.0 - 0.5 * dd / R));
-                    rise = b < 0.55 ? Hb : b < 0.8 ? 1.0 : 0.0;
-                    tip = step(1.5, rise);
-                }
-            } else if (kind == CORAL_TABLE) {
-                R = 1.6 + 1.3 * sz;
-                if (dd < R) { rise = 2.0 + floor(1.4 * sz); tip = smoothstep(R - 1.2, R - 0.4, dd); }
-            } else {
-                float a = byteOf(h2, 3) * 3.14159;
-                float2 ax = float2(cos(a), sin(a));
-                float L = 1.5 + 1.3 * sz;
-                R = L;
-                float u = clamp(dot(v, ax), -L, L);
-                float off = length(v - ax * u);
-                if (off < 0.62) { rise = floor(3.0 - 1.6 * abs(u) / L + 0.5); tip = 1.0; }
-            }
+            float R = kind == CORAL_BOULDER ? 1.4 + 1.4 * sz : kind == CORAL_STAG ? 1.8 + 1.2 * sz : 1.6 + 1.3 * sz;
+            float inR = step(dd, R);
+            float Hc = 1.0 + floor(2.2 * sz + 0.5);
+            float boulder = floor(Hc * sqrt(saturate(1.0 - dd * dd / (R * R))) + 0.65) * inR;
+            float Hb = 1.0 + floor(2.99 * stagH * (1.0 - 0.5 * dd / R));
+            float stag = (stagB < 0.55 ? Hb : stagB < 0.8 ? 1.0 : 0.0) * inR;
+            float table = (2.0 + floor(1.4 * sz)) * inR;
+            float2 ax = normalize(float2(byteOf(h2, 3), byteOf(h2, 0)) - 0.5 + 1e-3);
+            float L = 1.5 + 1.3 * sz;
+            float u = clamp(dot(v, ax), -L, L);
+            float fan = length(v - ax * u) < 0.62 ? floor(3.0 - 1.6 * abs(u) / L + 0.5) : 0.0;
+            float rise = kind == CORAL_BOULDER ? boulder : kind == CORAL_STAG ? stag : kind == CORAL_TABLE ? table : fan;
+            float tip = kind == CORAL_BOULDER ? step(Hc - 0.5, rise) : kind == CORAL_STAG ? step(1.5, rise)
+                      : kind == CORAL_TABLE ? smoothstep(R - 1.2, R - 0.4, dd) : 1.0;
             float3 hue = 0;
             if (glow) {
-                uint gh = pcg(h2 ^ 0x9e3779b9u);
+                uint gh = reefMix(h2 ^ 0x5bd1e995u);
                 if (byteOf(gh, 0) < 0.18) {
                     hue = coralGlowHue(gh) * (0.7 + 0.3 * sin(time * (0.4 + 0.3 * byteOf(gh, 2)) + 6.2831853 * byteOf(gh, 3)));
-                    g += hue * 0.03 * exp(-dd * dd / (R * R * 1.4));
+                    g += hue * 0.045 * exp(-dd * dd / (R * R * 0.5));
                 }
             }
             if (rise > best.rise) { best.rise = rise; best.kind = kind; best.tip = tip; best.h = h2; bestHue = hue; }
