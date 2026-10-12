@@ -345,6 +345,7 @@ static inline float3 coralColour(Coral cr) {
     c = mix(float3(dot(c, float3(0.3, 0.59, 0.11))), c, 1.3);
     return mix(c, c * 1.08, cr.tip);
 }
+
 // The 1-voxel map keeps each reef column's make in the spare high bits of its extra-gap word (bits 11-15 of x, y and w;
 // extraGaps reads the low 11): bits 0-3 the reef's share (reefRegion, in 15ths), 4 a colony, 5-6 its kind, 7 a tip,
 // 8-14 its hash. The shading reads it rather than working the colonies out again.
@@ -6936,7 +6937,7 @@ static float3 hazeAndSmoke(thread const Ctx& x, float3 col, device const Site* s
 
 // MARK: - Reef glow and fish
 
-// Fish: in some FISH_CELL cells a school (6 to 10) or a single larger fish, wandering about the cell's middle and now
+// Fish: in some FISH_CELL cells a school (4 to 7) or a single larger fish, wandering about the cell's middle and now
 // and then darting. Everything is a smooth function of world position and time, and a school with its last second of
 // track stays inside its cell, so a pixel asks its own cell alone.
 constant float FISH_CELL = 40.0;
@@ -7079,8 +7080,7 @@ struct SeaLife { half3 litMul; half underMul; half3 add; };
 
 // The reef and its fish at a water pixel: litMul tints the bed's sand shading to the reef's colours, underMul darkens
 // the water under fish and their shadows, add is the glints, glowing corals and wakes over the surface.
-static inline SeaLife seaLife(thread const Ctx& x, float3 o, float3 d, Hit h, float tw, float2 ww, float lagRaw,
-                                                 float lagoon, float fishAmt, float fres, float bedShows, bool reefOn, bool fishOn) {
+static inline SeaLife seaLife(thread const Ctx& x, float3 o, float3 d, Hit h, float tw, float2 ww, float lagRaw, float lagoon, float fishAmt, float fres, float bedShows, bool reefOn, bool fishOn) {
     float3 litMul = 1, add = 0;
     float underMul = 1;
     float bedPath = h.t - tw;
