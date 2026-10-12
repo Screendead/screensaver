@@ -975,9 +975,6 @@ final class Renderer: NSObject, MTKViewDelegate {
     private static let lampReach: [Double] = [1, 20, 16, 7, 10, 24, 22, 6]   // LAMP_R in Shaders/Saver.metal
     private var tileMasks = [UInt32](repeating: 0, count: 16 * 16)
     static let ditherCells = 864.0
-    // Without the dither the history is the screen's own pixels and the scene renders at most this many, upsampled:
-    // half a 3456x2234 display's width, about 10-16 ms of GPU on an M2 Max.
-    static let fullResPixels = 0.25 * 3456 * 2234
     private var historyIndex = 0
     private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
     let world: World
@@ -1236,14 +1233,13 @@ final class Renderer: NSObject, MTKViewDelegate {
                      world: world)
     }
 
-    // Scene and history sizes for an output size, and the scene's scale: the retro dither shows one flat colour per
-    // cell, so the temporal history only needs the cell grid, and the scene renders at (a fraction of) it. Without the
-    // dither the history is every pixel and the scene is capped at fullResPixels.
-    private func sizes(_ outputSize: CGSize) -> (ow: Int, oh: Int, w: Int, h: Int, scale: Double) {
+    // Scene and history sizes for an output size: the retro dither shows one flat colour per cell, so the temporal
+    // history only needs the cell grid, and the scene renders at (a fraction of) it. Without the dither the history
+    // is every pixel.
+    private func sizes(_ outputSize: CGSize) -> (ow: Int, oh: Int, w: Int, h: Int) {
         let cell = dither ? max(1.0, (outputSize.width / Renderer.ditherCells).rounded()) : 1
         let ow = max(16, Int((outputSize.width / cell).rounded())), oh = max(16, Int((outputSize.height / cell).rounded()))
-        let scale = renderScale * (dither ? 1 : min(1, (Renderer.fullResPixels / Double(ow * oh)).squareRoot()))
-        return (ow, oh, max(16, Int(Double(ow) * scale)), max(16, Int(Double(oh) * scale)), scale)
+        return (ow, oh, max(16, Int(Double(ow) * renderScale)), max(16, Int(Double(oh) * renderScale)))
     }
 
     // Sets the frustum the simulation sees before the first frame is encoded.
@@ -1253,7 +1249,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         aspect = Float(s.w) / Float(s.h)
     }
 
-    func makeFrame(size: CGSize, scale: Double) -> Frame {
+    // shadeHeight sets the shading prefilter's pixel: the output's without the dither, so a scene smaller than the
+    // output keeps the output's surface detail for the temporal resolve to gather.
+    func makeFrame(size: CGSize, shadeHeight: Int) -> Frame {
         var f = Frame()
         let b = camera.basis
         let o = SIMD3(Double(world.origin.x), 0, Double(world.origin.y))
@@ -1263,7 +1261,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         f.camRight = SIMD4(SIMD3<Float>(b.right), Float(simTime))
         f.camUp = SIMD4(SIMD3<Float>(b.up), battery ? 0 : 1)
         f.sunDir = SIMD4(SIMD3<Float>(clock.sunDirection), Float(clock.phase))
-        f.resolution = SIMD4(Float(size.width), Float(size.height), Float(1 / size.width), Float(1 / size.height))
+        f.resolution = SIMD4(Float(size.width), Float(size.height), Float(1 / Double(shadeHeight)), Float(1 / size.height))
         f.mapInfo = SIMD4(world.origin.x, world.origin.y, Int32(World.size), Int32(bitPattern: world.seed))
         f.misc = SIMD4(Float(exposure), world.globalMax, 0.6, Float(cloudCover))
         f.misc2 = SIMD4(frameIndex, 1, debugMode, headroom)
@@ -1285,7 +1283,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         // Halton(2,3) subpixel jitter, accumulated by the temporal resolve; upsampling needs more phases to
         // cover every output pixel.
-        let phases = min(64, Int((8 / min(scale * scale, 1)).rounded(.up)))
+        let phases = min(64, Int((8 / min(renderScale * renderScale, 1)).rounded(.up)))
         let k = Int(frameIndex) % phases + 1
         func halton(_ i: Int, _ b: Int) -> Double { var f = 1.0, r = 0.0, i = i; while i > 0 { f /= Double(b); r += f * Double(i % b); i /= b }; return r }
         f.jitter = SIMD4(Float((halton(k, 2) - 0.5) * 2 / size.width), Float((halton(k, 3) - 0.5) * 2 / size.height), 0, 0)
@@ -1319,7 +1317,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     }
 
     func encode(into cb: MTLCommandBuffer, output: MTLTexture, outputSize: CGSize) {
-        let (ow, oh, w, h, scale) = sizes(outputSize)
+        let (ow, oh, w, h) = sizes(outputSize)
         if sceneTex?.width != w || sceneTex?.height != h || history.first?.width != ow || history.first?.height != oh {
             let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: w, height: h, mipmapped: false)
             td.usage = [.renderTarget, .shaderRead]
@@ -1333,7 +1331,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard let sceneTex else { return }
         sceneSize = (w, h)
         aspect = Float(w) / Float(h)
-        var f = makeFrame(size: CGSize(width: w, height: h), scale: scale)
+        var f = makeFrame(size: CGSize(width: w, height: h), shadeHeight: dither ? h : oh)
         frameIndex = (frameIndex + 1).truncatingRemainder(dividingBy: 4096)
         bakeClouds(into: cb, frame: &f)
         if Renderer.fullCoarse { clipmap.invalidate() }

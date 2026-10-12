@@ -8,7 +8,7 @@ struct Frame {
     float4 camRight;   // w wrapped time (s)
     float4 camUp;      // w quality (0 battery, 1 full)
     float4 sunDir;     // xyz direction to sun, w day phase
-    float4 resolution; // xy pixels, zw inverse
+    float4 resolution; // xy pixels, z inverse height of the shading footprint's pixel, w inverse height
     int4   mapInfo;    // xy world xz of texel 0, z size, w seed
     float4 misc;       // x exposure, y global max height, z wind angle, w cloud cover
     float4 misc2;      // x frame index, y fog density scale, z debug mode, w EDR headroom (0 = SDR)
@@ -6796,7 +6796,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     if (int(f.shadow.y) & 2) gmax = min(gmax, 260.0);
     Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, cg2, hb, uint(f.mapInfo.w), giants, pvTex, towers, sceneTowers ? towers->n.x : 0 };
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
-            2.0 * tanH * f.resolution.w, f.misc.w, makeLight(f.sunDir.xyz),
+            2.0 * tanH * f.resolution.z, f.misc.w, makeLight(f.sunDir.xyz),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
             cloudTex, f.cloud.xyz, st, sites, lampPos, lampState, lightMap, lightDir, f.lights, shadowNear, shadowFar,
             f.misc2.z == 14 ? 2.0 : f.shadow.x, (int(f.shadow.y) & 1) != 0, int(f.shadow.y), slowTex,
@@ -6859,7 +6859,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     if (nFlocks > 0) {
         // A trace out of steps has not shown the way clear: a bird past where it stopped could be behind a hill.
         float tFront = !h.hit && h.iters >= primaryIters ? 0.0 : water ? tw : (h.hit ? h.t : 6000.0);
-        BirdHit bh = traceBirds(birds, nFlocks, o, d, tFront, x.pixelAngle, 0.0);
+        BirdHit bh = traceBirds(birds, nFlocks, o, d, tFront, 2.0 * tanH * f.resolution.w, 0.0);
         if (bh.t < tFront) {
             float3 bc = shadeBird(x, o + d * bh.t, bh);
             if (f.misc2.z != 2) bc = applyFog(x, bc, o, d, bh.t);
@@ -6938,7 +6938,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             }
             if (nFlocks > 0) {
                 float tB = rh.hit ? rh.t : (rh.iters >= 260 ? 0.0 : 3000.0);
-                BirdHit bh = traceBirds(birds, nFlocks, wp, r, tB, x.pixelAngle, tw);
+                BirdHit bh = traceBirds(birds, nFlocks, wp, r, tB, 2.0 * tanH * f.resolution.w, tw);
                 if (bh.t < tB) { refl = applyFog(x, shadeBird(x, wp + r * bh.t, bh), wp, r, bh.t); birdRefl = true; }
             }
         } else {
