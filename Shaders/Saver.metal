@@ -728,6 +728,8 @@ constant int TOWER_TABLE = 16;
 // Function constant 1: false compiles the towers out of sceneFragment, for frames with none in view. Compiled in, even
 // unused, they slow every pixel's shading.
 constant bool sceneTowers [[function_constant(1)]];
+// Reef colours and glow fade out by here: past it the haze and the surface's mirror hide the bed.
+constant float REEF_FAR = 1100.0;
 
 struct Tower {
     float2 c;              // world xz of the base's axis
@@ -7073,13 +7075,14 @@ static inline FishSample fishAt(thread const Ctx& x, float2 q, float2 bs, bool s
 // The wake term alone, for the sea glow to light its crests by: q, world xz just under the surface.
 static inline float seaWake(thread const Ctx& x, float2 q, float fpv) { return fishAt(x, q, q, false, fpv, true).wake; }
 
-struct SeaLife { float3 litMul; float underMul; float3 add; };
+struct SeaLife { half3 litMul; half underMul; half3 add; };
 
 // The reef and its fish at a water pixel: litMul tints the bed's sand shading to the reef's colours, underMul darkens
 // the water under fish and their shadows, add is the glints, glowing corals and wakes over the surface.
 static inline SeaLife seaLife(thread const Ctx& x, float3 o, float3 d, Hit h, float tw, float2 ww, float lagRaw,
                                                  float lagoon, float fishAmt, float fres, float bedShows, bool reefOn, bool fishOn) {
-    SeaLife life = { float3(1), 1.0, float3(0) };
+    float3 litMul = 1, add = 0;
+    float underMul = 1;
     float bedPath = h.t - tw;
     if (reefOn) {
         // Reefs: the bed was shaded as sand; colonies and the turf between them take their colours as a ratio to it.
@@ -7099,6 +7102,7 @@ static inline SeaLife seaLife(thread const Ctx& x, float3 o, float3 d, Hit h, fl
             reg = reefRegion(bw + seedOffset(x.seed), lagRaw, x.seed);
         }
         if (reg > 0.0 && bed) {
+            reg *= smoothstep(REEF_FAR, REEF_FAR - 250.0, h.t);
             float cw = smoothstep(0.5, 0.7, reg);
             float3 sandA = mix(float3(0.33, 0.29, 0.21), float3(0.37, 0.33, 0.245), lagoon);
             float3 alb = mix(sandA, REEF_TURF, 0.8 * smoothstep(0.3, 0.7, reg));
@@ -7109,7 +7113,7 @@ static inline SeaLife seaLife(thread const Ctx& x, float3 o, float3 d, Hit h, fl
                 cc = coralColour(cr);
             }
             alb = mix(alb, mix(cc, REEF_MEAN, hand), cw);
-            life.litMul = alb / sandA;
+            litMul = alb / sandA;
             if (x.L.night > 0.0 && cw > 0.0) {
                 // Glowing colonies, soft across the columns about the point and brightest on their tips' tops.
                 float3 g = 0;
@@ -7124,7 +7128,7 @@ static inline SeaLife seaLife(thread const Ctx& x, float3 o, float3 d, Hit h, fl
                     float3 soft = mix(mix(s00, s10, fw.x), mix(s01, s11, fw.x), fw.y);
                     g = 0.05 * coralGlowCode(code, x.time) * (h.normal.y > 0 ? 1.0 : 0.45) + 0.035 * soft;
                 }
-                life.add += (g * (1.0 - hand) + mix(SEAGLOW_TURQ, SEAGLOW_BLUE, 0.3) * 0.012 * hand) * cw * x.L.night
+                add += (g * (1.0 - hand) + mix(SEAGLOW_TURQ, SEAGLOW_BLUE, 0.3) * 0.012 * hand) * cw * x.L.night
                             * exp(-bedPath * float3(0.30, 0.09, 0.065)) * (1.0 - fres);
             }
         }
@@ -7149,15 +7153,15 @@ static inline SeaLife seaLife(thread const Ctx& x, float3 o, float3 d, Hit h, fl
             if (wake > 0.002) {
                 float rip = perlin3(float3(ww * 4.5, x.time * 2.0), x.seed + 161u);
                 float spark = mix(0.3 + 2.4 * smoothstep(0.12, 0.32, rip), 0.6, saturate(fpv * 3.0));
-                life.add += mix(SEAGLOW_TURQ, SEAGLOW_BLUE, 0.35) * 0.35 * wake * spark * x.L.night * (1.0 - 0.5 * fres);
+                add += mix(SEAGLOW_TURQ, SEAGLOW_BLUE, 0.35) * 0.35 * wake * spark * x.L.night * (1.0 - 0.5 * fres);
             }
         } else {
             float nb = fishAmt * smoothstep(200.0, 100.0, tw) * (1.0 - smoothstep(0.25, 0.6, fpv)) * (1.0 - smoothstep(0.0, 0.3, x.L.night));
-            life.underMul = (1.0 - 0.5 * fs.body * nb * (1.0 - 0.5 * x.L.night)) * (1.0 - 0.3 * fs.shade * nb * x.L.sunAmt);
-            life.add += x.L.keyCol * 0.12 * fs.glint * nb * x.L.sunAmt * (1.0 - fres);
+            underMul = (1.0 - 0.5 * fs.body * nb * (1.0 - 0.5 * x.L.night)) * (1.0 - 0.3 * fs.shade * nb * x.L.sunAmt);
+            add += x.L.keyCol * 0.12 * fs.glint * nb * x.L.sunAmt * (1.0 - fres);
         }
     }
-    return life;
+    return SeaLife { half3(litMul), half(underMul), half3(add) };
 }
 
 fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0)]],
@@ -7276,6 +7280,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     int wl = 0;
     Light Ls = x.L;
     bool shadeHit = false;
+    SeaLife life = { half3(1), 1.0h, half3(0) };
     if (water) {
         wp = o + d * tw;
         ww = wp.xz + float2(x.origin);
@@ -7308,6 +7313,12 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         Ls.key = normalize(mix(x.L.key, kr, lagoon));
         Ls.keyCol *= mix(1.0, ky / kr.y * (0.98 - 0.98 * pow(1.0 - ky, 5.0)), lagoon);
         shadeHit = h.hit && bedShows > 0.003;
+        // Reefs and fish, before the bed and the reflection are shaded: their result is small, and kept as halves.
+        float fishAmt = warm * (0.4 + 0.6 * lagoon);
+        bool wakes = x.L.night > 0.3;
+        bool reefOn = lagRaw > 0.45 && h.hit && h.t - tw < 16.0 && h.t < REEF_FAR && (shadeHit || x.L.night > 0.0) && !(x.prof & 128);
+        bool fishOn = fishAmt > 0.0 && (wakes ? tw < 300.0 : tw < 200.0 && bedShows > 0.01 && x.L.night < 0.3) && !(x.prof & 256);
+        if (reefOn || fishOn) life = seaLife(x, o, d, h, tw, ww, lagRaw, lagoon, fishAmt, fres, bedShows, reefOn, fishOn);
     } else if (h.hit) {
         if (f.misc2.z != 2) Tfog = fogTransmittance(x, o, d, h.t);
         shadeHit = !((x.prof & 64) || (Tfog >= 0.0 && Tfog < 0.01));
@@ -7338,14 +7349,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         } else {
             refl = softCloudSky(x, wp, r);
         }
-        // Reefs and fish.
-        SeaLife life = { float3(1), 1.0, float3(0) };
-        float fishAmt = warm * (0.4 + 0.6 * lagoon);
-        bool wakes = x.L.night > 0.3;
-        bool reefOn = lagRaw > 0.45 && h.hit && h.t - tw < 16.0 && (shadeHit || x.L.night > 0.0) && !(x.prof & 128);
-        bool fishOn = fishAmt > 0.0 && (wakes ? tw < 300.0 : tw < 200.0 && bedShows > 0.01 && x.L.night < 0.3) && !(x.prof & 256);
-        if (reefOn || fishOn) life = seaLife(x, o, d, h, tw, ww, lagRaw, lagoon, fishAmt, fres, bedShows, reefOn, fishOn);
-        lit *= life.litMul;
+        lit *= float3(life.litMul);
         float3 deep = x.L.zenith * 0.18 + x.L.horizon * 0.06 + float3(0.004, 0.014, 0.018);
         float3 under = deep;
         float bedPath = h.t - tw;
@@ -7364,8 +7368,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             }
         }
         under *= 1.0 - 0.4 * x.L.night;
-        under *= life.underMul;
-        col = mix(under, refl, fres) + life.add;
+        under *= float(life.underMul);
+        col = mix(under, refl, fres) + float3(life.add);
         // Glitter path toward the sun or moon: the main EDR highlight.
         col += x.L.keyCol * 6.0 * pow(max(dot(r, x.L.key), 0.0), mix(mix(900.0, 4000.0, x.L.night), 350.0, x.L.gold)) * fres * (x.L.shadows ? 1.0 : 0.3) * (1.0 + 0.5 * x.L.night) * open;
         // Golden hour: a broad sheen of the aureole on the water under the sun.
