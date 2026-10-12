@@ -64,6 +64,7 @@ enum Server {
         if let path = settings.screenshotPath {
             ok = autoreleasepool { Snapshot.run(settings: settings, path: path, gpu: gpu) }
         } else {
+            // vrr looks for this message in the binary to tell whether a build has --serve.
             FileHandle.standardError.write("vrr: --screenshot is required\n".data(using: .utf8)!)
         }
         fflush(stdout)
