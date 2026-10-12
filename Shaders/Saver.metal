@@ -4489,12 +4489,12 @@ static inline float4 columnL(thread const Terrain& tr, int k, int2 c) {
 static inline float groundL(thread const Terrain& tr, int k, int2 c, float y) {
     if (k == 0) {
         float4 col = tr.hm.read(uint2(clamp(c, int2(0), int2(tr.size - 1))), 0);
-        if (y < col.b && col.a == 0.0 && col.b - col.g >= ISLE_AIR) return col.g;
-        return col.a > 0.0 ? col.g : col.r;
+        // A select, not a branch: this sits in the shading's many-tap slope filters.
+        return (col.a > 0.0 || (SCENE_ISLES && y < col.b && col.a == 0.0 && col.b - col.g >= ISLE_AIR)) ? col.g : col.r;
     }
     uint2 t = uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1));
     float H = tr.ch.read(t, uint(k - 1), 0).r;
-    if (tr.isles && k <= GAP_LEVELS && y < H - 3.0) {
+    if (SCENE_ISLES && tr.isles && k <= GAP_LEVELS && y < H - 3.0) {
         float2 g = tr.cg.read(t, uint(k - 1)).rg;
         if (g.x < 0.0 && y < g.y) return -g.x;
     }
