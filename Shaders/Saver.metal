@@ -5116,7 +5116,8 @@ static inline float4 columnMorphW(thread const Terrain& tr, int k, int2 c, float
             wh = step(0.5, w);
         float2 pg = parentGapS(tr, k, c);
         bool cv = col.z > col.y;
-        bool isl = pg.x < 0.0 || (cv && isleGapL(tr, k, c, c4));
+        // Without the islands' surfaces no island shows: its air morphs as a rock gap's.
+        bool isl = ISLE_SHAPE && (pg.x < 0.0 || (cv && isleGapL(tr, k, c, c4)));
         pg.x = abs(pg.x);
         bool pv = pg.y > pg.x;
         if (isl) {
