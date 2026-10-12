@@ -194,7 +194,7 @@ final class FlightCamera {
             let d = simd_length(v)
             guard d > 90, d < 450 else { continue }
             if abs(FlightCamera.angleDiff(atan2(v.x, v.y), heading)) > 0.35 { continue }
-            let day: [SiteInfo.Kind: Double] = [.henge: 1, .ruins: 0.7, .hamlet: 0.7, .jetty: 0.5, .camp: 0.3, .cairn: 0.2]
+            let day: [SiteInfo.Kind: Double] = [.henge: 1, .ruins: 0.7, .hamlet: 0.7, .jetty: 0.5, .camp: 0.3, .cairn: 0.2, .cave: 0.4]
             let w = (day[site.kind] ?? 0) * (1 - night) + litInterest(site) * night
             let f = w * min(max((d - 90) / 60, 0), 1) * (1 - min(max((d - 300) / 150, 0), 1))
             sum += f
@@ -244,7 +244,7 @@ final class FlightCamera {
         }
         switch site.kind {
         case .hamlet: return site.lamps.contains { $0.kind == 5 && burns($0, 0.35) } ? 1.0 : 0.9
-        case .camp: return 0.8
+        case .camp, .cave: return 0.8
         case .jetty: return 0.7
         case .henge: return site.lamps.contains { $0.kind == 6 && burns($0, 0.3) } ? 0.8 : 0
         default: return 0

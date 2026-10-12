@@ -210,6 +210,19 @@ struct GiantRec {
     var kind: UInt32 = 0
 }
 
+// One cave-table entry (Shaders/Saver.metal CaveRec), kept after the giant table in its buffer.
+struct CaveRec {
+    var cell = SIMD2<Int32>()
+    var m = SIMD2<Float>()
+    var u = SIMD2<Float>()
+    var yF: Float = 0
+    var w: Float = 0
+    var l: Float = 0
+    var hc: Float = 0
+    var h: UInt32 = 0
+    var flags: UInt32 = 0
+}
+
 // A giant tree as the camera and the birds see it, in world coordinates: a cylinder of `reach` round its axis, its crown
 // top at `top`.
 struct GiantInfo {
@@ -226,7 +239,7 @@ struct GiantInfo {
 
 // A structure site as the camera and the smoke and halo lists see it, in world coordinates.
 struct SiteInfo {
-    enum Kind: Int { case none = 0, henge, cairn, ruins, hamlet, jetty, camp }
+    enum Kind: Int { case none = 0, henge, cairn, ruins, hamlet, jetty, camp, cave }
     // smoke: where its plume starts (rise > 0 only): a window lamp stands at its door, its chimney a few columns off.
     struct Lamp { var pos: SIMD3<Double>; var kind: Int; var rise: Double; var index: Int; var smoke: SIMD3<Double> }
     var index: Int
@@ -250,6 +263,9 @@ final class World {
     static let bandRows = 256
     // Must match GIANT_WIN and GIANT_CELL in Shaders/Saver.metal.
     static let giantWin = 24, giantCell = 1536.0
+    // Must match CAVE_WIN and CAVE_CELL in Shaders/Saver.metal; the cave table follows the giant table in its buffer.
+    static let caveWin = 96, caveCell = 256.0, caveReach = 64.0
+    static let caveOffset = giantWin * giantWin * MemoryLayout<GiantRec>.stride
 
     // One generated map: the column texture, the max-mip chain of its tops (r16Float: the DDA's skips fetch 2 bytes,
     // not the column's 8), and the CPU copy the camera steers by.
@@ -278,6 +294,8 @@ final class World {
         // siteList's lamps by Lamp.index.
         var lamps: [Int: SiteInfo.Lamp] = [:]
         var giantList: [GiantInfo] = []
+        // The caves of the cave table (placeCaves), world xz of each mouth.
+        var caveList: [CaveRec] = []
         // Whether the jungle's roof (Shaders/Saver.metal jungleCanopy) may stand on this map.
         var jungle = false
         // The jungle's extent on this map: whether the province reaches each point of a 64-voxel grid over it.
@@ -304,11 +322,13 @@ final class World {
             bd.usage = [.shaderRead, .shaderWrite, .pixelFormatView]
             bd.storageMode = .private
             guard let bt = device.makeTexture(descriptor: bd),
-                  let gb = device.makeBuffer(length: World.giantWin * World.giantWin * MemoryLayout<GiantRec>.stride, options: .storageModeShared) else { return nil }
+                  let gb = device.makeBuffer(length: World.caveOffset + World.caveWin * World.caveWin * MemoryLayout<CaveRec>.stride, options: .storageModeShared) else { return nil }
             // No slot holds a cell yet (placeGiants fills a slot only when its cell changes).
             let none = GiantRec(cell: SIMD2(Int32.min, Int32.min))
             let slots = gb.contents().bindMemory(to: GiantRec.self, capacity: World.giantWin * World.giantWin)
             for i in 0..<(World.giantWin * World.giantWin) { slots[i] = none }
+            let caveSlots = (gb.contents() + World.caveOffset).bindMemory(to: CaveRec.self, capacity: World.caveWin * World.caveWin)
+            for i in 0..<(World.caveWin * World.caveWin) { caveSlots[i] = CaveRec(cell: SIMD2(Int32.min, Int32.min)) }
             giants = gb
             band = bt
             bandViews = (0..<bt.mipmapLevelCount).map { bt.makeTextureView(pixelFormat: .rg16Float, textureType: .type2D, levels: $0..<($0 + 1), slices: 0..<1)! }
@@ -344,6 +364,7 @@ final class World {
     private let sitePipeline: MTLComputePipelineState
     private let stampPipeline: MTLComputePipelineState
     private let giantPipeline: MTLComputePipelineState
+    private let cavePipeline: MTLComputePipelineState
     private let bandTopPipeline: MTLComputePipelineState
     private let bandReducePipeline: MTLComputePipelineState
     private let bandFlagPipeline: MTLComputePipelineState
@@ -375,6 +396,7 @@ final class World {
     var structTex: MTLTexture { shown.structTex }
     var bandTex: MTLTexture { shown.band }
     var giantBuffer: MTLBuffer { shown.giants }
+    var caves: [CaveRec] { shown.caveList }
     var sites: [SiteInfo] { shown.siteList }
     var lamps: [Int: SiteInfo.Lamp] { shown.lamps }
     var giants: [GiantInfo] { shown.giantList }
@@ -403,7 +425,7 @@ final class World {
         guard let gen = pipeline("generateHeight"), let red = pipeline("reduceMax"), let redBase = pipeline("reduceMaxBase"), let redCpu = pipeline("reduceCpu"), let cpt = pipeline("copyTop"),
               let clean = pipeline("cleanupColumns"),
               let plant = pipeline("plantTrees"), let clim = pipeline("bakeClimate"), let place = pipeline("placeSites"), let stamp = pipeline("stampStructures"),
-              let bTop = pipeline("bandTop"), let bRed = pipeline("bandReduce"), let bFlag = pipeline("bandFlag"), let pg = pipeline("placeGiants"),
+              let bTop = pipeline("bandTop"), let bRed = pipeline("bandReduce"), let bFlag = pipeline("bandFlag"), let pg = pipeline("placeGiants"), let pc = pipeline("placeCaves"),
               let q = device.makeCommandQueue(), let a = Buffer(device: device) else { return nil }
         var mips: [MTLTexture] = []
         for l in 1...World.cpuLevel {
@@ -428,6 +450,7 @@ final class World {
         sitePipeline = place
         stampPipeline = stamp
         giantPipeline = pg
+        cavePipeline = pc
         bandTopPipeline = bTop
         bandReducePipeline = bRed
         bandFlagPipeline = bFlag
@@ -511,9 +534,12 @@ final class World {
                 var row0 = UInt32(band * rows)
                 switch pass {
                 case 0:
+                    // The cave table first: the heights carve its caves.
+                    if band == 0 { encodeCaves(enc, into: buf, origin: j.origin) }
                     enc.setComputePipelineState(genPipeline)
                     enc.setTexture(scratch, index: 0)
                     enc.setTexture(buf.rawGaps, index: 1)
+                    enc.setBuffer(buf.giants, offset: World.caveOffset, index: 2)
                 case 1:
                     // The giant table, with the cheap cleanup pass (half in each of its first two pieces): sites and
                     // trees read it.
@@ -632,6 +658,16 @@ final class World {
             buf.siteList = World.readSites(buf.sites)
             buf.lamps = Dictionary(buf.siteList.flatMap { $0.lamps.map { ($0.index, $0) } }, uniquingKeysWith: { $1 })
             buf.giantList = World.readGiants(buf.giants)
+            buf.caveList = World.readCaves(buf.giants)
+            if let e = Knobs.current.env["VR_CAVES"] {
+                let mid = SIMD2<Float>(Float(o.x), Float(o.y)) + Float(World.size / 2)
+                let r = Float(e) ?? 1500
+                for c in buf.caveList.filter({ simd_length($0.m - mid) < r }).sorted(by: { simd_length($0.m - mid) < simd_length($1.m - mid) }) {
+                    print(String(format: "cave at (%.0f, %.0f) floor %.0f in (%.2f, %.2f) W %.1f L %.0f H %.0f%@%@", c.m.x, c.m.y, c.yF, c.u.x, c.u.y, c.w, c.l, c.hc,
+                                 c.flags & 2 != 0 ? " home" : "", c.flags & 4 != 0 ? " grotto" : ""))
+                }
+                print("caves in table: \(buf.caveList.count), within \(Int(r)): \(buf.caveList.filter { simd_length($0.m - mid) < r }.count)")
+            }
             buf.jungleGrid = stride(from: 0, through: World.size, by: 64).flatMap { z in
                 stride(from: 0, through: World.size, by: 64).map { x in
                     Provinces.at(Double(Int(o.x) + x), Double(Int(o.y) + z), seed: self.seed).0 > 0.1
@@ -642,7 +678,7 @@ final class World {
                 for g in buf.giantList { print(String(format: "giant at (%.0f, %.0f) ground %.0f top %.0f kind %d", g.pos.x, g.pos.y, g.ground, g.top, g.kind)) }
             }
             if World.logSites {
-                var counts = [Int](repeating: 0, count: 7)
+                var counts = [Int](repeating: 0, count: 8)
                 for site in buf.siteList { counts[site.kind.rawValue] += 1 }
                 if Knobs.current.env["VR_SITES"] == "3" {
                     // Parts as kind (2 house, 10 round) and dwelling style.
@@ -659,7 +695,7 @@ final class World {
                         print("  site \(site.kind) \(Int(site.pos.x)),\(Int(site.pos.y)) r\(Int(site.radius)) lamps \(site.lamps.count)\(desc)")
                     }
                 }
-                print("sites at (\(o.x),\(o.y)): henge \(counts[1]) cairn \(counts[2]) ruins \(counts[3]) hamlet \(counts[4]) jetty \(counts[5]) camp \(counts[6]) total \(buf.siteList.count)")
+                print("sites at (\(o.x),\(o.y)): henge \(counts[1]) cairn \(counts[2]) ruins \(counts[3]) hamlet \(counts[4]) jetty \(counts[5]) camp \(counts[6]) cave \(counts[7]) total \(buf.siteList.count)")
             }
             // Frames in flight hold the map they read until they complete.
             if index != self.active { self.buffers[self.active] = nil }
@@ -700,12 +736,28 @@ final class World {
                             threadsPerThreadgroup: MTLSize(width: 8, height: 4, depth: 1))
     }
 
+    // The cave table round the map at `origin`, centred on its middle cell.
+    private func encodeCaves(_ enc: MTLComputeCommandEncoder, into buf: Buffer, origin: SIMD2<Int32>) {
+        // VR_NOCAVES (tests): an empty table, which must render as master did.
+        if Knobs.current.env["VR_NOCAVES"] != nil { return }
+        let mid = SIMD2<Double>(Double(origin.x), Double(origin.y)) + Double(World.size / 2)
+        var ci = SIMD4<Int32>(Int32(floor(mid.x / World.caveCell)) - Int32(World.caveWin / 2),
+                              Int32(floor(mid.y / World.caveCell)) - Int32(World.caveWin / 2), 0, Int32(bitPattern: seed))
+        enc.setComputePipelineState(cavePipeline)
+        enc.setBuffer(buf.giants, offset: World.caveOffset, index: 0)
+        enc.setBytes(&ci, length: MemoryLayout<SIMD4<Int32>>.stride, index: 1)
+        enc.dispatchThreads(MTLSize(width: World.caveWin, height: World.caveWin, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+    }
+
     // Before the first map: the giant table (and `giants`) the map centred on `center` would have, so the start can be
     // chosen by it without building a map there. placeGiants depends on the cells alone; the map keeps the slots it fills.
     func placeGiants(around center: SIMD2<Double>) {
         guard shown.origin.x == Int32.min, let cb = genQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return }
         let buf = shown
         for half in 0..<2 { encodeGiants(enc, into: buf, origin: World.mapOrigin(center), half: half) }
+        // The coarse rings may be built from this table before the first map: they carve its caves.
+        encodeCaves(enc, into: buf, origin: World.mapOrigin(center))
         enc.endEncoding()
         cb.commit()
         cb.waitUntilCompleted()
@@ -739,6 +791,11 @@ final class World {
             list.append(SiteInfo(index: i, id: UInt32(bitPattern: head.w), kind: kind, pos: c + 0.5, radius: Double(info.x), lamps: lamps))
         }
         return list
+    }
+
+    private static func readCaves(_ buf: MTLBuffer) -> [CaveRec] {
+        let p = (buf.contents() + World.caveOffset).bindMemory(to: CaveRec.self, capacity: World.caveWin * World.caveWin)
+        return (0..<(World.caveWin * World.caveWin)).compactMap { p[$0].flags & 1 != 0 ? p[$0] : nil }
     }
 
     private static func readGiants(_ buf: MTLBuffer) -> [GiantInfo] {
@@ -1472,6 +1529,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         cb.addCompletedHandler { [birdSlots] _ in birdSlots.signal() }
         let birdBuf = birdBuffers[birdIndex]
         birdIndex = (birdIndex + 1) % birdBuffers.count
+        // Caves are carved out to level 3's handoff: shading looks them up only while one lies within it.
+        let camXZ = SIMD2<Float>(Float(camera.position.x), Float(camera.position.z))
+        let caveR = Float(Clipmap.handoff(3)) + Float(World.caveReach)
+        f.birds.w = world.caves.contains { simd_length_squared($0.m - camXZ) < caveR * caveR } ? 1 : 0
         f.birds.x = Float(wildlife.upload(into: birdBuf, origin: SIMD3(Double(world.origin.x), 0, Double(world.origin.y))))
         let b = camera.basis
         prevCamera = (camera.position, b.fwd, b.right, b.up)
@@ -2002,6 +2063,50 @@ enum Snapshot {
                 }
             }
         }
+        // VR_CAVE=distance,height,bearing[,rank[,homes]]: hold the camera on the rank-th nearest cave (with homes 1, of those
+        // someone lives in), `distance` out from its mouth turned `bearing` degrees off its axis, `height` over the ground
+        // there or the cave's floor, whichever is higher, looking at the mouth.
+        if let spec = env["VR_CAVE"] {
+            let v = spec.split(separator: ",").compactMap { Double($0) }
+            if v.count >= 3 {
+                let here = SIMD2<Float>(Float(r.camera.position.x), Float(r.camera.position.z))
+                // homes: 1 lived-in caves only; 2 any cave of a good size seen clear across `distance` (by the CPU heights).
+                let b0 = v[2] * .pi / 180
+                func clear(_ c: CaveRec) -> Bool {
+                    let m = SIMD2(Double(c.m.x), Double(c.m.y)), u = SIMD2(Double(c.u.x), Double(c.u.y))
+                    let dir = SIMD2(u.x * cos(b0) - u.y * sin(b0), u.x * sin(b0) + u.y * cos(b0))
+                    guard c.w >= 6, c.hc >= 8, let g = r.world.height(x: m.x - dir.x * v[0], z: m.y - dir.y * v[0]) else { return false }
+                    let y0 = max(g, Double(c.yF)) + v[1], y1 = Double(c.yF) + 0.5 * Double(c.hc)
+                    for t in stride(from: 12.0, to: v[0], by: 6.0) {
+                        let q = m - dir * t
+                        guard let h = r.world.height(x: q.x, z: q.y) else { return false }
+                        if h > y1 + (y0 - y1) * t / v[0] { return false }
+                    }
+                    return true
+                }
+                let mode = v.count > 4 ? Int(v[4]) : 0
+                let pick = r.world.caves.filter { mode == 0 || (mode == 1 && $0.flags & 2 != 0) || (mode == 2 && clear($0)) }
+                    .sorted { simd_length($0.m - here) < simd_length($1.m - here) }
+                let rank = v.count > 3 ? Int(v[3]) : 0
+                if rank < pick.count {
+                    let c = pick[rank]
+                    let m = SIMD2(Double(c.m.x), Double(c.m.y)), u = SIMD2(Double(c.u.x), Double(c.u.y))
+                    let b = v[2] * .pi / 180
+                    let dir = SIMD2(u.x * cos(b) - u.y * sin(b), u.x * sin(b) + u.y * cos(b))
+                    let cam = m - dir * v[0]
+                    let g = r.world.height(x: cam.x, z: cam.y) ?? 20
+                    let y = max(max(g, 19.85), Double(c.yF)) + v[1]
+                    let yaw = atan2(m.x - cam.x, m.y - cam.y)
+                    let pitch = atan2(Double(c.yF) + 0.4 * Double(c.hc) - y, v[0]) + (settings.pitch ?? 0)
+                    r.camera.freeze(position: SIMD3(cam.x, y, cam.y), yaw: yaw, pitch: pitch)
+                    r.camera.pitchOverride = nil
+                    print(String(format: "showing cave at (%.0f, %.0f) floor %.0f W %.1f H %.0f L %.0f%@, %d of %d; VR_CAM=%.1f,%.1f,%.1f,%.2f,%.2f,1", c.m.x, c.m.y, c.yF, c.w, c.hc, c.l,
+                                 c.flags & 2 != 0 ? " home" : "", rank + 1, pick.count, cam.x, cam.y, y, yaw * 180 / .pi, pitch * 180 / .pi))
+                } else {
+                    print("no cave rank \(rank) (\(pick.count) in the table)")
+                }
+            }
+        }
         // VR_CAM=x,z,height,yawDeg,pitchDeg[,abs[,rollDeg]]: holds the camera at world (x, z), `height` above the ground
         // there (absolute when abs is 1).
         let camSpec = env["VR_CAM"].map { $0.split(separator: ",").compactMap { Double($0) } }
@@ -2116,6 +2221,11 @@ enum Snapshot {
                 // VR_POWER_FLIP=i switches between battery and AC power at frame i (render scale kept).
                 if Int(env["VR_POWER_FLIP"] ?? "") == i { r.battery.toggle() }
                 if env["VR_MOTION"] != nil { r.simulate(1.0 / 60) }
+                // VR_DOLLY=v: a held camera moves v voxels a frame along its heading, level (approaches across the rings).
+                if let v = Double(env["VR_DOLLY"] ?? ""), i > 0 {
+                    let c = r.camera
+                    c.freeze(position: c.position + SIMD3(sin(c.yaw), 0, cos(c.yaw)) * v, yaw: c.yaw, pitch: c.pitch)
+                }
                 let cb = r.queue.makeCommandBuffer()!
                 r.encode(into: cb, output: tex, outputSize: CGSize(width: w, height: h))
                 cb.commit()

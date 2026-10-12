@@ -574,7 +574,7 @@ static inline Mega megaLift(float2 p, float lagoon, uint seed) {
 // A generated column: solid where y < h, except inside its gaps. [gl, gh) is the principal (highest) gap, [lo1, hi1) and
 // [lo2, hi2) up to two more below it, highest first (empty when hi <= lo). carved: the gaps are rock carved by the mega
 // relief (overhangs, caves, bridges), whose roofs rest on any neighbour rather than all four; canyon arches are not.
-struct Col { float h, gl, gh, lo1, hi1, lo2, hi2; bool carved; uint reef; };
+struct Col { float h, gl, gh, lo1, hi1, lo2, hi2; bool carved; uint reef; bool cave = false; };
 
 // Extra gaps (World gx, rgba16Uint): x lo1, y hi1, z lo2, w hi2 in the low 11 bits (heights stay under 2048); the top 5
 // bits of z hold flags (bit 0: carved). An empty gap is lo = hi = 0.
@@ -1358,15 +1358,222 @@ kernel void placeTowers(device TowerRec* out [[buffer(0)]],
 }
 
 
+// MARK: - Caves
+
+// Caves in cliff faces, mostly in the mountains: at most one per CAVE_CELL world cell, its mouth in the cell's middle
+// half and nothing of it farther than CAVE_REACH from the mouth, so a column asks its own cell only. placeCaves finds
+// each cell's cave on the terrain once and keeps it in a toroidal table of CAVE_WIN cells a side round the map centre,
+// wider than level 3's window: the 1-voxel map and coarse levels 1-3 carve the same cave at their sample points, and
+// level 4 none (its window is wider than the table).
+constant float CAVE_CELL = 256.0;
+constant float CAVE_REACH = 64.0;
+// Must match World.caveWin in Sources/Renderer.swift.
+constant int CAVE_WIN = 96;
+// The table lies in the giant table's buffer after its GIANT_WIN^2 records, so whatever has the giants has the caves.
+constant int CAVE_TAIL = 24 * 24 * 32;
+// The coarsest sample spacing that carves caves (level 3).
+constant int CAVE_MAX_S = 8;
+
+// m: the mouth's centre (world xz), u: into the rock, yF: the floor, W: the mouth's half width, L: depth, Hc: height at
+// the mouth's middle. Must match World.CaveRec in Sources/Renderer.swift.
+struct CaveRec { int2 cell; float2 m; float2 u; float yF; float W; float L; float Hc; uint h; uint flags; };
+constant uint CV_ON = 1u, CV_HOME = 2u, CV_GROTTO = 4u;
+
+static inline int caveSlot(int2 cell) {
+    int2 m = ((cell % CAVE_WIN) + CAVE_WIN) % CAVE_WIN;
+    return m.y * CAVE_WIN + m.x;
+}
+
+static inline bool caveFind(device const CaveRec* caves, float2 w, thread CaveRec& r) {
+    int2 cell = int2(floor(w / CAVE_CELL));
+    r = caves[caveSlot(cell)];
+    return all(r.cell == cell) && (r.flags & CV_ON) != 0u;
+}
+
+// A cave's section at world column q: (floor, roof) of its hollow, or lo >= hi outside it. a: depth into the rock from
+// the mouth line, b: across it.
+static inline float2 caveSection(CaveRec r, float2 q, uint seed) {
+    float2 d = q - r.m;
+    float a = dot(d, r.u), b = dot(d, float2(-r.u.y, r.u.x));
+    if (a < -4.0 || a > r.L + 2.0 || abs(b) > r.W * 1.5 + 3.0) return float2(0);
+    float ta = saturate(a / r.L);
+    // Full width at the mouth, swelling into a chamber, pinching out at the back; the edge wanders.
+    float wa = r.W * (1.0 + 0.3 * sin(3.14159 * min(ta * 1.6, 1.0))) * sqrt(saturate(1.0 - pow(max(ta - 0.5, 0.0) / 0.5, 2.0)));
+    float x = abs(b) / max(wa, 0.5) + 0.2 * perlin2(q / 6.0, seed + 910u) + 0.08 * perlin2(q / 2.7, seed + 911u);
+    if (x >= 1.0) return float2(0);
+    // A rounded arch, its crown ragged.
+    float arch = pow(1.0 - x * x, 0.75);
+    float hc = r.Hc * (1.0 - 0.45 * smoothstep(0.25, 1.0, ta)) * (0.88 + 0.24 * perlin2(q / 8.0, seed + 912u));
+    float lo = r.yF + floor(1.8 * (1.0 - sqrt(1.0 - x * x)) * saturate(0.6 + perlin2(q / 3.3, seed + 913u)));
+    float hi = r.yF + floor(hc * arch + 0.5 + 1.3 * perlin2(q / 3.5, seed + 914u) * arch);
+    return float2(lo, hi);
+}
+
+// A lived-in cave's hearth: its depth along the cave's axis; its gear stands to one side of it.
+static inline float caveHearthA(CaveRec r) { return clamp(0.3 * r.L, 4.0, 9.0); }
+constant int CP_STONE = 1, CP_FIRE = 2, CP_WOOD = 3, CP_BED = 4;
+
+// What of a home's furnishing stands at cave coordinates (a, b) (a column's centre), and how far it rises over the floor:
+// a fire in a ring of stones, a woodpile and a bedroll either side of it.
+static inline int caveProp(CaveRec r, float a, float b, thread float& rise) {
+    rise = 0.0;
+    float da = a - caveHearthA(r), sb = (r.h & 64u) != 0u ? b : -b;
+    if (abs(da) < 1.5 && abs(b) < 1.5) {
+        if (abs(da) < 0.5 && abs(b) < 0.5) { rise = 0.75; return CP_FIRE; }
+        rise = abs(da) > 0.5 && abs(b) > 0.5 ? 0.25 : 0.5;
+        return CP_STONE;
+    }
+    if (da > -1.0 && da < 1.0 && sb > 2.5 && sb < 3.5) { rise = 1.0; return CP_WOOD; }
+    if (da > 1.5 && da < 4.5 && sb < -2.0 && sb > -3.0) { rise = 0.25; return CP_BED; }
+    return 0;
+}
+
+// The column with its cave carved: a hollow under at least three voxels of roof; in the mouth, rock under the arch with
+// less roof than that is cut down to the floor, which opens the arch in the cliff.
+static inline Col caveColumn(Col c, int2 w, CaveRec r, uint seed, int s) {
+    if (c.gh > c.gl) return c;
+    float2 q = float2(w) + 0.5;
+    float2 g = caveSection(r, q, seed);
+    float lo = g.x, hi = g.y;
+    if (hi - lo < 3.0 || c.h <= lo) return c;
+    c.cave = true;
+    if (c.h < hi + 3.0) {
+        if (dot(q - r.m, r.u) < 3.0) { c.h = lo; return c; }
+        hi = c.h - 3.0;
+        if (hi - lo < 3.0) return c;
+    }
+    // A home's furnishing on its floor, on the 1-voxel map only (a quarter voxel to a voxel: nothing a coarse level shows).
+    if (s == 1 && (r.flags & CV_HOME) != 0u && lo == r.yF) {
+        float rise;
+        if (caveProp(r, dot(q - r.m, r.u), dot(q - r.m, float2(-r.u.y, r.u.x)), rise) != 0) lo += rise;
+    }
+    c.gl = lo; c.gh = hi; c.carved = true;
+    return c;
+}
+
+static inline Col terrainColumnC(int2 w, uint seed, int s, device const CaveRec* caves) {
+    Col c = terrainColumnS(w, seed, s);
+    CaveRec r;
+    if (s <= CAVE_MAX_S && caveFind(caves, float2(w) + 0.5, r)) c = caveColumn(c, w, r, seed, s);
+    return c;
+}
+
+static inline float snowlineAt(float temp);
+static inline float altitudeTemp(float temp, float H);
+
+// Finds a cave on a cliff at P: the steepest rise along the fall line through it (a riser of a range's cliff band, a
+// karst tower's or tepui's wall, an escarpment), its foot the floor, rock behind deep enough to roof it.
+static bool caveTry(float2 P, uint h, uint seed, thread CaveRec& r) {
+    Climate cl = climate(P, seed);
+    if (cl.jungle > 0.1) return false;
+    float U = megaLift(P + seedOffset(seed), lagoonAmount(cl), seed).U;
+    if (hashf(h) >= (U > 30.0 ? 0.8 : 0.12)) return false;
+    if (towerNear(P, CAVE_REACH + 16.0, seed)) return false;
+    float hx = terrainColumnBase(int2(floor(P + float2(6, 0))), seed).h - terrainColumnBase(int2(floor(P - float2(6, 0))), seed).h;
+    float hz = terrainColumnBase(int2(floor(P + float2(0, 6))), seed).h - terrainColumnBase(int2(floor(P - float2(0, 6))), seed).h;
+    float2 gr = float2(hx, hz) / 12.0;
+    if (length(gr) < 0.4) return false;
+    // The terraced field's differences lean to the grid's axes; a cave need not.
+    float2 u = normalize(gr), v;
+    float tw = 0.35 * (hashf(pcg(h + 8u)) - 0.5);
+    u = float2(u.x * cos(tw) - u.y * sin(tw), u.x * sin(tw) + u.y * cos(tw));
+    v = float2(-u.y, u.x);
+    // The profile up the fall line, every two voxels from 16 below P to 16 above.
+    float pr[17];
+    for (int i = 0; i < 17; i++) {
+        Col q = terrainColumnBase(int2(floor(P + u * float(2 * i - 16))), seed);
+        if (q.gh > q.gl) return false;
+        pr[i] = q.h;
+    }
+    float best = 0.0;
+    int bi = -1;
+    for (int i = 1; i < 14; i++) {
+        float rise = pr[i + 3] - pr[i];
+        if (rise > best) { best = rise; bi = i; }
+    }
+    // A sheer face, not a staircase slope: a stair's mouth would open as a ragged notch down its steps.
+    float sheer = max(max(pr[bi + 1] - pr[bi], pr[bi + 2] - pr[bi + 1]), pr[bi + 3] - pr[bi + 2]);
+    if (best < 11.0 || sheer < 7.0) return false;
+    // The foot: the last sample before the rise starts.
+    int j = bi;
+    while (j < bi + 2 && pr[j + 1] - pr[j] < 2.0) j++;
+    float yF = pr[j];
+    if (yF < SEA + 1.5 || pr[j - 1] > yF + 1.0) return false;
+    float tm = float(2 * j - 16) + 1.0;
+    float2 m = floor(P + u * tm) + 0.5;
+    bool grotto = U > 250.0 && best > 30.0 && hashf(pcg(h + 4u)) < 0.15;
+    float rr = hashf(pcg(h + 3u));
+    float W = grotto ? 10.0 + 6.0 * rr : 4.0 + 7.0 * rr;
+    float Hc = clamp(W * (1.1 + 0.6 * hashf(pcg(h + 5u))), 6.0, grotto ? 24.0 : 15.0);
+    Hc = min(Hc, best - 3.0);
+    if (Hc < 5.0) return false;
+    float Lmax = grotto ? 56.0 : 18.0 + 26.0 * hashf(pcg(h + 6u));
+    float L = 0.0;
+    for (float dd = 4.0; dd <= Lmax; dd += 4.0) {
+        Col q = terrainColumnBase(int2(floor(m + u * dd)), seed);
+        if (q.gh > q.gl || q.h < yF + Hc * (1.0 - 0.45 * smoothstep(0.25, 1.0, dd / Lmax)) + 3.0) break;
+        L = dd;
+    }
+    if (L < 10.0) return false;
+    // Rock either side of the mouth.
+    for (int t = 0; t < 2; t++) {
+        float s2 = t == 0 ? 1.0 : -1.0;
+        Col q = terrainColumnBase(int2(floor(m + u * 4.0 + v * (s2 * W * 0.8))), seed);
+        if (q.h < yF + 0.6 * Hc + 3.0) { W *= 0.6; Hc = min(Hc, max(5.0, W * 1.2)); }
+    }
+    if (W < 3.0) return false;
+    // Nothing of it may leave P's cell: columns ask their own cell only.
+    int2 cell = int2(floor(P / CAVE_CELL));
+    for (; L >= 10.0; L -= 4.0) {
+        bool inside = true;
+        for (int k = 0; k < 4; k++) {
+            float2 e = m + u * ((k & 1) != 0 ? L + 2.0 : -4.0) + v * ((k & 2) != 0 ? 1.0 : -1.0) * (1.5 * W + 3.0);
+            inside = inside && all(int2(floor(e / CAVE_CELL)) == cell);
+        }
+        if (inside) break;
+    }
+    if (L < 10.0) return false;
+    r.m = m; r.u = u; r.yF = yF; r.W = W; r.L = L; r.Hc = Hc; r.h = h;
+    r.flags = CV_ON | (grotto ? CV_GROTTO : 0u);
+    // Someone lives in about one cave in seven whose floor is level with the ground in front, below the snow.
+    float snow = snowlineAt(altitudeTemp(cl.temp, yF));
+    if (W >= 4.0 && Hc >= 6.0 && L >= 14.0 && yF < snow - 10.0 && abs(pr[j - 1] - yF) <= 1.0 && hashf(pcg(h + 7u)) < 0.16)
+        r.flags |= CV_HOME;
+    return true;
+}
+
+// One thread per world cell info.xy + gid (info.z: the first row of this dispatch).
+kernel void placeCaves(device CaveRec* out [[buffer(0)]],
+                       constant int4& info [[buffer(1)]],
+                       uint2 g [[thread_position_in_grid]]) {
+    uint2 gid = g + uint2(0, uint(info.z));
+    if (gid.x >= uint(CAVE_WIN) || gid.y >= uint(CAVE_WIN)) return;
+    uint seed = uint(info.w);
+    int2 cell = info.xy + int2(gid);
+    // A slot already holding this cell keeps it (World.Buffer starts every slot with no cell).
+    if (all(out[caveSlot(cell)].cell == cell)) return;
+    CaveRec r;
+    r.cell = cell; r.m = 0; r.u = 0; r.yF = 0; r.W = 0; r.L = 0; r.Hc = 0; r.h = 0; r.flags = 0;
+    uint hc = hash2i(cell, seed + 900u);
+    for (int a = 0; a < 2; a++) {
+        uint h = pcg(hc + uint(a) * 7919u);
+        float2 P = floor((float2(cell) + 0.25 + 0.5 * float2(hashf(pcg(h + 1u)), hashf(pcg(h + 2u)))) * CAVE_CELL) + 0.5;
+        CaveRec t = r;
+        if (caveTry(P, h, seed, t)) { r = t; break; }
+    }
+    out[caveSlot(cell)] = r;
+}
+
 kernel void generateHeight(texture2d<float, access::write> out [[texture(0)]],
                            texture2d<uint, access::write> gxOut [[texture(1)]],
                            constant int4& info [[buffer(0)]],
                            constant uint& row0 [[buffer(1)]],
+                           device const CaveRec* caves [[buffer(2)]],
                            uint2 g [[thread_position_in_grid]]) {
     uint2 gid = g + uint2(0, row0);
     if (gid.x >= uint(info.z) || gid.y >= uint(info.z)) return;
     int2 w = int2(gid) + info.xy;
-    Col c = terrainColumn(w, uint(info.w));
+    Col c = terrainColumnC(w, uint(info.w), 1, caves);
     out.write(float4(c.h, c.gl, c.gh, 0), gid);
     gxOut.write(c.h < SEA && c.gh <= c.gl ? reefPack(packGaps(c), c.reef) : packGaps(c), gid);
 }
@@ -1490,6 +1697,11 @@ constant int GIANT_THIN_LOD = 3;
 
 // One table entry; G <= 0: no giant in the cell. Must match GiantRec in Sources/Renderer.swift.
 struct GiantRec { int2 cell; float2 c; float G; float yT; uint h; uint kind; };
+static_assert(sizeof(GiantRec) * GIANT_WIN * GIANT_WIN == CAVE_TAIL, "the cave table follows the giant table");
+static_assert(sizeof(CaveRec) == 48, "World.CaveRec");
+static inline device const CaveRec* caveTable(device const GiantRec* giants) {
+    return (device const CaveRec*)((device const uchar*)giants + CAVE_TAIL);
+}
 
 // c: axis (world xz); G: the ground there, which places its parts (roots and flanges meet each column's own ground).
 struct Giant { float2 c; float G; uint h; float yT; int kind; };
@@ -2471,7 +2683,7 @@ struct Site {
     int4 parts[MAX_PARTS];
 };
 
-constant int T_HENGE = 1, T_CAIRN = 2, T_RUINS = 3, T_HAMLET = 4, T_JETTY = 5, T_CAMP = 6;
+constant int T_HENGE = 1, T_CAIRN = 2, T_RUINS = 3, T_HAMLET = 4, T_JETTY = 5, T_CAMP = 6, T_CAVE = 7;
 constant int P_BOX = 1, P_HOUSE = 2, P_DECK = 3, P_BOAT = 4, P_HENGE = 5, P_WALL = 6, P_RING = 7, P_FIRE = 8, P_CLEAR = 9, P_ROUND = 10;
 // Yard and camp props (y1 holds the type, y0 the ground they stand on).
 constant int P_PROP = 11;
@@ -3178,6 +3390,24 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
     int2 cl = cell * SITE_CELL - info.xy;
     if (any(cl < 48) || any(cl > n - 176)) { sites[idx] = G.s; return; }
     if (towerNear(float2(cell * SITE_CELL + 64), 128.0, seed)) { sites[idx] = G.s; return; }
+    // A lived-in cave whose hearth lies in this cell: its fire is the site's one lamp (its light, glow and smoke), its
+    // furnishing carved in the cave's floor (caveColumn). Smoke leaves by the mouth, over the lip. No other site here.
+    {
+        CaveRec r;
+        float2 cc = float2(cell * SITE_CELL) + 0.5 * float(SITE_CELL);
+        if (caveFind(caveTable(giants), cc, r) && (r.flags & CV_HOME) != 0u) {
+            float af = caveHearthA(r);
+            float2 F = floor(r.m + r.u * af) + 0.5;
+            if (all(int2(floor(F / float(SITE_CELL))) == cell)) {
+                G.s.head = int4(int2(floor(F)), T_CAVE, int(h));
+                int2 so = int2(round(-r.u * (af + 1.5)));
+                addLamp(G, float3(0.5, r.yF + 1.5, 0.5), L_HEARTH, max(r.Hc - 1.0, 1.0), so);
+                G.s.info = float4(min(G.r, 125.0), 0.1, 0.0, float(G.nl));
+                sites[idx] = G.s;
+                return;
+            }
+        }
+    }
     for (int k = 0; k < 9; k++) {
         uint hk = pcg(h + uint(k) * 7919u);
         int2 ck = cell * SITE_CELL + 16 + int2(k % 3, k / 3) * 32 + int2(int(hk % 32u), int((hk >> 5) % 32u));
@@ -4046,8 +4276,9 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
     depth = 0.0;
     int s = 1 << k, off = s >> 2, hs = s >> 1;
     int2 b = cw * s + off;
-    Col c0 = terrainColumnS(b, seed, s), c1 = terrainColumnS(b + int2(hs, 0), seed, s);
-    Col c2 = terrainColumnS(b + int2(0, hs), seed, s), c3 = terrainColumnS(b + int2(hs, hs), seed, s);
+    device const CaveRec* caves = caveTable(giants);
+    Col c0 = terrainColumnC(b, seed, s, caves), c1 = terrainColumnC(b + int2(hs, 0), seed, s, caves);
+    Col c2 = terrainColumnC(b + int2(0, hs), seed, s, caves), c3 = terrainColumnC(b + int2(hs, hs), seed, s, caves);
     float H = coarseCombine(c0.h, c1.h, c2.h, c3.h, float(s));
     // A giant: where at least two samples stand in it, the mean of their tops, of their lowest gaps (the air under the
     // crown, the second gap) and of the tallest gap above that (between tiers, the principal one); solid where two are
@@ -4116,7 +4347,8 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
             return float3(top, lowG);
         }
     }
-    float2 vg = coarseVeg(cw, k, float4(c0.h, c1.h, c2.h, c3.h), H, seed);
+    // No trees take root in or beside a cave on the 1-voxel map (plantTrees keeps off carved rock): nor here.
+    float2 vg = c0.cave || c1.cave || c2.cave || c3.cave ? float2(H, 0) : coarseVeg(cw, k, float4(c0.h, c1.h, c2.h, c3.h), H, seed);
     depth = vg.y;
     float Hv = vg.x;
     if (k > GAP_LEVELS || k > 3) return float3(Hv, 0, 0);
@@ -4261,6 +4493,9 @@ struct Terrain {
     texture2d<float> pv;           // the province fields (bakeProvinces)
     constant TowerTable* towers; // the ruined towers nearest the camera (towerN of them; none outside the scene pass)
     int towerN;
+    float caves;                 // 1 while a cave lies within the world's edge (scene pass only)
+    float caveNight;             // how far night has come for the glow deep in caves (bioLandRamp)
+    float caveFire;              // a lived-in cave's hearth's level: low by day, banked late at night (lampLevel, updateLamps)
 };
 
 static inline int2 levelOrigin(thread const Terrain& tr, int k) { return k == 0 ? int2(0) : tr.origin >> k; }
@@ -4803,6 +5038,7 @@ struct Surface {
     float wall;     // megaWall: among the great walls
     float3 nrm;     // the plane a structure's roof voxel or a tower's wall shades as (zero: the face normal)
     float3 emit;    // fire, lanterns and lit windows
+    float cave;     // how much of the sky and bounce light a cave's depth keeps from this face (0 outside caves)
     float up;       // leaves: height up the crown, 0 at its foot, 1 at its top
     bool vine;      // a giant's hanging vines
     float bio;      // night glow share of this ground (-1: a giant's, worked out in bioLight)
@@ -5211,6 +5447,105 @@ static float3 propShade(Part P, float3 a, int feat, int3 v, int3 n, float2 uv, f
 // Surface of level k's column v (xz in level cells) on face n; uv is the face position in [0, 1) of the column.
 // Coarse columns are s voxels wide but still unit voxels tall, and carry no structures.
 // lite: seen in rippled water, so detail finer than the ripples' blur is shaded at its mean.
+static inline float3 bioHue(float2 w, uint seed);
+static inline float bioPulse(float2 w, float t, uint seed, float warp);
+
+// A cave's dressing at world xz wq, height wy on a face of terrain column w: in green country (green 0...1) moss on its
+// floor and the foot of its walls toward the light, ferns in the moss, ivy hanging over the mouth and roots under its lip;
+// deep in, a few mosses glowing at night; and how much of the sky and the bounce its depth keeps from the face (s.cave).
+static void caveDress(thread const Terrain& tr, thread Surface& s, int3 n, float2 w, float2 wq, float wy, float cs,
+                      float fpA, bool underGap, float green, uint seed, float time) {
+    CaveRec r;
+    if (!caveFind(caveTable(tr.giants), w + 0.5 * cs, r)) return;
+    float2 d = wq - r.m;
+    float a = dot(d, r.u), b = dot(d, float2(-r.u.y, r.u.x));
+    if (a < -10.0 || abs(b) > 2.0 * r.W + 6.0) return;
+    float y = wy - r.yF;
+    bool inside = underGap || n.y < 0;
+    // Light from the mouth fades over a mouth's width or two.
+    if (inside) s.cave = 0.95 * smoothstep(0.2 * r.W, 1.7 * r.W + 6.0, a);
+    // Leaf texels a quarter voxel wide, at their mean once one nears a pixel.
+    float near = 1.0 - smoothstep(0.08, 0.3, fpA);
+    float3 tq = float3(wq.x, wy, wq.y) * 4.0;
+    float leaf = mix(0.8, hashf(hash3i(int3(floor(tq)), seed + 929u)), near);
+    if (green > 0.0) {
+        float pn = perlin2(wq / 4.0, seed + 920u) + 0.5 * perlin2(wq / 1.7, seed + 921u);
+        float lit = 1.0 - smoothstep(0.3 * r.W, 1.3 * r.W + 8.0, a);
+        // Moss on the floor and the foot of the walls toward the light, and on the ground before the mouth.
+        float moss = green * lit * smoothstep(-9.0, -3.0, a) * smoothstep(-0.35, 0.2, pn + 0.35 * lit);
+        moss *= n.y > 0 ? step(abs(y - 0.5), 2.0) : n.y == 0 && inside ? step(-1.5, y) * (1.0 - smoothstep(0.5, 3.0, y)) : 0.0;
+        float3 mossC = mix(float3(0.07, 0.10, 0.04), float3(0.10, 0.13, 0.05), saturate(pn * 0.5 + 0.5)) * (0.85 + 0.3 * leaf);
+        s.albedo = mix(s.albedo, mossC, 0.9 * moss);
+        s.tread = mix(s.tread, mossC, 0.9 * moss);
+        // Ferns: brighter fronds in the moss.
+        if (n.y > 0 && moss > 0.15) {
+            float fr = hashf(hash2i(int2(floor(wq * 2.0)), seed + 922u));
+            float fern = mix(0.3, step(0.6, fr) * (0.6 + 0.6 * leaf), near);
+            s.albedo = mix(s.albedo, float3(0.09, 0.16, 0.045), fern * moss);
+        }
+        if (n.y == 0 && !inside && abs(b) < 1.3 * r.W + 2.0 && a > -4.0 && a < 5.0 && s.H >= r.yF + 0.5 * r.Hc) {
+            // Ivy and creepers trailing from a ledge over the mouth, strands of every length, thinning out to either side.
+            float along = b + 0.37 * a;
+            uint sh = hash2i(int2(int(floor(along)), 3), seed + 924u);
+            // Each strand from its own ledge, in whole voxels; its leaves end in quarter voxels.
+            float rim = min(s.H, floor(r.yF + r.Hc + 4.0 + 3.0 * perlin2(wq / 9.0, seed + 928u)) + floor(3.0 * hashf(pcg(sh + 2u)) - 1.0));
+            float side = green * (1.0 - smoothstep(0.6 * r.W, 1.3 * r.W + 2.0, abs(b)));
+            float len = (r.Hc + 2.0) * (0.1 + 0.9 * hashf(pcg(sh)) * hashf(pcg(sh + 1u))) * side * step(0.45, hashf(sh));
+            len = max(len, 1.5 * side * smoothstep(-0.2, 0.3, perlin2(float2(along / 4.0, 1.5), seed + 923u)));
+            float hang = floor((rim - wy) * 4.0) * 0.25;
+            // Leaves thin toward a strand's end.
+            float ivy = step(0.0, hang) * step(hang, len) * step(hang / max(len, 1.0) * 0.8, leaf * 1.1);
+            float3 ivyC = mix(float3(0.07, 0.11, 0.04), float3(0.12, 0.16, 0.055), leaf);
+            s.albedo = mix(s.albedo, ivyC, mix(ivy, 0.5 * ivy + 0.3 * step(0.0, hang) * step(hang, len), 1.0 - near));
+        }
+        // Roots and creepers under the lip.
+        if (n.y < 0 && a < 0.4 * r.W + 3.0) {
+            float rt = green * smoothstep(0.0, 0.4, perlin2(wq / 2.2, seed + 926u) + 0.2);
+            s.albedo = mix(s.albedo, float3(0.075, 0.075, 0.04) * (0.8 + 0.4 * leaf), 0.8 * rt);
+        }
+    }
+    // How far past the 1-voxel ring's lamps (updateLamps' far fade) this face lies.
+    float farW = smoothstep(tr.lod[0].x, tr.lod[0].y, length(wq - float2(tr.origin) - tr.cam));
+    // A home's furnishing: the faces of its rise over the floor.
+    float rise;
+    int prop = (r.flags & CV_HOME) != 0u ? caveProp(r, dot(w + 0.5 * cs - r.m, r.u), dot(w + 0.5 * cs - r.m, float2(-r.u.y, r.u.x)), rise) : 0;
+    if (prop != 0 && cs == 1.0 && wy >= r.yF - 0.01 && wy <= r.yF + rise + 0.01 && n.y >= 0) {
+        float3 c = prop == CP_STONE ? float3(0.20, 0.19, 0.18) * (0.8 + 0.4 * leaf)
+                 : prop == CP_FIRE ? float3(0.07, 0.055, 0.045)
+                 : prop == CP_WOOD ? mix(float3(0.20, 0.13, 0.07), float3(0.29, 0.21, 0.12), step(0.5, fract(wy * 3.0)) * (n.y == 0 ? 1.0 : 0.3))
+                 : mix(float3(0.30, 0.21, 0.13), float3(0.36, 0.30, 0.20), step(0.7, fract(dot(wq, r.u) * 1.5)));
+        s.albedo = c;
+        s.tread = c;
+        s.level = n.y > 0 ? 1.0 : 0.0;
+        if (prop == CP_FIRE) {
+            // The flame, flickering as the site's hearth lamp does (placeSites: lamp 0 of the hearth's cell).
+            int2 sc = int2(floor((w + 0.5) / float(SITE_CELL)));
+            uint lh = pcg(hash2i(sc, seed + 200u));
+            float fl = flicker(time, hashf(lh) * 40.0, seed);
+            float flame = perlin3(float3(wq * 2.5, wy * 1.6 - time * 1.4), seed + 320u) * 0.5 + 0.5;
+            flame = mix(flame, 0.5, smoothstep(0.05, 0.3, fpA));
+            s.emit += LAMP_COL[L_HEARTH] * LAMP_EMIT[L_HEARTH] * fl * tr.caveFire * float3(1.0, 0.7, 0.5)
+                    * (n.y > 0 ? mix(0.05, 0.24, flame) : mix(0.02, 0.17, flame)) * (1.0 - farW);
+        }
+    }
+    // Past the 1-voxel ring the fire's lamp is gone (updateLamps): its light in the mouth glows on, so a lived-in cave
+    // stays a warm spark in the mountainside at night out to the haze.
+    if ((r.flags & CV_HOME) != 0u && farW > 0.0 && tr.caveFire > 0.03 && a > -2.0 && a < caveHearthA(r) + 2.0 && y < r.Hc + 1.0) {
+        float g = (1.0 - smoothstep(0.6 * r.W, 1.2 * r.W, abs(b))) * (1.0 - smoothstep(0.5 * r.Hc, r.Hc + 1.0, y));
+        s.emit += LAMP_COL[L_HEARTH] * LAMP_I[L_HEARTH] * 0.08 * g * farW * tr.caveFire;
+    }
+    // Deep in, a few mosses and fungi glow at night, in the land's glow hues, slow to swell.
+    if (inside && tr.caveNight > 0.0 && a > 0.3 * r.L && y < 0.6 * r.Hc) {
+        // In clumps on the floor and the foot of the walls: specks a quarter voxel across.
+        float clump = smoothstep(0.15, 0.45, perlin2(wq / 4.5 + wy * 0.13, seed + 930u))
+                    * (n.y > 0 ? 1.0 : n.y == 0 ? 1.0 - smoothstep(0.0, 0.5 * r.Hc, y) : 0.25);
+        uint gh = hash3i(int3(floor(tq)), seed + 927u);
+        float spot = clump * mix(step(hashf(gh), 0.2) * (0.5 + hashf(pcg(gh))), 0.2, smoothstep(0.08, 0.4, fpA));
+        float pulse = bioPulse(wq, time, seed, 0.0);
+        s.emit += bioHue(r.m, seed) * 0.18 * spot * pulse * tr.caveNight * (0.4 + 0.6 * green) * smoothstep(0.3 * r.L, 0.55 * r.L, a);
+    }
+}
+
 static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device const Site* sites, device const float4* lampState,
                          int k, int3 v, int3 n, float2 uv, float fp, float fpA, float3 p, uint seed, float time, bool lite = false,
                          bool bio = false) {
@@ -5231,6 +5566,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     s.face = 0;
     s.nrm = 0;
     s.emit = 0;
+    s.cave = 0;
     int2 mapOrigin = tr.origin;
     float cs = tr.lod[k].w;
     float4 col4 = columnL(tr, k, v.xz);
@@ -5503,6 +5839,11 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         }
     } else {
         s.albedo = stone * 0.9;
+    }
+    if (tr.caves > 0.0 && !tree && !built && !vegLeaf) {
+        float green = smoothstep(0.25, 0.5, c.moist) * smoothstep(0.18, 0.32, c.temp) * (1.0 - smoothstep(0.15, 0.45, desert))
+                    * (1.0 - smoothstep(snowline - 20.0, snowline, H));
+        caveDress(tr, s, n, w, wq, wy, cs, fpA, underGap, green, seed, time);
     }
     if ((tree && float(v.y) >= col4.a) || vegLeaf) {
         float leafLo = vegLeaf ? vegLo : col4.a;
@@ -6840,6 +7181,9 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // Deep in the night, land sits below the sky so night reads as night (won night A/B): moonlight is graded
     // to a cool silver and the fill to a deep blue well under it, so slopes facing the moon still model. In
     // early night it is already dark and keeps its contours (darkening lost the dusk A/B).
+    // Deep in a cave neither the sky nor the light bounced in at its mouth reaches.
+    skyFill *= 1.0 - s.cave;
+    bounce *= 1.0 - s.cave;
     float3 col = albK * L.keyCol * ndl * sh * mix(1.0, 1.1, L.night) * mix(float3(1.0), float3(0.40, 0.42, 0.47), deep)
                + alb * (skyFill * ao * riserShade + bounce) * mix(float3(1.0), float3(0.19, 0.23, 0.38), deep);
     // Low sun: up-facing treads take a warm sky-dome tint instead of going to charcoal.
@@ -8373,6 +8717,9 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     for (int k = 1; k < levels; k++) gmax = max(gmax, coarse.read(uint2(0), uint(k - 1), coarse.get_num_mip_levels() - 1).r + 1.0);
     if (int(f.shadow.y) & 2) gmax = min(gmax, 260.0);
     Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, cg2, hb, uint(f.mapInfo.w), giants, pvTex, towers, sceneTowers ? towers->n.x : 0 };
+    tr.caves = f.birds.w;
+    tr.caveNight = f.birds.w > 0.0 ? bioLandRamp(f.lights.x) : 0.0;
+    tr.caveFire = mix(1.0, 0.02, smoothstep(-0.02, 0.05, f.lights.x)) * (1.0 - 0.75 * smoothstep(0.6, 0.66, f.lights.y));
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
             2.0 * tanH * f.resolution.z, f.misc.w, makeLight(f.sunDir.xyz),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
