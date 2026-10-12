@@ -67,6 +67,7 @@ struct Settings {
     var debugMode: Float = 0
     var renderScale: Double?
     var phase: Double?
+    var biome: Int?
     var timeScale: Double = 1
     var pitch: Double?
     var headroom: Float?
@@ -93,6 +94,7 @@ struct Settings {
             case "--debug": s.debugMode = Float(next()) ?? 0
             case "--scale": s.renderScale = Double(next())
             case "--phase": s.phase = Double(next())
+            case "--biome": s.biome = Biome.number(next())
             case "--speed": s.timeScale = Double(next()) ?? 1
             case "--pitch": s.pitch = Double(next())
             case "--headroom": s.headroom = Float(next())
@@ -159,7 +161,14 @@ final class SaverController {
     func prefsChanged() {
         let phase = Prefs.timeOfDay
         for (r, _) in renderers { r.pinnedPhase = phase }
+        // A new biome is a new world: fade out and start again in it.
+        if isShowing, !dismissing, settings.biome == nil, Prefs.biome != shownBiome {
+            restartAfterDismiss = true
+            dismiss()
+        }
     }
+    private var shownBiome = 0
+    private var restartAfterDismiss = false
     private var watchTimer: Timer?
     private var shownAt: TimeInterval = 0 // monotonic
     private var previousApp: NSRunningApplication?
@@ -196,7 +205,8 @@ final class SaverController {
         previousApp = front?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : front
         battery = settings.forceBattery || SystemState.onBattery()
         // A different seed per session keeps the world non-repeating across activations.
-        let sessionSeed = settings.seed != 0 ? settings.seed : UInt32.random(in: 1...UInt32.max)
+        shownBiome = settings.biome ?? Prefs.biome
+        let sessionSeed = Biome.seed(settings.seed != 0 ? settings.seed : UInt32.random(in: 1...Biome.maxSeed), biome: shownBiome)
         let gpu = MTLCreateSystemDefaultDevice().flatMap { GPU(device: $0) }
 
         screenFrames = screens.map(\.frame)
@@ -381,7 +391,11 @@ final class SaverController {
             self.dismissing = false
             self.recorder?.discard()
             self.recorder = nil
-            if let dir = self.pendingReport {
+            let restart = self.restartAfterDismiss && self.pendingReport == nil
+            self.restartAfterDismiss = false
+            if restart {
+                self.show(manual: true)
+            } else if let dir = self.pendingReport {
                 self.pendingReport = nil
                 self.askForNote(dir)
             } else {

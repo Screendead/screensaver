@@ -1947,7 +1947,7 @@ enum Snapshot {
     // False if the renderer could not start or a PNG could not be written.
     static func run(settings: Settings, path: String, gpu shared: GPU? = nil) -> Bool {
         guard let gpu = shared ?? MTLCreateSystemDefaultDevice().flatMap({ GPU(device: $0) }),
-              let r = Renderer(gpu: gpu, outputFormat: .rgba8Unorm, seed: settings.seed == 0 ? 1 : settings.seed,
+              let r = Renderer(gpu: gpu, outputFormat: .rgba8Unorm, seed: Biome.seed(settings.seed == 0 ? 1 : settings.seed, biome: settings.biome ?? 0),
                                screenIndex: 0, battery: settings.forceBattery, dither: !settings.noDither) else {
             FileHandle.standardError.write("renderer init failed\n".data(using: .utf8)!)
             return false

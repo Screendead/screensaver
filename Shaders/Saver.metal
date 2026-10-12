@@ -123,7 +123,13 @@ static inline float2 seedOffset(uint seed) {
 // that holds giants hundreds of voxels across, so these regions come from their own fields, 2 km and more across
 // (jungle about a tenth of the land, old growth about a twentieth). p is seed-offset world position. The textures
 // bake only the climate they push; the fields are evaluated wherever they are read.
+// A biome chosen from the menu rides in the seed: top byte 0xFF, then the biome (1-9, Biome in Sources/Menu.swift); 0 is
+// the whole world. The world is then that biome everywhere, its climate fields squeezed into the biome's ranges.
+static inline uint pinnedBiome(uint seed) { return seed >> 24 == 0xFFu ? (seed >> 20) & 15u : 0u; }
+
 static inline float2 provinces(float2 p, uint seed) {
+    uint b = pinnedBiome(seed);
+    if (b != 0) return float2(b == 8 ? 1.0 : 0.0, b == 9 ? 1.0 : 0.0);
     float J = smoothstep(0.24, 0.32, fbm2(p / 6000.0 + 300.7, 2, seed + 300u));
     float O = smoothstep(0.30, 0.38, fbm2(p / 6000.0 + 411.3, 2, seed + 301u)) * (1.0 - J);
     return float2(J, O);
@@ -136,6 +142,18 @@ static inline Climate climate(float2 w, uint seed) {
     c.moist = saturate(fbm2(p / 800.0 + 91.0, 2, seed + 12) * 1.6 + 0.5);
     c.fall = saturate(perlin2(p / 1000.0 + 213.0, seed + 15) * 2.0 + 0.5);
     c.basin = saturate(fbm2(p / 1100.0 + 53.0, 2, seed + 15) * 1.6 + 0.5);
+    uint b = pinnedBiome(seed);
+    if (b >= 1 && b <= 7) {
+        // (temp, moist, fall, basin) low and high, inside each biome's thresholds so it holds everywhere.
+        const float4 lo[7] = { float4(0.38, 0.35, 0.00, 0.00), float4(0.36, 0.50, 0.62, 0.00), float4(0.10, 0.35, 0.00, 0.00),
+                               float4(0.70, 0.00, 0.00, 0.00), float4(0.62, 0.45, 0.00, 0.00), float4(0.30, 0.10, 0.00, 0.72),
+                               float4(0.68, 0.68, 0.00, 0.00) };
+        const float4 hi[7] = { float4(0.46, 0.62, 0.30, 0.55), float4(0.44, 0.70, 0.95, 0.55), float4(0.32, 0.70, 0.30, 0.55),
+                               float4(0.95, 0.26, 0.30, 0.55), float4(0.90, 0.52, 0.30, 0.55), float4(0.44, 0.35, 0.30, 1.00),
+                               float4(0.90, 0.92, 0.30, 0.55) };
+        float4 v = mix(lo[b - 1], hi[b - 1], float4(c.temp, c.moist, c.fall, c.basin));
+        c.temp = v.x; c.moist = v.y; c.fall = v.z; c.basin = v.w;
+    }
     float2 pv = provinces(p, seed);
     c.jungle = pv.x;
     c.old = pv.y;

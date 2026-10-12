@@ -47,6 +47,8 @@ enum Provinces {
 
     // (jungle, old growth) at world xz.
     static func at(_ x: Double, _ z: Double, seed: UInt32) -> (Double, Double) {
+        let b = Biome.pinned(seed)
+        if b != 0 { return (b == 8 ? 1 : 0, b == 9 ? 1 : 0) }
         let o = seedOffset(seed)
         let px = x + o.0, pz = z + o.1
         let j = smoothstep(0.24, 0.32, fbm2(px / 6000 + 300.7, pz / 6000 + 300.7, 2, seed &+ 300))

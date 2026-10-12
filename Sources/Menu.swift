@@ -24,9 +24,32 @@ enum Prefs {
     static var dither: Bool { read("dither") ?? true }
     // A SkyClock phase the clock is held at; nil lets the day cycle run.
     static var timeOfDay: Double? { read("timeOfDay") }
+    static var biome: Int { Biome.number(read("biome")) }
     static var pauseUntil: Date? {
         guard let d: Date = read("pauseUntil"), d > Date() else { return nil }
         return d
+    }
+}
+
+// MARK: - Biomes
+
+// The world as one biome: pinnedBiome in Shaders/Saver.metal reads it back from the seed.
+enum Biome {
+    // Index + 1 is the biome's number in the shader.
+    static let names = ["Grassland", "Autumn Woods", "Pine & Snow", "Desert", "Painted Hills", "Salt Flats", "Lagoons", "Jungle", "Old Growth"]
+
+    static func number(_ name: String?) -> Int {
+        guard let name else { return 0 }
+        if let n = Int(name), (0...names.count).contains(n) { return n }
+        return (names.firstIndex { $0.caseInsensitiveCompare(name) == .orderedSame } ?? -1) + 1
+    }
+
+    static func pinned(_ seed: UInt32) -> Int { seed >> 24 == 0xFF ? Int((seed >> 20) & 15) : 0 }
+
+    // Seeds whose top byte is 0xFF are reserved for this, so random seeds stay below it.
+    static let maxSeed: UInt32 = 0xFEFF_FFFF
+    static func seed(_ base: UInt32, biome: Int) -> UInt32 {
+        biome == 0 ? base : 0xFF00_0000 | UInt32(biome) << 20 | (base & 0xF_FFFF)
     }
 }
 
@@ -99,6 +122,14 @@ final class MenuController: NSObject, NSMenuDelegate {
         for (title, phase) in MenuController.times { add(title, #selector(setTime(_:)), on: phase == pinned, value: phase, to: todSub) }
         tod.submenu = todSub
         menu.addItem(tod)
+        let biome = NSMenuItem(title: "Biome", action: nil, keyEquivalent: "")
+        let biomeSub = NSMenu()
+        let chosen = Prefs.biome
+        add("All", #selector(setBiome(_:)), on: chosen == 0, to: biomeSub)
+        biomeSub.addItem(.separator())
+        for (i, name) in Biome.names.enumerated() { add(name, #selector(setBiome(_:)), on: chosen == i + 1, value: name, to: biomeSub) }
+        biome.submenu = biomeSub
+        menu.addItem(biome)
         add("Dithering", #selector(toggleDither), on: Prefs.dither)
         menu.addItem(.separator())
         add("Screenshots…", #selector(openScreenshots))
@@ -115,6 +146,7 @@ final class MenuController: NSObject, NSMenuDelegate {
     @objc private func resume() { Prefs.set("pauseUntil", nil); refreshIcon() }
     @objc private func pause(_ sender: NSMenuItem) { Prefs.set("pauseUntil", sender.representedObject as? Date); refreshIcon() }
     @objc private func setDelay(_ sender: NSMenuItem) { Prefs.set("idleDelay", sender.representedObject as? Double) }
+    @objc private func setBiome(_ sender: NSMenuItem) { Prefs.set("biome", sender.representedObject as? String) }
     @objc private func setTime(_ sender: NSMenuItem) { Prefs.set("timeOfDay", sender.representedObject as? Double) }
     @objc private func openBugReports() {
         try? FileManager.default.createDirectory(at: BugReport.folder, withIntermediateDirectories: true)
