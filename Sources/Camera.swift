@@ -315,13 +315,18 @@ final class FlightCamera {
     }
 
     // A big island 0.3-3 km ahead is a subject, framed head on: the flight goes on to pass beneath it.
-    // So is a way between two islands, or beneath one, within the next 1.8 km.
+    // So is a way between two islands, or beneath one, within the next 1.8 km. Farther ones draw it back.
     private func isleInterest(_ heading: Double) -> Double {
         let p = SIMD2(position.x, position.z)
         let fd = SIMD2(sin(heading), cos(heading)), side = SIMD2(fd.y, -fd.x)
         var best = 0.0, left = Double.infinity, right = Double.infinity, under = 0.0
         for s in islesAt() where s.radius > 40 {
             let v = s.pos - p, d = simd_length(v)
+            // Island country 3-8 km off draws the flight slowly back toward it, as a giant's does.
+            if d >= 3000, d < 8000, s.radius > 60 {
+                best = max(best, 0.22 * max(0, 1 - abs(FlightCamera.angleDiff(atan2(v.x, v.y), heading)) / 0.7))
+                continue
+            }
             guard d > 200, d < 3000 else { continue }
             if s.radius > 60 {
                 let off = abs(FlightCamera.angleDiff(atan2(v.x, v.y), heading))
