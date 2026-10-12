@@ -924,6 +924,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     let scenePipelines: [[MTLRenderPipelineState]]
     let postPipeline: MTLRenderPipelineState
     let taaPipeline: MTLRenderPipelineState
+    // The glowing bugs (bioFragment), drawn over the scene in a pass of their own from sunset.
+    private let bioPipeline: MTLRenderPipelineState
     private let cloudPipeline: MTLComputePipelineState
     // Shadow-height maps (see bakeShadowHeight in Shaders/Saver.metal): near and far cascades, a band rebaked per frame.
     private let shadowPipeline: MTLComputePipelineState
@@ -975,6 +977,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     private static let lampReach: [Double] = [1, 20, 16, 7, 10, 24, 22, 6]   // LAMP_R in Shaders/Saver.metal
     private var tileMasks = [UInt32](repeating: 0, count: 16 * 16)
     static let ditherCells = 864.0
+    // Sun height the land's glow starts from (BIO_SUN in Shaders/Saver.metal).
+    static let bioSun: Float = 0.07
+    // Bug sprites: one per cube of the MOTE_N^3 block round the camera (bioVertex in Shaders/Saver.metal).
+    static let moteCount = 18 * 18 * 18
     private var historyIndex = 0
     private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
     let world: World
@@ -1043,6 +1049,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         let sceneStates = [false, true].map { t in [false, true].compactMap { b in sceneVariant(towers: t, bands: b) } }
         guard sceneStates.allSatisfy({ $0.count == 2 }),
               let tp = gpu.pipeline("taa", { fullscreen(lib.makeFunction(name: "taaFragment"), .rgba16Float) }),
+              let bp = gpu.pipeline("bio", {
+                  let d = fullscreen(lib.makeFunction(name: "bioFragment"), .rgba16Float)
+                  d.vertexFunction = lib.makeFunction(name: "bioVertex")
+                  return d
+              }),
               let pp = gpu.pipeline("post \(outputFormat.rawValue)", { fullscreen(lib.makeFunction(name: "postFragment"), outputFormat) }),
               let cf = gpu.pipeline("cloudField"),
               let csf = gpu.pipeline("cloudSlowField"),
@@ -1062,6 +1073,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         scenePipelines = sceneStates
         postPipeline = pp
         taaPipeline = tp
+        bioPipeline = bp
         cloudPipeline = cf
         slowPipeline = csf
         shadowPipeline = shP
@@ -1413,6 +1425,23 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentBytes(towers.table, length: Towers.tableBytes, index: 9)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
+        }
+        // In its own pass: drawn after the scene in the scene's pass, even a draw doing nothing cost a twilight scene ~0.4 ms.
+        if f.sunDir.y < Renderer.bioSun {
+            let bp = MTLRenderPassDescriptor()
+            bp.colorAttachments[0].texture = sceneTex
+            bp.colorAttachments[0].loadAction = .load
+            bp.colorAttachments[0].storeAction = .store
+            if let enc = cb.makeRenderCommandEncoder(descriptor: bp) {
+                enc.setRenderPipelineState(bioPipeline)
+                enc.setVertexBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
+                enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
+                enc.setVertexTexture(world.heightTex, index: 0)
+                enc.setVertexTexture(world.climateTex, index: 2)
+                enc.setVertexTexture(provTex, index: 16)
+                enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: Renderer.moteCount)
+                enc.endEncoding()
+            }
         }
         let tpd = MTLRenderPassDescriptor()
         tpd.colorAttachments[0].texture = histOut
