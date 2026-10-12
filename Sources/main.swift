@@ -133,10 +133,17 @@ struct Knobs {
 final class SaverWindow: NSWindow {
     var onInput: (() -> Void)?
     var onBugKey: (() -> Void)?
+    var onShotKey: (() -> Void)?
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
     // Swallow input here: unhandled keys would otherwise reach NSApp and beep.
-    override func keyDown(with event: NSEvent) { event.keyCode == BugReport.key ? onBugKey?() : onInput?() }
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case BugReport.key: onBugKey?()
+        case SaverController.shotKey: if !event.isARepeat { onShotKey?() }
+        default: onInput?()
+        }
+    }
     override func keyUp(with event: NSEvent) {}
     override func flagsChanged(with event: NSEvent) { onInput?() }
     override func mouseDown(with event: NSEvent) { onInput?() }
@@ -205,6 +212,7 @@ final class SaverController {
             window.setFrame(screen.frame, display: false)
             window.onInput = { [weak self] in self?.inputReceived() }
             window.onBugKey = { [weak self] in self?.reportBug() }
+            window.onShotKey = { [weak self] in self?.screenshot() }
 
             // A screen whose renderer can't start still gets covered, in black.
             if let gpu {
@@ -215,6 +223,8 @@ final class SaverController {
                     window.contentView = view
                     renderers.append((renderer, view))
                     let ds = view.drawableSize
+                    // The recorder and the S key read the first screen's drawable.
+                    if index == 0 { view.framebufferOnly = false }
                     if index == 0, let rec = BugRecorder(gpu: gpu, width: Int(ds.width), height: Int(ds.height), info: [
                         "seed": sessionSeed, "screenIndex": index, "screenCount": screens.count, "screenName": screen.localizedName,
                         "screenPoints": [Int(screen.frame.width), Int(screen.frame.height)], "backingScale": screen.backingScaleFactor,
@@ -222,8 +232,6 @@ final class SaverController {
                         "drawable": [Int(ds.width), Int(ds.height)], "edr": view.colorPixelFormat == .rgba16Float,
                         "dither": !settings.noDither && Prefs.dither, "manualStart": manual,
                     ]) {
-                        // The recorder reads the drawable.
-                        view.framebufferOnly = false
                         renderer.recorder = rec
                         recorder = rec
                     }
@@ -249,7 +257,7 @@ final class SaverController {
 
         shownAt = SaverController.now
         inputGrace = manual ? 1.5 : 0
-        let grace = inputGrace
+        inputFloor = shownAt + inputGrace
         var lastPowerCheck = shownAt
         watchTimer?.invalidate()
         watchTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
@@ -257,13 +265,17 @@ final class SaverController {
             let age = SaverController.now - self.shownAt
             // Any physical input after the moment we appeared, including during the fade-in.
             let idle = SystemState.idleSeconds()
-            if idle < age - grace - 0.15 {
-                // The key event itself may not arrive (macOS can refuse to activate the agent), so B is read from the HID state.
+            let shotHeld = CGEventSource.keyState(.hidSystemState, key: SaverController.shotKey)
+            if idle < SaverController.now - self.inputFloor - 0.15 {
+                // The key event itself may not arrive (macOS can refuse to activate the agent), so B and S are read from the HID state.
                 if CGEventSource.keyState(.hidSystemState, key: BugReport.key) { self.reportBug(); return }
+                if shotHeld { self.screenshot(); return }
                 BugLog.note(String(format: "input detected: idle %.2f s, shown %.1f s", idle, age))
                 self.dismiss()
                 return
             }
+            // While S is held its autorepeat and release are not input.
+            if shotHeld { self.inputFloor = SaverController.now }
             if self.settings.previewDuration > 0 && age > self.settings.previewDuration { self.dismiss(); return }
             if SaverController.now - lastPowerCheck > 5 {
                 lastPowerCheck = SaverController.now
@@ -277,6 +289,27 @@ final class SaverController {
         }
         watchTimer?.tolerance = 0.005
         RunLoop.main.add(watchTimer!, forMode: .common)
+    }
+
+    static let shotKey: CGKeyCode = 1 // kVK_ANSI_S
+    static var shotFolder: URL {
+        FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0].appendingPathComponent("STRATA", isDirectory: true)
+    }
+    // Input older than this is not a reason to dismiss.
+    private var inputFloor: TimeInterval = 0
+    private var lastShot: TimeInterval = -1
+
+    // S: saves the first screen's next frame and keeps the saver showing.
+    private func screenshot() {
+        let now = SaverController.now
+        inputFloor = now
+        guard isShowing, !dismissing, now - lastShot > 0.5, let r = renderers.first?.0 else { return }
+        lastShot = now
+        let dir = SaverController.shotFolder
+        guard (try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)) != nil else { return }
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+        r.shotPath = dir.appendingPathComponent("STRATA \(f.string(from: Date())).png").path
     }
 
     // B: writes the report's state now, finishes the clip in the background, and asks for a note once the saver is gone.

@@ -101,6 +101,7 @@ final class MenuController: NSObject, NSMenuDelegate {
         menu.addItem(tod)
         add("Dithering", #selector(toggleDither), on: Prefs.dither)
         menu.addItem(.separator())
+        add("Screenshots…", #selector(openScreenshots))
         add("Bug Reports…", #selector(openBugReports))
         menu.addItem(.separator())
         add("Quit Menu Item", #selector(quit))
@@ -118,6 +119,10 @@ final class MenuController: NSObject, NSMenuDelegate {
     @objc private func openBugReports() {
         try? FileManager.default.createDirectory(at: BugReport.folder, withIntermediateDirectories: true)
         NSWorkspace.shared.open(BugReport.folder)
+    }
+    @objc private func openScreenshots() {
+        try? FileManager.default.createDirectory(at: SaverController.shotFolder, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(SaverController.shotFolder)
     }
     @objc private func quit() { NSApp.terminate(nil) }
 }

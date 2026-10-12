@@ -1122,6 +1122,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     // The screen's size in pixels: the dither grid follows it, while the drawable holds just one pixel per cell.
     private(set) var screenPixels = CGSize.zero
     var recorder: BugRecorder?
+    // Set by the S key: the next frame is saved here as a PNG at screen size.
+    var shotPath: String?
 
     // Cover drifts between clear and broken skies over tens of minutes.
     var cloudCover: Double {
@@ -1878,6 +1880,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard let drawable = view.currentDrawable, let cb = queue.makeCommandBuffer() else { return }
         encode(into: cb, output: drawable.texture, outputSize: screenPixels)
         recorder?.capture(self, into: cb, source: drawable.texture, time: now)
+        if let path = shotPath {
+            shotPath = nil
+            saveShot(drawable.texture, into: cb, path: path)
+        }
         if Renderer.logTiming {
             cb.addCompletedHandler { [weak self] cb in
                 guard let self else { return }
@@ -1892,6 +1898,47 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         cb.present(drawable)
         cb.commit()
+    }
+
+    // The drawable is the dither-cell grid, which the layer scales up with nearest filtering, so the PNG does the same.
+    private func saveShot(_ src: MTLTexture, into cb: MTLCommandBuffer, path: String) {
+        let w = src.width, h = src.height
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: src.pixelFormat, width: w, height: h, mipmapped: false)
+        d.storageMode = .shared
+        guard let copy = queue.device.makeTexture(descriptor: d), let blit = cb.makeBlitCommandEncoder() else { return }
+        blit.copy(from: src, to: copy)
+        blit.endEncoding()
+        let W = Int(screenPixels.width), H = Int(screenPixels.height)
+        cb.addCompletedHandler { _ in
+            DispatchQueue.global(qos: .utility).async {
+                var cells = [UInt8](repeating: 255, count: w * h * 4)
+                if copy.pixelFormat == .rgba16Float {
+                    // Extended linear sRGB; light above 1 clips, as on a screen without headroom.
+                    var half = [Float16](repeating: 0, count: w * h * 4)
+                    copy.getBytes(&half, bytesPerRow: w * 8, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+                    for i in 0..<w * h {
+                        for c in 0..<3 {
+                            let x = min(max(Float(half[i * 4 + c]), 0), 1)
+                            let e = x <= 0.0031308 ? 12.92 * x : 1.055 * pow(x, 1 / 2.4) - 0.055
+                            cells[i * 4 + c] = UInt8(e * 255 + 0.5)
+                        }
+                    }
+                } else {
+                    copy.getBytes(&cells, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+                    for i in 0..<w * h { cells.swapAt(i * 4, i * 4 + 2) }
+                }
+                var out = [UInt8](repeating: 255, count: W * H * 4)
+                for y in 0..<H {
+                    let sy = y * h / H
+                    for x in 0..<W {
+                        let s = (sy * w + x * w / W) * 4, o = (y * W + x) * 4
+                        out[o] = cells[s]; out[o + 1] = cells[s + 1]; out[o + 2] = cells[s + 2]
+                    }
+                }
+                let ok = Snapshot.write(bytes: out, width: W, height: H, to: path)
+                BugLog.note("screenshot \(ok ? "saved" : "failed"): \(path)")
+            }
+        }
     }
 }
 
