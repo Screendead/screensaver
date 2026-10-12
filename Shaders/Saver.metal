@@ -3906,7 +3906,37 @@ static float emergentTop(float2 w, float2 ctr, float gt, float y0, float R, int 
 // emergents or the planted trees as plantTrees makes them (without the checks that need the map: ledges, carved
 // rock), and the column's top the mean of the samples' (leaves, else ground) rounded, as its ground is. Returns
 // (top, depth of leaves under it); H is the bare column's height. Grove density and climate are taken once per column.
-static float2 coarseVeg(int2 cw, int k, float4 hs4, float H, uint seed) {
+// ground: the raw terrain height at a world column, for the jungle's steepness window.
+struct TerrainGround {
+    uint seed;
+    float at(int2 w) const { return terrainColumn(w, seed).h; }
+};
+// The 1-voxel map's raw columns where it has them: reduceMaxBase must judge level 1's slope exactly as the coarse
+// kernel does, or mip 1 would not bound the level-1 roof.
+struct RawGround {
+    texture2d<float, access::read> raw;
+    int2 origin;
+    uint seed;
+    float at(int2 w) const {
+        int2 q = w - origin;
+        int n = int(raw.get_width());
+        return all(q >= 0) && all(q < n) ? raw.read(uint2(q)).r : terrainColumn(w, seed).h;
+    }
+};
+
+// The jungle's steepness at world column c as plantTrees measures it: the ground's range over a 3x3 window 5 apart.
+template <typename G>
+static float jungleSteep(int2 c, thread const G& ground) {
+    float lo = 1e9, hi = -1e9;
+    for (int k = 0; k < 9; k++) {
+        float h = ground.at(c + int2(k % 3 - 1, k / 3 - 1) * 5);
+        lo = min(lo, h); hi = max(hi, h);
+    }
+    return hi - lo;
+}
+
+template <typename G>
+static float2 coarseVeg(int2 cw, int k, float4 hs4, float H, uint seed, thread const G& ground) {
     int s = 1 << k, off = s >> 2, hs = s >> 1;
     int2 b = cw * s + off;
     float2 centre = float2(cw * s) + 0.5 * float(s);
@@ -3914,12 +3944,11 @@ static float2 coarseVeg(int2 cw, int k, float4 hs4, float H, uint seed) {
     float J = provinces(centre + so, seed).x;
     float sum = 0.0, leaves = 0.0;
     int2 o4[4] = { int2(0), int2(hs, 0), int2(0, hs), int2(hs, hs) };
-    // The roof steps down on steep ground and stands on no cliff, as plantTrees grows it.
     float spread = max(max(hs4.x, hs4.y), max(hs4.z, hs4.w)) - min(min(hs4.x, hs4.y), min(hs4.z, hs4.w));
-    // The samples' slope over plantTrees' 10-voxel window (they are hs apart; neighbours a voxel apart differ by a
-    // whole step on gentle slopes, so the run counts as no shorter than 3).
-    float steep = spread * 10.0 / max(1.41 * float(hs), 3.0);
     if (J >= 0.15) {
+        // The roof steps down on steep ground and stands on no cliff, as plantTrees grows it, judged on its own window
+        // round the column's centre: samples a few voxels apart on terraced ground often share a tread and read level.
+        float steep = jungleSteep(cw * s + s / 2, ground);
         for (int i = 0; i < 4; i++) {
             float2 wi = float2(b + o4[i]) + 0.5;
             float g = hs4[i], t = g;
@@ -4018,7 +4047,8 @@ kernel void reduceMaxBase(texture2d<float, access::read> src [[texture(0)]],
     float parent = coarseCombine(r4.x, r4.y, r4.z, r4.w, 2.0);
     int2 cw = (int2(s) + info.xy) >> 1;
     // The level-1 column's forest (coarseVeg from the same raw heights) as well.
-    parent = max(parent, coarseVeg(cw, 1, r4, parent, uint(info.w)).x);
+    RawGround rg { raw, info.xy, uint(info.w) };
+    parent = max(parent, coarseVeg(cw, 1, r4, parent, uint(info.w), rg).x);
     // A giant's level-1 column needs nothing more: its samples are these four columns, and its top their tops' mean
     // (coarseColumn), which m bounds (working it out cost several ms a band).
     dst.write(float4(max(m, parent), 0, 0, 0), gid);
@@ -4116,7 +4146,8 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
             return float3(top, lowG);
         }
     }
-    float2 vg = coarseVeg(cw, k, float4(c0.h, c1.h, c2.h, c3.h), H, seed);
+    TerrainGround tg { seed };
+    float2 vg = coarseVeg(cw, k, float4(c0.h, c1.h, c2.h, c3.h), H, seed, tg);
     depth = vg.y;
     float Hv = vg.x;
     if (k > GAP_LEVELS || k > 3) return float3(Hv, 0, 0);
