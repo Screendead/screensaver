@@ -1056,6 +1056,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     // Islands farther than this need no band test (past it the coarsest rings' columns are wide enough to walk under
     // them), shade without their sky occlusion and cast no island shade (only a long dusk shadow reaches back).
     static let isleShadeReach = 4000.0
+    private var isleVariant = false
     private var historyIndex = 0
     private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
     let world: World
@@ -1463,7 +1464,9 @@ final class Renderer: NSObject, MTKViewDelegate {
             // Shaders/Saver.metal), so it is compiled in only while bands lie that close; islands' bands hold on every
             // ring, needed out to isleShadeReach.
             let cam2 = SIMD2(camera.position.x, camera.position.z)
-            let isles = world.islesNear(cam2, radius: Renderer.isleShadeReach)
+            // On within the reach, off a little past it, so a camera hovering at the edge does not flick it.
+            isleVariant = world.islesNear(cam2, radius: Renderer.isleShadeReach + (isleVariant ? 400 : 0))
+            let isles = isleVariant
             let bands = (isles || world.bandsNear(cam2, radius: Clipmap.handoff(0) + 40)) && Renderer.profile != "noband"
             let shade = bands && isles
             f.shadow.w = shade ? 1 : 0
