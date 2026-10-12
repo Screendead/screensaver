@@ -5247,11 +5247,14 @@ static Hit trace(thread const Terrain& tr, float3 o, float3 d, float tMax, int m
             // The 1-voxel map's canopy bands are the columns' unmorphed gaps, which close across the morph band: only a
             // cell wholly inside its start may skip through one. Island bands, and every coarse level's, hold through it.
             if (!clear && BAND_SKIP && mx < 0.0) {
-                float2 bd = k == 0 ? tr.hb.read(uint2(clamp(mc, int2(0), int2((tr.size >> level) - 1))), level - 1).rg
-                                   : tr.cb.read(uint2(mc & ((COARSE_N >> level) - 1)), uint(k - 1), uint(level - 1)).rg;
-                float2 lo = bandLo(bd.x);
-                if (k > 0 || lo.y > 0.0 || length(0.5 * (cLo + cHi) - tr.cam) + 0.71 * (cHi.x - cLo.x) < tr.lod[0].x)
-                    clear = min(yA, yB) >= lo.x && max(yA, yB) < bd.y;
+                // Only an island's air holds outside the disc, and only tiles with an island's surfaces meet it.
+                bool disc = k == 0 && length(0.5 * (cLo + cHi) - tr.cam) + 0.71 * (cHi.x - cLo.x) < tr.lod[0].x;
+                if (ISLE_SHAPE || disc) {
+                    float2 bd = k == 0 ? tr.hb.read(uint2(clamp(mc, int2(0), int2((tr.size >> level) - 1))), level - 1).rg
+                                       : tr.cb.read(uint2(mc & ((COARSE_N >> level) - 1)), uint(k - 1), uint(level - 1)).rg;
+                    float2 lo = bandLo(bd.x);
+                    if (k > 0 || lo.y > 0.0 || disc) clear = min(yA, yB) >= lo.x && max(yA, yB) < bd.y;
+                }
             }
             if (clear) {
                 lastAxis = tb.x < tb.y ? 0 : 2;
