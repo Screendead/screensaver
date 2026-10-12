@@ -4488,7 +4488,7 @@ static inline float hg(float c, float g) {
     return (1.0 - g2) / (12.566 * pow(1.0 + g2 - 2.0 * g * c, 1.5));
 }
 
-static float3 skyColor(float3 d, Light L, bool withDiscs, uint seed, float time) {
+static float3 skyColor(float3 d, Light L) {
     float up = saturate(d.y);
     float lowSun = 1.0 - smoothstep(0.0, 0.35, abs(L.sun.y));
     float3 hor = L.skyHor;
@@ -4507,7 +4507,12 @@ static float3 skyColor(float3 d, Light L, bool withDiscs, uint seed, float time)
     // A tighter aureole and a dome that deepens away from the sun, so the sun sits in its own pool of light.
     c *= mix(float3(1.0), float3(0.70, 0.70, 0.95), L.gold * mix(0.5, 1.0, L.sunAmt) * (1.0 - toward) * smoothstep(-0.05, 0.25, d.y));
     c += glowCol * pow(s, 24.0) * 0.5 * L.gold * (1.0 - 0.5 * up);
-    if (!withDiscs) return c;
+    return c;
+}
+
+// The sky c (skyColor) with the sun's and moon's discs, and at night the stars and the Milky Way.
+static float3 skyDiscs(float3 c, float3 d, Light L, uint seed, float time) {
+    float s = max(dot(d, L.sun), 0.0);
     // Disc takes the key light's hue (amber near the horizon) and blooms into the haze.
     float3 tint = L.keyCol / max(max(L.keyCol.r, max(L.keyCol.g, L.keyCol.b)), 1e-3);
     c += tint * 12.0 * smoothstep(0.99955, 0.9998, s) * L.sunAmt;
@@ -6601,7 +6606,7 @@ static float3 shadeL(thread const Ctx& x, thread const Light& L, float3 o, float
 static inline float3 fogColor(thread const Ctx& x, float3 d, float T, float solid = 0.0) {
     // At night the sky's horizon gradient is mirrored below it, so far land and sea dim smoothly downward.
     float y = max(d.y, -d.y * x.L.night);
-    float3 c = skyColor(float3(d.x, mix(y, y * 0.5 + 0.12, T), d.z), x.L, false, x.seed, x.time);
+    float3 c = skyColor(float3(d.x, mix(y, y * 0.5 + 0.12, T), d.z), x.L);
     // Aerial colour cools away from the sun so far ridges separate from the sky.
     float away = saturate(dot(normalize(d.xz + 1e-5), normalize(x.L.sun.xz + 1e-5)) * 0.5 + 0.5);
     float3 cool = mix(float3(0.80, 0.82, 0.95), float3(0.52, 0.55, 0.88), x.L.gold);
@@ -6802,11 +6807,11 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float tEn
 }
 
 static float4 skyWithClouds(thread const Ctx& x, float3 o, float3 d) {
-    float3 raw = skyColor(d, x.L, false, x.seed, x.time);
+    float3 raw = skyColor(d, x.L);
     float3 bare = raw;
     // Forward-scatter glow near the horizon, matching what applyFog adds to fogged land.
     bare += x.L.keyCol * min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night) * smoothstep(0.1, 0.0, d.y);
-    float3 discs = skyColor(d, x.L, true, x.seed, x.time) - raw;
+    float3 discs = skyDiscs(raw, d, x.L, x.seed, x.time) - raw;
     CloudSample c = cloudSheet(x, o, d, x.prof1 ? 7000.0 : 1e9);
     // Clouds hide the stars, moon and sun behind them.
     // At night thin cloud veils the moon instead of hiding it.
@@ -6816,7 +6821,7 @@ static float4 skyWithClouds(thread const Ctx& x, float3 o, float3 d) {
 
 // Reflected sky: clouds softened (rippled water blurs them), no stars or discs; glitter handles the lights.
 static float3 softCloudSky(thread const Ctx& x, float3 o, float3 r) {
-    float3 sky = skyColor(r, x.L, false, x.seed, x.time);
+    float3 sky = skyColor(r, x.L);
     if (r.y < 0.02) return sky;
     float t = (CLOUD_Y - o.y) / r.y;
     float2 q = o.xz + r.xz * t + float2(x.origin);
@@ -7406,7 +7411,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     h.hit = false; h.t = x.tr.rmax; h.iters = 0; h.level = 0;
     if (f.shadow.z == 0.0 || !aboveHorizon(horizon, d)) h = trace(x.tr, o, d, x.tr.rmax, primaryIters, 0);
     if (f.misc2.z == 1) return float4(float(h.iters) / float(primaryIters), h.hit ? 0.3 : 0.0, h.iters >= primaryIters - 1 ? 1 : 0, 1);
-    if (f.misc2.z == 5) return float4(skyColor(d, x.L, false, x.seed, x.time), 1);
+    if (f.misc2.z == 5) return float4(skyColor(d, x.L), 1);
 
     float tw = d.y < 0 ? (SEA - o.y) / d.y : 1e9;
     bool water = d.y < 0 && tw > 0 && (!h.hit || tw < h.t);
