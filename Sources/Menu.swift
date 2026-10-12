@@ -22,6 +22,8 @@ enum Prefs {
     static var autoStart: Bool { read("autoStart") ?? true }
     static var idleDelay: Double { read("idleDelay") ?? 30 }
     static var dither: Bool { read("dither") ?? true }
+    // A SkyClock phase the clock is held at; nil lets the day cycle run.
+    static var timeOfDay: Double? { read("timeOfDay") }
     static var pauseUntil: Date? {
         guard let d: Date = read("pauseUntil"), d > Date() else { return nil }
         return d
@@ -33,6 +35,9 @@ enum Prefs {
 final class MenuController: NSObject, NSMenuDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private var expiry: Timer?
+    private static let times: [(String, Double)] = [("Dawn", 0.965), ("Sunrise", 0.03), ("Morning", 0.12), ("Midday", 0.25),
+                                                    ("Afternoon", 0.36), ("Golden Hour", 0.46), ("Sunset", 0.505), ("Dusk", 0.535),
+                                                    ("Night", 0.62), ("Midnight", 0.75)]
     private static let delays: [(String, Double)] = [("15 seconds", 15), ("30 seconds", 30), ("1 minute", 60), ("2 minutes", 120),
                                                      ("5 minutes", 300), ("10 minutes", 600), ("15 minutes", 900)]
 
@@ -86,6 +91,14 @@ final class MenuController: NSObject, NSMenuDelegate {
         for (title, secs) in MenuController.delays { add(title, #selector(setDelay(_:)), on: secs == current, value: secs, to: sub) }
         after.submenu = sub
         menu.addItem(after)
+        let tod = NSMenuItem(title: "Time of Day", action: nil, keyEquivalent: "")
+        let todSub = NSMenu()
+        let pinned = Prefs.timeOfDay
+        add("Day Cycle", #selector(setTime(_:)), on: pinned == nil, to: todSub)
+        todSub.addItem(.separator())
+        for (title, phase) in MenuController.times { add(title, #selector(setTime(_:)), on: phase == pinned, value: phase, to: todSub) }
+        tod.submenu = todSub
+        menu.addItem(tod)
         add("Dithering", #selector(toggleDither), on: Prefs.dither)
         menu.addItem(.separator())
         add("Bug Reports…", #selector(openBugReports))
@@ -101,6 +114,7 @@ final class MenuController: NSObject, NSMenuDelegate {
     @objc private func resume() { Prefs.set("pauseUntil", nil); refreshIcon() }
     @objc private func pause(_ sender: NSMenuItem) { Prefs.set("pauseUntil", sender.representedObject as? Date); refreshIcon() }
     @objc private func setDelay(_ sender: NSMenuItem) { Prefs.set("idleDelay", sender.representedObject as? Double) }
+    @objc private func setTime(_ sender: NSMenuItem) { Prefs.set("timeOfDay", sender.representedObject as? Double) }
     @objc private func openBugReports() {
         try? FileManager.default.createDirectory(at: BugReport.folder, withIntermediateDirectories: true)
         NSWorkspace.shared.open(BugReport.folder)

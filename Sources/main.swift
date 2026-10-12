@@ -148,6 +148,11 @@ final class SaverWindow: NSWindow {
 final class SaverController {
     private var windows: [SaverWindow] = []
     private var renderers: [(Renderer, MTKView)] = []
+
+    func prefsChanged() {
+        let phase = Prefs.timeOfDay
+        for (r, _) in renderers { r.pinnedPhase = phase }
+    }
     private var watchTimer: Timer?
     private var shownAt: TimeInterval = 0 // monotonic
     private var previousApp: NSRunningApplication?
@@ -206,6 +211,7 @@ final class SaverController {
                 let view = MTKView(frame: CGRect(origin: .zero, size: screen.frame.size), device: gpu.device)
                 if let renderer = Renderer(view: view, gpu: gpu, screen: screen, seed: sessionSeed, screenIndex: index, battery: battery, dither: !settings.noDither && Prefs.dither) {
                     renderer.timeScale = settings.timeScale
+                    renderer.pinnedPhase = settings.phase ?? Prefs.timeOfDay
                     window.contentView = view
                     renderers.append((renderer, view))
                     let ds = view.drawableSize
@@ -407,7 +413,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.systemSaverRunning = false
             self?.schedule(after: 0)
         }
-        dnc.addObserver(forName: Prefs.changed, object: nil, queue: .main) { [weak self] _ in self?.schedule(after: 0) }
+        dnc.addObserver(forName: Prefs.changed, object: nil, queue: .main) { [weak self] _ in
+            self?.saver.prefsChanged()
+            self?.schedule(after: 0)
+        }
         dnc.addObserver(forName: Prefs.startNow, object: nil, queue: .main) { [weak self] _ in
             guard let self, !self.saver.isShowing, !SystemState.screenIsLockedOrInactive(), !SystemState.displaysAsleep() else { return }
             self.saver.show(manual: true)
