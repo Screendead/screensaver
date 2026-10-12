@@ -7389,18 +7389,21 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
                     float u = dot(v, fw), s = v.x * fw.y - v.y * fw.x;
                     float W = 7.5 * (1.0 + 0.1 * sin(t * 0.7 + ph)), L = 4.5;
                     // Wingtips swept back from a rounded head, the trailing edge cut in between tip and body; dv: the distance
-                    // outside the outline, in voxels (inside negative). A diffuse glow, thickest along the spine and
-                    // thinning to the wingtips, its edge blurred by the water above.
+                    // outside the outline, in voxels (inside negative). The ray itself is dark: the plankton it stirs light
+                    // its margin in sparks, most at the wingtips, with a faint wash over its back; filled, it reads as a
+                    // lit kite. The edge is blurred by the water above.
                     float a = min(abs(s) / W, 1.0);
                     float uf = L * (1.0 - a * a) - 2.3 * a, ub = -2.4 + 1.1 * sin(3.14159 * a);
                     float dv = max((abs(s) - W), max(u - uf, ub - u));
                     float blur = 1.2 + 0.6 * fpv;
                     float inner = smoothstep(blur, -blur - 1.5, dv);
                     float spine = exp(-s * s / (W * W * 0.12));
-                    float halo = exp(-max(dv, 0.0) * 0.7 / blur);
+                    float edge = exp(-2.0 * dv * dv / (blur * blur));
+                    float spk = mix(smoothstep(-0.05, 0.3, seaNoise(q * 1.8 + float2(t * 0.3, -t * 0.2), x.seed + 86u)), 0.35, saturate(fpv * 1.2));
                     float tail = smoothstep(1.2, 0.0, abs(s)) * smoothstep(-0.5, -2.4, u) * smoothstep(-10.0, -2.4, u);
                     float flap = 0.85 + 0.15 * sin(t * 0.7 + ph - abs(s) * 0.3);
-                    float3 rc = mix(BIO_LAND[1], BIO_LAND[0], 0.35 + 0.4 * a) * (inner * (0.25 + 0.75 * spine) * flap + 0.12 * halo + 0.1 * tail);
+                    float3 rc = mix(BIO_LAND[1], BIO_LAND[0], 0.35 + 0.4 * a)
+                              * (edge * spk * (0.3 + 0.7 * a) * flap + 0.08 * inner * spine + 0.06 * tail * spk);
                     g += rc * 0.16 * smoothstep(420.0, 220.0, tw) * fr;
                 }
             }
@@ -7662,32 +7665,49 @@ static inline SeaLife seaLife(thread const Ctx& x, float3 o, float3 d, Hit h, fl
             float3 alb = mix(sandA, REEF_TURF, 0.8 * smoothstep(0.3, 0.7, reg));
             float3 cc = alb;
             bool colony = (code & 16u) != 0u;
-            // Per voxel of a colony: a mottle of hue and shade, and where on its top its polyps glow.
-            uint vh = colony ? pcg(uint(h.voxel.x) * 1597334677u ^ uint(h.voxel.y) * 2798796415u ^ uint(h.voxel.z) * 3812015801u) : 0u;
+            // A colony's face in world units (a side's along it and up), and a mottle across its voxels: shaded per
+            // voxel, each face reads as a tile.
+            float2 fu = h.normal.y > 0 ? bw : float2(h.normal.x != 0 ? bw.y : bw.x, bp.y);
+            float mot = colony ? seaNoise(fu * 0.6 + (h.normal.y > 0 ? 0.0 : 31.0), x.seed + 154u) + 0.5 : 0.5;
             if (colony) {
                 Coral cr;
                 cr.rise = 1.0; cr.kind = int((code >> 5) & 3u); cr.tip = float((code >> 7) & 1u); cr.h = code >> 8;
                 cc = coralColour(cr);
                 // Relief the water would flatten: sides in shade, each voxel down the colony darker and browner.
                 float down = colTop - h.voxel.y - 1.0;
-                cc *= (0.8 + float3(0.24, 0.2, 0.24) * float3(byteOf(vh, 0), byteOf(vh, 1), byteOf(vh, 2)))
+                cc *= (0.78 + float3(0.28, 0.22, 0.16) * mot)
                     * (h.normal.y > 0 ? 1.0 : 0.72) * mix(float3(1.0), float3(0.82, 0.76, 0.7), saturate(down * 0.5));
             }
             alb = mix(alb, mix(cc, REEF_MEAN, hand), cw);
             litMul = alb / sandA;
             if (x.L.night > 0.0 && cw > 0.0) {
-                // Glowing colonies: a soft spot of polyps on each column's top, off its centre, and on the sides a
-                // rim under the top that fades down (dimmest on a fan, which side-on would stand as a lit post).
+                // Glowing colonies: polyps, points of light in clusters across the colony, blurred by the water over
+                // them; sides fainter downward (fans fainter still, which side-on would stand as lit posts).
                 float3 g = 0;
-                if (hand < 1.0 && colony) {
-                    float face;
-                    if (h.normal.y > 0) {
-                        float2 fq = fract(bp.xz) - 0.3 - 0.4 * float2(byteOf(vh, 1), byteOf(vh, 3));
-                        face = 0.6 + 1.6 * exp(-dot(fq, fq) * 4.0);
-                    } else {
-                        face = (((code >> 5) & 3u) == uint(CORAL_FAN) ? 0.08 : 0.3) * exp(-(colTop - bp.y) * 1.6);
-                    }
-                    g = 0.07 * coralGlowCode(code, x.time) * face;
+                float3 gc = hand < 1.0 && colony ? coralGlowCode(code, x.time) : float3(0.0);
+                if (any(gc > 0.0)) {
+                    // A point in each cell of 0.7 voxel, off the voxel grid; a pixel asks the 2x2 cells nearest it,
+                    // which hold every point within half a cell, the widest a kernel grows.
+                    float2 pq = fu * 1.4 + (h.normal.y > 0 ? 0.0 : 17.0);
+                    int2 p0 = int2(floor(pq - 0.5));
+                    float fpc = 1.4 * h.t * x.pixelAngle * rsqrt(max(abs(dot(d, float3(h.normal))), 0.1));
+                    float Rw = sqrt(0.13 + 0.012 * max(SEA - bp.y, 0.0) + 0.6 * fpc * fpc);
+                    float R = min(Rw, 0.5);
+                    float occ = saturate(1.3 * mot - 0.25);
+                    float pt = 0.0;
+                    for (int j = 0; j < 2; j++)
+                        for (int i = 0; i < 2; i++) {
+                            int2 pc = p0 + int2(i, j);
+                            uint ph = reefHash(pc, x.seed + 155u);
+                            float2 pd = pq - float2(pc) - float2(byteOf(ph, 0), byteOf(ph, 1));
+                            float k = saturate(1.0 - dot(pd, pd) / (R * R));
+                            pt += step(byteOf(ph, 2), occ) * (0.45 + 0.55 * byteOf(ph, 3))
+                                * (0.75 + 0.25 * sin(x.time * 0.7 + 6.2831853 * byteOf(ph, 3))) * (k * k * k + 0.3 * k);
+                        }
+                    // Energy kept as the kernel widens; far off, where points near a pixel, their mean.
+                    pt = mix(pt * (0.13 / 1.3) / (R * R), 0.068 * occ, smoothstep(0.45, 0.5, Rw)) + 0.02 * occ;
+                    float face = h.normal.y > 0 ? 1.0 : (((code >> 5) & 3u) == uint(CORAL_FAN) ? 0.3 : 0.6) * exp(-(colTop - bp.y) * 0.8);
+                    g = 1.2 * gc * pt * face;
                 }
                 add += (g * (1.0 - hand) + mix(BIO_LAND[1], BIO_LAND[0], 0.3) * 0.012 * hand) * cw * x.L.night
                             * exp(-bedPath * float3(0.30, 0.09, 0.065)) * (1.0 - fres);
