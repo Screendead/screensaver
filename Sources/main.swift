@@ -107,10 +107,11 @@ struct Settings {
 
 final class SaverWindow: NSWindow {
     var onInput: (() -> Void)?
+    var onBugKey: (() -> Void)?
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
     // Swallow input here: unhandled keys would otherwise reach NSApp and beep.
-    override func keyDown(with event: NSEvent) { onInput?() }
+    override func keyDown(with event: NSEvent) { event.keyCode == BugReport.key ? onBugKey?() : onInput?() }
     override func keyUp(with event: NSEvent) {}
     override func flagsChanged(with event: NSEvent) { onInput?() }
     override func mouseDown(with event: NSEvent) { onInput?() }
@@ -127,6 +128,11 @@ final class SaverController {
     private var previousApp: NSRunningApplication?
     private var dismissing = false
     private var battery = false
+    // Bug reports: the first screen's recorder while showing, and the report a B press is finishing.
+    private var recorder: BugRecorder?
+    private var pendingReport: URL?
+    private var noteWindow: BugNoteWindow?
+    private var awaitingReport = false
     let settings: Settings
     var onDismiss: (() -> Void)?
 
@@ -147,7 +153,7 @@ final class SaverController {
 
     func show(manual: Bool = false) {
         let screens = NSScreen.screens
-        guard !isShowing, !screens.isEmpty else { return }
+        guard !isShowing, !awaitingReport, !screens.isEmpty else { return }
         dismissing = false
         let front = NSWorkspace.shared.frontmostApplication
         previousApp = front?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : front
@@ -168,6 +174,7 @@ final class SaverController {
             window.isReleasedWhenClosed = false
             window.setFrame(screen.frame, display: false)
             window.onInput = { [weak self] in self?.inputReceived() }
+            window.onBugKey = { [weak self] in self?.reportBug() }
 
             // A screen whose renderer can't start still gets covered, in black.
             if let gpu {
@@ -176,6 +183,19 @@ final class SaverController {
                     renderer.timeScale = settings.timeScale
                     window.contentView = view
                     renderers.append((renderer, view))
+                    let ds = view.drawableSize
+                    if index == 0, let rec = BugRecorder(gpu: gpu, width: Int(ds.width), height: Int(ds.height), info: [
+                        "seed": sessionSeed, "screenIndex": index, "screenCount": screens.count, "screenName": screen.localizedName,
+                        "screenPoints": [Int(screen.frame.width), Int(screen.frame.height)], "backingScale": screen.backingScaleFactor,
+                        "screenPixels": [Int(renderer.screenPixels.width), Int(renderer.screenPixels.height)],
+                        "drawable": [Int(ds.width), Int(ds.height)], "edr": view.colorPixelFormat == .rgba16Float,
+                        "dither": !settings.noDither && Prefs.dither, "manualStart": manual,
+                    ]) {
+                        // The recorder reads the drawable.
+                        view.framebufferOnly = false
+                        renderer.recorder = rec
+                        recorder = rec
+                    }
                 }
             }
             windows.append(window)
@@ -188,7 +208,7 @@ final class SaverController {
         NSCursor.hide()
         NSApp.presentationOptions = [.hideDock, .hideMenuBar]
 
-        dlog("show: active=\(NSApp.isActive) screens=\(screens.count) renderers=\(renderers.count)")
+        BugLog.note("show: seed \(sessionSeed), screens \(screens.count), renderers \(renderers.count), battery \(battery), manual \(manual), active \(NSApp.isActive)")
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { dlog("show+1s: active=\(NSApp.isActive) keyWindow=\(NSApp.keyWindow != nil)") }
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 2.0
@@ -206,12 +226,19 @@ final class SaverController {
             let age = SaverController.now - self.shownAt
             // Any physical input after the moment we appeared, including during the fade-in.
             let idle = SystemState.idleSeconds()
-            if idle < age - grace - 0.15 { dlog("input detected: idle \(idle), shown \(age)"); self.dismiss(); return }
+            if idle < age - grace - 0.15 {
+                // The key event itself may not arrive (macOS can refuse to activate the agent), so B is read from the HID state.
+                if CGEventSource.keyState(.hidSystemState, key: BugReport.key) { self.reportBug(); return }
+                BugLog.note(String(format: "input detected: idle %.2f s, shown %.1f s", idle, age))
+                self.dismiss()
+                return
+            }
             if self.settings.previewDuration > 0 && age > self.settings.previewDuration { self.dismiss(); return }
             if SaverController.now - lastPowerCheck > 5 {
                 lastPowerCheck = SaverController.now
                 let b = self.settings.forceBattery || SystemState.onBattery()
                 if b != self.battery {
+                    BugLog.note("power: battery \(b)")
                     self.battery = b
                     for (r, v) in self.renderers { r.setBattery(b, view: v) }
                 }
@@ -219,6 +246,51 @@ final class SaverController {
         }
         watchTimer?.tolerance = 0.005
         RunLoop.main.add(watchTimer!, forMode: .common)
+    }
+
+    // B: writes the report's state now, finishes the clip in the background, and asks for a note once the saver is gone.
+    private func reportBug() {
+        guard isShowing, !dismissing else { return }
+        guard let rec = recorder, let r = renderers.first?.0, let dir = BugReport.makeDirectory() else { dismiss(); return }
+        BugLog.note("bug report: B pressed, \(dir.lastPathComponent)")
+        BugReport.write(to: dir, renderer: r, recorder: rec, binary: Bundle.main.executablePath ?? CommandLine.arguments[0])
+        recorder = nil
+        pendingReport = dir
+        awaitingReport = true
+        reportWait.enter()
+        rec.finish(to: dir.appendingPathComponent("clip.mp4")) { [weak self] ok in
+            DispatchQueue.main.async {
+                BugLog.note("bug report: clip \(ok ? "written" : "failed")")
+                self?.reportWait.leave()
+            }
+        }
+        dismiss()
+    }
+
+    private let reportWait = DispatchGroup()
+    private var reportSerial = 0
+
+    private func askForNote(_ dir: URL) {
+        reportWait.enter()
+        let note = BugNoteWindow(dir: dir) { [weak self] in
+            self?.noteWindow = nil
+            self?.reportWait.leave()
+        }
+        noteWindow = note
+        note.show()
+        reportSerial += 1
+        let serial = reportSerial
+        let end = { [weak self] in
+            guard let self, self.awaitingReport, self.reportSerial == serial else { return }
+            self.awaitingReport = false
+            if NSApp.isActive {
+                if let prev = self.previousApp, !prev.isTerminated { prev.activate() } else { NSApp.hide(nil) }
+            }
+            self.onDismiss?()
+        }
+        reportWait.notify(queue: .main, execute: end)
+        // The note window gives up after 5 minutes; this covers a clip export that never returns.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 310, execute: end)
     }
 
     func dismiss(animated: Bool = true) {
@@ -230,7 +302,7 @@ final class SaverController {
         for w in closing { w.ignoresMouseEvents = true }
         // Hand focus back immediately so typing during the fade lands where the user expects, but only
         // if we still hold it (the user may already have switched apps).
-        if NSApp.isActive {
+        if NSApp.isActive && pendingReport == nil {
             if let prev = previousApp, !prev.isTerminated { prev.activate() } else { NSApp.hide(nil) }
         }
         NSCursor.unhide()
@@ -243,7 +315,14 @@ final class SaverController {
             self.renderers.removeAll()
             NSApp.presentationOptions = []
             self.dismissing = false
-            self.onDismiss?()
+            self.recorder?.discard()
+            self.recorder = nil
+            if let dir = self.pendingReport {
+                self.pendingReport = nil
+                self.askForNote(dir)
+            } else {
+                self.onDismiss?()
+            }
         }
         guard animated else { finish(); return }
         NSAnimationContext.runAnimationGroup({ ctx in

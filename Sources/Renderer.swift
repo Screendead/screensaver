@@ -995,7 +995,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     var debugMode: Float = 0
     var headroom: Float = 0
     private var sceneTex: MTLTexture?
-    private var simTime: Double = 0
+    private(set) var simTime: Double = 0
     private var lastFrame: CFTimeInterval?
     private var frameIndex: Float = 0
     private var gpuTimes: [Double] = []
@@ -1009,12 +1009,13 @@ final class Renderer: NSObject, MTKViewDelegate {
     static let chunkedCoarse = ProcessInfo.processInfo.environment["VR_CHUNKED"] != nil
     // VR_LODSHIFT=v moves the LOD rings' centre v voxels ahead of the camera: frames differing only in it isolate pops.
     static let lodShift = Float(ProcessInfo.processInfo.environment["VR_LODSHIFT"] ?? "") ?? 0
-    fileprivate var exposure: Double = 1.5
+    fileprivate(set) var exposure: Double = 1.5
     // Holds the time of day fixed for snapshots, so exposure and the shot director see the rendered sun.
     var pinnedPhase: Double?
     var renderScale: Double
     // The screen's size in pixels: the dither grid follows it, while the drawable holds just one pixel per cell.
-    private var screenPixels = CGSize.zero
+    private(set) var screenPixels = CGSize.zero
+    var recorder: BugRecorder?
 
     // Cover drifts between clear and broken skies over tens of minutes.
     var cloudCover: Double {
@@ -1718,6 +1719,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         guard let drawable = view.currentDrawable, let cb = queue.makeCommandBuffer() else { return }
         encode(into: cb, output: drawable.texture, outputSize: screenPixels)
+        recorder?.capture(self, into: cb, source: drawable.texture, time: now)
         if Renderer.logTiming {
             cb.addCompletedHandler { [weak self] cb in
                 guard let self else { return }
@@ -1792,8 +1794,8 @@ enum Snapshot {
                 }
             }
         }
-        // VR_CAM=x,z,height,yawDeg,pitchDeg[,abs]: holds the camera at world (x, z), `height` above the ground there
-        // (absolute when abs is 1).
+        // VR_CAM=x,z,height,yawDeg,pitchDeg[,abs[,rollDeg]]: holds the camera at world (x, z), `height` above the ground
+        // there (absolute when abs is 1).
         let camSpec = env["VR_CAM"].map { $0.split(separator: ",").compactMap { Double($0) } }
         if let v = camSpec, v.count >= 5 {
             r.camera.freeze(position: SIMD3(v[0], 400, v[1]), yaw: v[3] * .pi / 180, pitch: v[4] * .pi / 180)
@@ -1865,14 +1867,23 @@ enum Snapshot {
             if let log = r.popLog { print(log.summary(r.wildlife)) }
             return
         }
+        // VR_BUGTEST=seconds: flies that long past the first time, recording as the saver does, then writes a bug report
+        // beside the screenshot path, whose last frame is the screenshot.
+        if let secs = Double(env["VR_BUGTEST"] ?? "") {
+            BugReport.test(r, gpu: gpu, settings: settings, output: tex, path: path, seconds: secs)
+            return
+        }
         var simulated = 0.0
         for t in settings.screenshotTimes.sorted() {
             r.simulate(t - simulated)
             if let v = camSpec, v.count >= 5 {
                 let g = (v.count > 5 && v[5] == 1) ? 0 : max(r.world.height(x: v[0], z: v[1]) ?? 20, 19.85)
-                r.camera.freeze(position: SIMD3(v[0], g + v[2], v[1]), yaw: v[3] * .pi / 180, pitch: v[4] * .pi / 180)
+                r.camera.freeze(position: SIMD3(v[0], g + v[2], v[1]), yaw: v[3] * .pi / 180, pitch: v[4] * .pi / 180,
+                                roll: v.count > 6 ? v[6] * .pi / 180 : 0)
             }
             if let phase = settings.phase { r.clock.phase = phase }
+            // VR_EXPOSURE=e: the exposure a bug report recorded (snapshots jump straight to the target the saver eases toward).
+            if let e = Double(env["VR_EXPOSURE"] ?? "") { r.exposure = e }
             simulated = t
             if let d = Double(ProcessInfo.processInfo.environment["VR_BIRDTEST"] ?? "") { r.wildlife.testPattern(camera: r.camera, distance: d) }
             if let d = Double(ProcessInfo.processInfo.environment["VR_MURMUR"] ?? "") { r.wildlife.testMurmuration(camera: r.camera, distance: d) }
