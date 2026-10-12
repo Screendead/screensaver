@@ -6760,8 +6760,22 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // Low structure faces (cairns, boats, deck edges, fallen stones) are steps too; uprights and house walls stay walls.
     if (h.normal.y == 0 && built && drop <= 2.0 && !any(s.nrm != 0.0)) ndl = mix(ndl, min(ndl, max(L.key.y, 0.0)), L.night);
     float hiSun = smoothstep(0.15, 0.45, L.key.y) * (1.0 - L.night);
-    float sh = 1.0;
-    if (shadows > 0 && ndl > 0.0 && L.shadows && x.shadowMode != 3.0) {
+    // Under the moon a shelter's back wall takes the moon where the shadow ray reaches it, lit as the cliff's direction
+    // (across the ground past the deepest lip, 40): its own faces' normals alternate light and dark along every jog of
+    // a back wall, and the ground a few columns round it is the lip's flat top. By day the roof shades it whole.
+    float ndlR = 0.0;
+    if (roofW > 0.0 && L.night > 0.0 && shadows > 0 && L.shadows && x.shadowMode != 3.0) {
+        float3 nR = nl;
+        if (h.normal.y == 0) {
+            float R = max(48.0, 2.0 * cs);
+            float2 gr = float2(groundSmoothL(x.tr, k, p.xz + float2(R, 0)) - groundSmoothL(x.tr, k, p.xz - float2(R, 0)),
+                               groundSmoothL(x.tr, k, p.xz + float2(0, R)) - groundSmoothL(x.tr, k, p.xz - float2(0, R))) / (2.0 * R);
+            nR = normalize(float3(-gr.x, 1.0, -gr.y));
+        }
+        ndlR = max(dot(nR, L.key), 0.0);
+    }
+    float sh = 1.0, shRay = 1.0;
+    if (shadows > 0 && (ndl > 0.0 || ndlR > 0.0) && L.shadows && x.shadowMode != 3.0) {
         // Keep the origin inside the hit voxel's footprint so boundary columns can't self-shadow. A planar wall's ray
         // starts out in front of its plane: from a jog's own face it would cross the next column and stripe the wall.
         float3 so = p + (planar ? s.nrm * 1.5 : float3(n) * 0.02);
@@ -6798,6 +6812,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         if (wf2 > 0.0 && !planar) sh = mix(sh, min(sh, stairShadow(x.tr, k, p.xz, L.key, d, contact, 0.35, fp > 3.0 || shadows == 2)), wf2);
         float floorSh = mix(mix(0.5, 0.25, hiSun), 0.32, L.gold);
         sh = mix(sh, floorSh + (1.0 - floorSh) * sh, wf);
+        shRay = sh;
         sh = mix(sh, 1.0, 0.3 * L.night);
         // After the lifts, which stand for light slipping between distant steps: none slips under a roof.
         sh = min(sh, 1.0 - roofW);
@@ -6842,6 +6857,11 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // early night it is already dark and keeps its contours (darkening lost the dusk A/B).
     float3 col = albK * L.keyCol * ndl * sh * mix(1.0, 1.1, L.night) * mix(float3(1.0), float3(0.40, 0.42, 0.47), deep)
                + alb * (skyFill * ao * riserShade + bounce) * mix(float3(1.0), float3(0.19, 0.23, 0.38), deep);
+    // Where the ray finds the lip, the night lift's share of the moon at the roof's sky share.
+    if (ndlR > 0.0) {
+        float top = ndlR * max(shRay, 0.3 * ROOF_SKY) * L.night * roofW - ndl * sh;
+        if (top > 0.0) col += albK * L.keyCol * top * mix(1.0, 1.1, L.night) * mix(float3(1.0), float3(0.40, 0.42, 0.47), deep);
+    }
     // Low sun: up-facing treads take a warm sky-dome tint instead of going to charcoal.
     col += albK * L.keyCol * 0.07 * (1.0 - smoothstep(0.05, 0.35, L.key.y)) * saturate(nl.y) * (1.0 - L.night);
     // Backlit leaves: a low sun glows through the canopy edges facing away from it.
