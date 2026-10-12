@@ -1291,7 +1291,8 @@ static inline float3 isleSpan(IsleRec r, float2 p, uint seed, int s, thread uint
         if (along > -3.0 && along < Ls) {
             float lat = dot(dq, float2(-u.y, u.x)) - 5.0 * perlin2(float2(along / 29.0, float(h & 255u) + 0.5), seed + 731u) * smoothstep(0.0, 20.0, along);
             bank = abs(lat) - max(1.6, 0.5 * float(s) + 0.3) * mix(1.0, 0.6, smoothstep(0.6 * Ls, Ls, along));
-            if (bank < 0.0 && along < Ls - 2.0) { top -= 2.0; kind = ISK_WATER; }
+            // Its bed keeps four of rock under it: cleanupColumns fills a thinner island run's gap, a pillar to the ground.
+            if (bank < 0.0 && along < Ls - 2.0) { top -= 2.0; bot = min(bot, top - 4.0); kind = ISK_WATER; }
         }
     }
     if (s <= 2 && R >= 50.0) {
@@ -1366,7 +1367,7 @@ static inline bool isleFall(IsleRec r, float2 p, uint seed, int s, thread float3
     float side = isleFallSide(r.f.xy);
     float b = dot(q, float2(-u.y, u.x)) * side;
     float h0 = max(r.fa.y, 0.5 * float(s) + 0.5);
-    float h1 = max(0.0, min(0.3 * h0, h0 - (0.5 * float(s) + 0.5)));
+    float h1 = max(0.0, min(0.45 * h0, h0 - (0.5 * float(s) + 0.5)));
     float D = r.fa.y * mix(0.5, 1.0, hashf(pcg(r.h + 33u)));
     if (abs(b) >= h0 + D) return false;
     // Where the sheet's front, out xo sqrt(t) at drop t L, passes this column.
@@ -1376,10 +1377,13 @@ static inline bool isleFall(IsleRec r, float2 p, uint seed, int s, thread float3
     isleLin(h0 - b, D - h1, lo, hi);
     isleLin(h0 + b, -(D + h1), lo, hi);
     float bb = saturate(abs(b - D) / (h0 - h1));
-    hi = min(hi, 1.0 - 0.4 * bb * bb - 0.1 * (hashf(hash2i(int2(floor(p)), seed + 732u)) - 0.3));
+    // Its lower part breaks into ribbons, some ending well above the rest.
+    float rib = saturate(perlin2(float2(b / 2.5, float(r.h & 255u) + 0.5), seed + 737u) * 1.6);
+    hi = min(hi, 1.0 - 0.4 * bb * bb - 0.1 * (hashf(hash2i(int2(floor(p)), seed + 732u)) - 0.3) - 0.4 * rib);
     if (hi <= lo) return false;
-    float bot = floor(r.f.z - L * hi), top = floor(r.f.z - L * lo + 0.5);
-    sp = float3(bot, max(top, bot + 1.0), r.f.w);
+    // Six deep at least: cleanupColumns fills an island's gap under a thinner run, standing a pillar on the ground.
+    float top = floor(r.f.z - L * lo + 0.5);
+    sp = float3(min(floor(r.f.z - L * hi), top - 6.0), top, r.f.w);
     return true;
 }
 
@@ -1605,6 +1609,8 @@ kernel void cleanupColumns(texture2d<float, access::read> src [[texture(0)]],
     // A notch in an island's rim raised to its neighbours would be a pillar from the ground to the island's top.
     if (c.r > r0 + 8.0 && ((gapFlags(gxSrc.read(a)) | gapFlags(gxSrc.read(b)) | gapFlags(gxSrc.read(e)) | gapFlags(gxSrc.read(f))) & GAP_ISLAND) != 0u)
         c.r = r0;
+    // A fall's run stays as it hangs: lowered to its neighbours, a short one would lose its gap and stand on the ground.
+    if ((gapFlags(gx) & GAP_ISLAND) != 0u && c.a <= -4.0) c.r = r0;
     if ((gapFlags(gx) & GAP_CARVED) == 0u) {
         if (c.b > c.r - 3.0) { c.g = 0; c.b = 0; }
         // A roof needs walls: keep a gap only where every neighbour reaches above it.
@@ -5953,7 +5959,8 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         float fy = float(isw & 2047u);
         float foot = k > 0 || fy <= 0.0 ? 0.3 : 1.0 - saturate((wy - fy) / 45.0);
         float fine = 1.0 - smoothstep(1.0, 3.0, fpA);
-        if (n.y > 0) {
+        // A fall's sheet is foam on every face; only a stream's bed ripples.
+        if (n.y > 0 && (k == 0 ? fy <= 0.0 : cdK.y == ISLE_STREAM_DEPTH)) {
             float rip = fine > 0.0 ? perlin2(float2(wq.x + wq.y, wq.x - wq.y) / 2.5 + float2(time * 1.3, 0.0), seed + 734u) * fine : 0.0;
             s.albedo = mix(float3(0.07, 0.12, 0.13), float3(0.30, 0.36, 0.38), saturate(0.25 + 0.6 * rip));
         } else {
@@ -7438,8 +7445,8 @@ static float4 isleMist(thread const Ctx& x, float3 o, float3 d, float tEnd) {
             }
         }
         if (s.c.w > 0.0) {
-            // The plume: spray wrapping the sheet's lower part and breaking away from its foot, out and downwind, each
-            // puff flatter and smaller than the last, so it thins into the air instead of standing on the land.
+            // The plume: spray round the fall's foot and breaking away from it out and downwind in a flatter, smaller
+            // puff, its lumps cut deep, so it thins into the air instead of standing on the land.
             float2 u = normalize(s.c.xy - s.a.xy), v = float2(-u.y, u.x);
             float L = s.c.z - s.c.w;
             float rw = 5.0 + 0.012 * s.b.x;
@@ -7448,14 +7455,13 @@ static float4 isleMist(thread const Ctx& x, float3 o, float3 d, float tEnd) {
             float3 pcen = foot + float3(u.x * 0.6 * rw, 0.06 * L, u.y * 0.6 * rw);
             float3 oc = o - pcen;
             float bb = dot(oc, d);
-            if (isleMistBound(o, d, tEnd, pcen, float3(2.6 * rw + 2.0, 0.34 * L + 2.0, 2.6 * rw + 2.0))) {
+            if (isleMistBound(o, d, tEnd, pcen, float3(2.6 * rw + 2.0, 0.15 * L + rw + 2.0, 2.6 * rw + 2.0))) {
                 float side = isleFallSide(s.c.xy);
-                float tp = mistPuff(o, d, tEnd, foot + float3(-0.3 * rw * u.x, 0.2 * L, -0.3 * rw * u.y), float3(1.1 * rw, 0.2 * L, 1.1 * rw), 1.2 / rw)
-                         + mistPuff(o, d, tEnd, foot + float3(0.6 * rw * u.x, 0.04 * L, 0.6 * rw * u.y), float3(1.6 * rw, max(0.1 * L, rw), 1.6 * rw), 0.8 / rw)
+                float tp = mistPuff(o, d, tEnd, foot + float3(0.4 * rw * u.x, 0.07 * L, 0.4 * rw * u.y), float3(1.5 * rw, max(0.12 * L, rw), 1.5 * rw), 0.9 / rw)
                          + mistPuff(o, d, tEnd, foot + float3((1.6 * u.x + side * v.x) * rw, -0.02 * L, (1.6 * u.y + side * v.y) * rw),
                                     float3(1.1 * rw, 0.07 * L, 1.1 * rw), 1.2 / rw);
                 if (tp * fade > ISLE_MIST_TAU0 * 0.8) {
-                    float k = mistLumps(x, o - d * bb, 1.45 * rw, -bb) * fade;
+                    float k = saturate(mistLumps(x, o - d * bb, 1.45 * rw, -bb) * 1.6 - 0.45) * fade;
                     tau += tp * k;
                     plume += tp * k;
                     hw += 0.85 * tp * k;
