@@ -77,11 +77,11 @@ final class GPU {
     // mist (function constants 0, 4, 3, 6, 5 of sceneFragment).
     typealias SceneVariant = (bands: Bool, shape: Bool, isles: Bool, near: Bool, mist: Bool)
     // The scene variants for one towers setting, as Renderer indexes them: none, bands, island surfaces, both, the
-    // islands' shade without and with bands, close by an island, and with its mist.
+    // islands' shade, close by an island, and with its mist.
     static let sceneVariants: [SceneVariant] = [(false, false, false, false, false), (true, false, false, false, false),
                                                 (false, true, false, false, false), (true, true, false, false, false),
-                                                (false, false, true, false, false), (true, false, true, false, false),
-                                                (true, true, true, true, false), (true, true, true, true, true)]
+                                                (true, false, true, false, false), (true, true, true, true, false),
+                                                (true, true, true, true, true)]
 
     func scene(towers: Bool, _ v: SceneVariant) -> MTLRenderPipelineState? {
         pipeline(GPU.sceneKey(towers, v)) { sceneDescriptor(towers, v) }
@@ -1656,8 +1656,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             let bandsT = canopyBands && !noband
             let variant = tileNeed.map { need -> Int in
                 let shapeT = isleShapeVariant && need & 1 != 0
-                if isles && (need & 8 != 0 || (need & 2 != 0 && shapeT)) { return need & 4 != 0 ? 7 : 6 }
-                if isles && need & 2 != 0 { return bandsT ? 5 : 4 }
+                if isles && (need & 8 != 0 || (need & 2 != 0 && shapeT)) { return need & 4 != 0 ? 6 : 5 }
+                if isles && need & 2 != 0 { return 4 }
                 return (bandsT ? 1 : 0) + (shapeT ? 2 : 0)
             }
             // Rectangles of tiles of one variant, each drawn as the whole frame's triangle scissored to it: a pair of
