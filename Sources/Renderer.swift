@@ -1145,7 +1145,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var shadowBand = [0, 0]
     private var shadowValid = false
     private var shadowFrom: (cam: SIMD2<Double>, key: SIMD3<Double>)?
-    // The terrain horizon around the camera (bakeHorizon): sky pixels above it skip the trace.
+    // The terrain horizon around the camera and the islands' tangents (bakeHorizon): sky pixels above it and clear of
+    // the islands skip the trace.
     private let horizonPipeline: MTLComputePipelineState
     private let horizonBuf: MTLBuffer
     // The province fields around the camera (bakeProvinces in Shaders/Saver.metal: jungle, old growth, islands), which
@@ -1258,7 +1259,7 @@ final class Renderer: NSObject, MTKViewDelegate {
               let csf = gpu.pipeline("cloudSlowField"),
               let shP = gpu.pipeline("bakeShadowHeight"),
               let hzP = gpu.pipeline("bakeHorizon"),
-              let hzB = device.makeBuffer(length: 1024 * 4, options: .storageModePrivate),
+              let hzB = device.makeBuffer(length: 3 * 1024 * 4, options: .storageModePrivate),
               let pvP = gpu.pipeline("bakeProvinces"),
               let lampP = gpu.pipeline("updateLamps"),
               let lightP = gpu.pipeline("bakeLights"),
@@ -1574,9 +1575,11 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setTexture(world.gapTex, index: 3)
             enc.setTexture(clipmap.gaps, index: 4)
             enc.setTexture(clipmap.gaps2, index: 5)
+            enc.setTexture(world.bandTex, index: 6)
+            enc.setTexture(clipmap.band, index: 7)
             enc.setBuffer(world.giantBuffer, offset: 0, index: 2)
-            // HORIZON_SEGS (16) threads per bin, one threadgroup each.
-            enc.dispatchThreads(MTLSize(width: 16, height: 1024, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 1, depth: 1))
+            // HORIZON_SEGS (64) threads per bin, one threadgroup each.
+            enc.dispatchThreads(MTLSize(width: 64, height: 1024, depth: 1), threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
         }
         bakes?.endEncoding()
         // Snapshots refresh the far heights synchronously as they simulate.
