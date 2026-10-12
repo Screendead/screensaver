@@ -4537,6 +4537,7 @@ struct Surface {
     float wall;     // megaWall: among the great walls
     float3 nrm;     // the plane a structure's roof voxel or a tower's wall shades as (zero: the face normal)
     float3 emit;    // fire, lanterns and lit windows
+    float up;       // leaves: height up the crown, 0 at its foot, 1 at its top
 };
 
 // Autumn foliage: a slow Perlin hue field runs lingering green, gold, orange, scarlet to crimson;
@@ -4550,6 +4551,67 @@ static inline float3 autumnLeaf(float2 w, float birch, uint seed) {
     if (k < 0.45) return mix(gold, orange, smoothstep(0.2, 0.45, k));
     if (k < 0.7) return mix(orange, scarlet, smoothstep(0.45, 0.7, k));
     return mix(scarlet, crimson, smoothstep(0.7, 1.0, k));
+}
+
+// A wood's leaves at world column w: deep, low-chroma greens that drift slowly across a grove; conifers cooler and
+// darker. A tree's single-run columns and its multi-run ones (old growth, the jungle's roof) must agree, or one crown
+// shows two palettes.
+static float3 woodLeaf(float2 w, Climate c, float painted, float3 fallLeaf, float autumn, uint seed) {
+    float conifer = smoothstep(0.50, 0.32, c.temp);
+    float k = saturate(perlin2(w / 23.0, seed + 93u) * 0.9 + 0.5);
+    float3 leaf = mix(float3(0.035, 0.07, 0.035), float3(0.065, 0.09, 0.04), k);
+    leaf = mix(leaf, float3(0.025, 0.055, 0.045), conifer);
+    leaf = mix(leaf, float3(0.11, 0.125, 0.09), painted);
+    leaf = mix(leaf, fallLeaf, autumn * (1.0 - conifer * 0.5));
+    if (c.jungle > 0.0) {
+        // The jungle's crowns differ one from the next: deep green, olive, now and then a cool teal.
+        float jk = perlin2(w / 9.0, seed + 340u) + 0.6 * perlin2(w / 31.0, seed + 341u);
+        float3 jl = mix(float3(0.028, 0.062, 0.034), float3(0.072, 0.094, 0.032), smoothstep(-0.3, 0.5, jk));
+        jl = mix(jl, float3(0.024, 0.068, 0.058), smoothstep(0.25, 0.6, perlin2(w / 17.0 + 7.3, seed + 342u)));
+        leaf = mix(leaf, jl, smoothstep(0.1, 0.4, c.jungle));
+    }
+    return leaf;
+}
+
+// Crown by crown, species and age: a third cooler and darker, one in five yellower, one in ten light and warm, each
+// lighter or darker again. Over many crowns the mean is 1, the wood's own colour that the coarse rings show. The crown is
+// the nearest trunk (the jungle's: the dome standing highest) among the four cells round w (world column centre); Ht its
+// height when it is old growth, else 0.
+struct Crown { float3 tint; float Ht; };
+
+static Crown crownAt(float2 w, Climate c, uint seed) {
+    float best = 1e9, bestH = 0.0;
+    uint id = 0u;
+    bool jungle = c.jungle >= 0.15, old = !jungle && c.old >= 0.2;
+    float cell = jungle ? JUNGLE_CELL : old ? OLD_CELL : float(TREE_CELL);
+    int2 c0 = int2(floor(w / cell - 0.5));
+    for (int j = 0; j <= 1; j++)
+        for (int i = 0; i <= 1; i++) {
+            int2 cc = c0 + int2(i, j);
+            float2 tc;
+            float R = 1.0, Ht = 0.0;
+            uint h;
+            if (jungle) {
+                h = hash2i(cc, seed + 322u);
+                tc = (float2(cc) + 0.2 + 0.6 * float2(hashf(h), hashf(pcg(h)))) * JUNGLE_CELL;
+                R = 3.5 + 4.0 * hashf(pcg(h + 1u));
+            } else if (old) {
+                float tr;
+                if (!oldTreeIn(cc, seed, c.old, tc, Ht, R, tr, h)) continue;
+            } else {
+                h = hash2i(cc, seed + 92u);
+                tc = float2(cc * TREE_CELL + int2(h % uint(TREE_CELL), (h / 7u) % uint(TREE_CELL))) + 0.5;
+            }
+            float d = length_squared(w - tc) / (R * R);
+            if (d < best) { best = d; id = h; bestH = Ht; }
+        }
+    uint h = pcg(id + 361u);
+    float u = hashf(h);
+    float3 t = u < 0.35 ? float3(0.80, 0.88, 1.05) : u < 0.70 ? float3(1.0) : u < 0.90 ? float3(1.35, 1.15, 0.75) : float3(1.45, 1.3, 0.7);
+    Crown o;
+    o.tint = t / float3(1.045, 1.018, 0.9375) * (0.75 + 0.5 * hashf(pcg(h)));
+    o.Ht = bestH;
+    return o;
 }
 
 // Sedimentary bedding by world height: broad formations, beds of uneven tone and fine laminae. Beds dip gently
@@ -4728,6 +4790,20 @@ static Surface giantSurface(thread const Terrain& tr, Surface s, int k, int3 v, 
         uint pal = k == 0 ? (gsb >> 28) & 7u : giantPalette(gi.h);
         a = pal == 2u ? mix(float3(0.024, 0.070, 0.060), float3(0.050, 0.098, 0.066), kq)
                       : mix(float3(0.034, 0.078, 0.050), float3(0.075, 0.112, 0.042), kq);
+        s.up = 1.0 - saturate((runHi - 1.0 - y) / 14.0);
+        if (pal == 0u && k == 0) {
+            // Old growth and the jungle: the wood's own leaves (provinces carry no autumn or painted hills).
+            float2 w = float2(v.xz + mapOrigin);
+            Climate c = climateL(tr, 0, float2(v.xz) + 0.5);
+            c.temp = altitudeTemp(c.temp, gLoc);
+            a = woodLeaf(w, c, 0.0, 0.0, 0.0, seed);
+            float ct = 1.0 - smoothstep(0.5, 1.0, fp);
+            if (ct > 0.0) {
+                Crown cr = crownAt(w + 0.5, c, seed);
+                a *= mix(float3(1.0), cr.tint, ct);
+                if (cr.Ht > 0.0) s.up = saturate((y - gLoc - 0.45 * cr.Ht) / (0.55 * cr.Ht));
+            }
+        }
         // A rust flush drifts over part of the crown, strongest on its upper leaves.
         if (pal == 3u) a = mix(a, float3(0.115, 0.062, 0.030), 0.7 * smoothstep(0.05, 0.45, perlin2(wq / 23.0, seed + 604u) + 0.25 * saturate((y - runLo) / max(runHi - runLo, 1.0))));
         int2 tx = int2(floor(uv * 16.0));
@@ -4856,6 +4932,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
                          int k, int3 v, int3 n, float2 uv, float fp, float fpA, float3 p, uint seed, float time, bool lite = false) {
     if (lite) { fp = max(fp, 4.0); fpA = max(fpA, 4.0); }
     Surface s;
+    s.up = 1.0;
     s.slope = 0;
     s.mat = 0;
     s.level = 0;
@@ -5107,19 +5184,16 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     }
     if ((tree && float(v.y) >= col4.a) || vegLeaf) {
         float leafLo = vegLeaf ? vegLo : col4.a;
-        // Leaves: deep, low-chroma greens that drift slowly across a grove; conifers cooler and darker.
-        float conifer = smoothstep(0.50, 0.32, c.temp);
-        float k = saturate(perlin2(w / 23.0, seed + 93u) * 0.9 + 0.5);
-        float3 leaf = mix(float3(0.035, 0.07, 0.035), float3(0.065, 0.09, 0.04), k);
-        leaf = mix(leaf, float3(0.025, 0.055, 0.045), conifer);
-        leaf = mix(leaf, float3(0.11, 0.125, 0.09), painted);
-        leaf = mix(leaf, fallLeaf, autumn * (1.0 - conifer * 0.5));
-        if (c.jungle > 0.0) {
-            // The jungle's crowns differ one from the next: deep green, olive, now and then a cool teal.
-            float jk = perlin2(w / 9.0, seed + 340u) + 0.6 * perlin2(w / 31.0, seed + 341u);
-            float3 jl = mix(float3(0.028, 0.062, 0.034), float3(0.072, 0.094, 0.032), smoothstep(-0.3, 0.5, jk));
-            jl = mix(jl, float3(0.024, 0.068, 0.058), smoothstep(0.25, 0.6, perlin2(w / 17.0 + 7.3, seed + 342u)));
-            leaf = mix(leaf, jl, smoothstep(0.1, 0.4, c.jungle));
+        float3 leaf = woodLeaf(w, c, painted, fallLeaf, autumn, seed);
+        s.up = saturate((float(v.y) - leafLo) / max(col.x - leafLo - 1.0, 1.0));
+        // Gone, like the land's glow, before the 1-voxel ring's morph band.
+        float ct = k == 0 ? (1.0 - smoothstep(0.5, 1.0, fp)) * (1.0 - 0.5 * autumn) : 0.0;
+        if (ct > 0.0) {
+            Crown cr = crownAt(w + 0.5, c, seed);
+            leaf *= mix(float3(1.0), cr.tint, ct);
+            // An old-growth crown's columns run its whole height (multi-run ones too): by each column's own span they
+            // would stripe it.
+            if (cr.Ht > 0.0) s.up = saturate((float(v.y) - col.y - 0.45 * cr.Ht) / (0.55 * cr.Ht));
         }
         // A 16x16 leaf texture: two-tone texels, faded out once a texel nears a pixel.
         if (fp < 0.04) {
@@ -6080,6 +6154,11 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
 
 // MARK: - Bioluminescence
 
+// The land's glow by sun height: faint from just before sunset, full from mid twilight (Renderer.bioSun must match the
+// start).
+constant float BIO_SUN = 0.07;
+static inline float bioRamp(float sunY) { return smoothstep(BIO_SUN, -0.12, sunY); }
+
 // Shared with the sea's glow: deep blue, turquoise and pink (#2a6bff, #2fe3d0, #ff5fc8), linear.
 constant float3 BIO_LAND[3] = { float3(0.023, 0.147, 1.0), float3(0.028, 0.768, 0.630), float3(1.0, 0.114, 0.578) };
 
@@ -6285,9 +6364,14 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // Low light: leaves this dark under a warm key and a violet dome go to brown mud. Light passed and scattered through
     // a crown takes the leaf's own hue, so the lift saturates as it brightens (autumn crowns are bright already).
     float dusk = s.mat == 1 ? L.gold * (1.0 - L.night) * mix(0.5, 1.0, L.sunAmt) : 0.0;
+    // A sun on the horizon, dim and amber, lights leaves unlifted and warmed toward bronze: lifted toward green first, it
+    // turns them mustard. A golden-hour sun, and the afterglow, a broad patch of sky, light them lifted like the dome.
+    float3 albK = alb;
     if (dusk > 0.0) {
         float la = max(dot(alb, float3(0.3, 0.59, 0.11)), 1e-4);
         alb *= mix(float3(1.0), clamp(1.5 * sqrt(alb / la), 0.7, 2.0), dusk * (1.0 - 0.6 * s.autumn));
+        albK = mix(albK, la * float3(1.5, 0.95, 0.55), 0.5 * dusk * (1.0 - 0.6 * s.autumn)) * (1.0 + 0.3 * dusk);
+        albK = mix(alb, albK, smoothstep(-0.04, 0.0, L.sun.y) * (1.0 - L.sunAmt));
     }
     float ndl = mix(max(dot(nl, L.key), 0.0), max(L.key.y, 0.0), lone);
     // A low moon lights a step's riser several times brighter than its tread, drawing a highlight line along
@@ -6351,6 +6435,9 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // only six voxels out, so in a shelter it reads the roof all round and varies column by column with the back wall's
     // jogs, striping it.
     skyFill *= mix(1.0 - mix(0.55, 0.85, hiSun) * (1.0 - sv), ROOF_SKY, roofW);
+    // Dusk: a crown's top still holds the glow while its foot and the gaps between crowns sink deeper and cooler than
+    // open shade, so the crowns stand apart.
+    if (dusk > 0.0) skyFill *= mix(float3(1.0), mix(float3(0.52, 0.58, 0.8), float3(1.12, 1.08, 1.0), saturate(sv * sv * (0.4 + 0.75 * s.up))), dusk);
     // A wall sees half the dome, and the half it sees is the dimmer horizon side; without this a riser in shade
     // outshines the sunlit tread above it under a low sun.
     skyFill *= built ? 0.7 + 0.3 * saturate(nl.y) : 0.5 + 0.5 * saturate(nl.y);
@@ -6369,15 +6456,21 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // Deep in the night, land sits below the sky so night reads as night (won night A/B): moonlight is graded
     // to a cool silver and the fill to a deep blue well under it, so slopes facing the moon still model. In
     // early night it is already dark and keeps its contours (darkening lost the dusk A/B).
-    float3 col = alb * (L.keyCol * ndl * sh * mix(1.0, 1.1, L.night) * mix(float3(1.0), float3(0.40, 0.42, 0.47), deep)
-                        + (skyFill * ao * riserShade + bounce) * mix(float3(1.0), float3(0.19, 0.23, 0.38), deep));
+    float3 col = albK * L.keyCol * ndl * sh * mix(1.0, 1.1, L.night) * mix(float3(1.0), float3(0.40, 0.42, 0.47), deep)
+               + alb * (skyFill * ao * riserShade + bounce) * mix(float3(1.0), float3(0.19, 0.23, 0.38), deep);
     // Low sun: up-facing treads take a warm sky-dome tint instead of going to charcoal.
-    col += alb * L.keyCol * 0.07 * (1.0 - smoothstep(0.05, 0.35, L.key.y)) * saturate(nl.y) * (1.0 - L.night);
+    col += albK * L.keyCol * 0.07 * (1.0 - smoothstep(0.05, 0.35, L.key.y)) * saturate(nl.y) * (1.0 - L.night);
     // Backlit leaves: a low sun glows through the canopy edges facing away from it.
     if (s.mat == 1) {
         float back = pow(saturate(dot(d, L.key)), 4.0) * (1.0 - smoothstep(0.08, 0.45, L.key.y)) * (1.0 - L.night);
         float graze = 1.0 - abs(dot(n, d));
         col += alb * mix(float3(0.9, 1.3, 0.3), float3(1.3, 0.9, 0.4), s.autumn) * L.keyCol * back * (1.0 - ndl) * (1.0 - abs(n.y)) * graze * graze * sh;
+    }
+    // The glowing band low over the sun's side of the sky warms the crowns' flanks that face it, the upper ones most,
+    // even where the sun itself is hidden: leaves model warm against cool, and seen toward the sun only their rims catch it.
+    if (dusk > 0.0) {
+        float face = saturate(dot(nl, normalize(float3(L.sun.x, 0.25, L.sun.z)))) * (1.0 - 0.6 * saturate(nl.y));
+        col += albK * L.skyHor * float3(1.0, 0.85, 0.7) * face * (0.1 + 0.9 * s.up * s.up) * sv * 0.8 * L.gold * (1.0 - L.night) * (1.0 - 0.5 * L.sunAmt);
     }
     // Waxy crown tops mirror the low sky: amber toward the sun, lavender away from it. Tops only: on side faces the
     // grazing sheen would rule a pale line along every step.
@@ -6386,7 +6479,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         float tw = 0.5 + 0.5 * dot(normalize(rv.xz + 1e-5), normalize(L.sun.xz + 1e-5));
         float3 env = mix(L.skyHor * mix(float3(0.72, 0.66, 1.0), float3(1.0, 0.8, 0.55), tw * tw), L.skyZen, saturate(rv.y * 3.0));
         float fr = min(0.02 + 0.3 * pow(1.0 - saturate(-dot(d, nl)), 5.0), 0.08);
-        col += env * fr * saturate(nl.y) * sv * (0.6 + 0.4 * sh) * dusk;
+        col += env * fr * saturate(nl.y) * sv * (0.6 + 0.4 * sh) * dusk * s.up * s.up;
     }
     // Lamplight is added in absolute terms, outside the moonlight grade, so firelit ground stays warm in a blue night.
     if (x.lights.w > 0.0) {
@@ -6404,8 +6497,8 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
             col += s.albedo * Lm * ((face * mix(1.0, ao, 0.5)) / (1.0 + dy * dy) + glow) * x.lights.w;
         }
     }
-    // From late dusk; gone before the 1-voxel ring's morph band. Not in reflections, whose ripples would sparkle it.
-    float bio = smoothstep(0.04, -0.12, L.sun.y) * (1.0 - smoothstep(0.5, 1.0, fp));
+    // Faintly from sunset; gone before the 1-voxel ring's morph band. Not in reflections, whose ripples would sparkle it.
+    float bio = bioRamp(L.sun.y) * (1.0 - smoothstep(0.5, 1.0, fp));
     if (bio > 0.0 && k == 0 && shadows == 1 && s.mat < 4)
         col += bioGlow(x.tr.hm, x.st, x.tr.clim, x.tr.pv, x.origin, x.seed, x.time, s.mat, h.voxel, h.normal, p, fp) * bio;
     return col + s.emit;
@@ -6881,7 +6974,7 @@ vertex MoteOut bioVertex(uint vid [[vertex_id]], uint iid [[instance_id]], const
     MoteOut o;
     o.pos = float4(0, 0, -1, 1);
     o.m = 0; o.re = 1; o.col = 0;
-    float sky = smoothstep(0.04, -0.12, f.sunDir.y);
+    float sky = bioRamp(f.sunDir.y);
     if (sky <= 0.0) return o;
     int2 origin = f.mapInfo.xy;
     uint seed = uint(f.mapInfo.w);

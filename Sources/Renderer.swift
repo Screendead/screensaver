@@ -878,7 +878,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     let scenePipelines: [[MTLRenderPipelineState]]
     let postPipeline: MTLRenderPipelineState
     let taaPipeline: MTLRenderPipelineState
-    // The glowing bugs (bioFragment), drawn over the scene in a pass of their own from late dusk.
+    // The glowing bugs (bioFragment), drawn over the scene in a pass of their own from sunset.
     private let bioPipeline: MTLRenderPipelineState
     private let cloudPipeline: MTLComputePipelineState
     // Shadow-height maps (see bakeShadowHeight in Shaders/Saver.metal): near and far cascades, a band rebaked per frame.
@@ -931,6 +931,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     private static let lampReach: [Double] = [1, 20, 16, 7, 10, 24, 22, 6]   // LAMP_R in Shaders/Saver.metal
     private var tileMasks = [UInt32](repeating: 0, count: 16 * 16)
     static let ditherCells = 864.0
+    // Sun height the land's glow starts from (BIO_SUN in Shaders/Saver.metal).
+    static let bioSun: Float = 0.07
     // Bug sprites: one per cube of the MOTE_N^3 block round the camera (bioVertex in Shaders/Saver.metal).
     static let moteCount = 18 * 18 * 18
     private var historyIndex = 0
@@ -1372,7 +1374,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.endEncoding()
         }
         // In its own pass: drawn after the scene in the scene's pass, even a draw doing nothing cost a twilight scene ~0.4 ms.
-        if f.sunDir.y < 0.04 {
+        if f.sunDir.y < Renderer.bioSun {
             let bp = MTLRenderPassDescriptor()
             bp.colorAttachments[0].texture = sceneTex
             bp.colorAttachments[0].loadAction = .load
