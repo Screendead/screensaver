@@ -4790,6 +4790,7 @@ struct Surface {
     float bio;      // night glow share of this ground (-1: a giant's, worked out in bioLight)
     float bioG;     // the groves' noise, which also bends the glow's pulse
     float bioY;     // a trunk's foot
+    float bioJ;     // jungle weight, which gathers the glow into clusters
     uint bioNb;     // ground beside a tree column: -x, +x, -z, +z bits
 };
 
@@ -5202,6 +5203,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     s.bio = 0;
     s.bioG = 0;
     s.bioY = 0;
+    s.bioJ = 0;
     s.bioNb = 0u;
     s.slope = 0;
     s.mat = 0;
@@ -5446,7 +5448,8 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
             float2 wp = p.xz + float2(mapOrigin);
             float g = bioNoise(wp / 170.0, seed + 710u) + 0.5 * bioNoise(wp / 47.0, seed + 711u);
             s.bioG = g;
-            d *= smoothstep(-0.35, 0.05, g) * (1.0 + 0.7 * smoothstep(SEA + 28.0, SEA + 3.0, H)) * (1.0 - 0.55 * smoothstep(0.65, 0.9, c.jungle));
+            s.bioJ = smoothstep(0.65, 0.9, c.jungle);
+            d *= smoothstep(-0.35, 0.05, g) * (1.0 + 0.7 * smoothstep(SEA + 28.0, SEA + 3.0, H)) * (1.0 - 0.45 * s.bioJ);
             int kc = max(k, 1);
             constexpr sampler cb(filter::linear, address::repeat);
             float cov = tr.cv.sample(cb, (p.xz / tr.lod[kc].w + float2(levelOrigin(tr, kc))) / float(COARSE_N), uint(kc - 1), level(0)).r;
@@ -6472,11 +6475,12 @@ static inline float3 bioHue(float2 w, uint seed) {
     float3 teal = BIO_LAND[1], cyan = float3(0.04, 0.58, 1.0), blue = mix(BIO_LAND[0], cyan, 0.35);
     float t = smoothstep(-0.35, 0.2, a);
     float3 h = t < 0.5 ? mix(teal, cyan, t * 2.0) : mix(cyan, blue, t * 2.0 - 1.0);
-    float v = bioNoise(w / 380.0 + 31.7, seed + 722u);
-    h = mix(h, float3(0.42, 0.10, 1.0), smoothstep(0.2, 0.32, v));
-    h = mix(h, float3(0.75, 0.10, 0.75), 0.6 * smoothstep(0.3, 0.42, v));
-    // Blue and violet lifted toward teal's brightness, so a region's hue never reads as less glow.
-    return h * mix(1.0, 0.5 / max(dot(h, float3(0.3, 0.59, 0.11)), 0.05), 0.6);
+    // Wide ramps: a narrow one rings each pocket with a hard violet edge.
+    float v = bioNoise(w / 620.0 + 31.7, seed + 722u);
+    h = mix(h, float3(0.42, 0.10, 1.0), smoothstep(0.16, 0.36, v));
+    h = mix(h, float3(0.75, 0.10, 0.75), 0.5 * smoothstep(0.28, 0.48, v));
+    // Blue and violet lifted a little toward teal's brightness (x1.2 at most): more reads as a saturated floodlight.
+    return h * mix(1.0, 0.5 / max(dot(h, float3(0.3, 0.59, 0.11)), 0.05), 0.3);
 }
 
 // Slow swells of light that travel across a grove (a front ~70 voxels apart, bent by warp, a noise in about
@@ -6490,7 +6494,7 @@ static inline float bioPulse(float2 w, float t, uint seed, float warp) {
 
 // Means of the near patterns below, per unit of glow; far off each surface takes its mean, so the land keeps one level
 // of light from the camera's feet to the haze.
-constant float BIO_FLOOR = 0.028, BIO_FLOOR_HALO = 0.5, BIO_CROWN = 0.023;
+constant float BIO_FLOOR = 0.052, BIO_FLOOR_HALO = 0.68, BIO_CROWN = 0.038;
 
 // The light the vegetation gives off at night: moss and undergrowth carpets on the ground, pooled round trunk feet,
 // ragged moss hanging from terrace lips, fungus collars hugging trunk bases, crowns lit from within (undersides and
@@ -6505,6 +6509,7 @@ static float3 bioLight(thread const Ctx& x, thread const Surface& s, int k, int3
         g = bioNoise(wp.xz / 170.0, x.seed + 710u) + 0.5 * bioNoise(wp.xz / 47.0, x.seed + 711u);
         D = 0.6 * smoothstep(-0.35, 0.05, g) * (1.0 - 0.5 * smoothstep(0.65, 0.9, c.jungle));
     }
+    float jw = s.bioJ;
     if (D <= 0.0) return 0;
     float3 hue = bioHue(wp.xz, x.seed);
     float pulse = bioPulse(wp.xz, x.time, x.seed, g);
@@ -6525,9 +6530,9 @@ static float3 bioLight(thread const Ctx& x, thread const Surface& s, int k, int3
             float4 dd = float4(f.x, 1.0 - f.x, f.y, 1.0 - f.y);
             for (int i = 0; i < 4; i++) if ((s.bioNb >> uint(i)) & 1u) pool = max(pool, exp(-2.2 * dd[i]));
         }
-        float th = 0.22 - 0.4 * pool, core = smoothstep(th, th + 0.3, b);
+        float th = 0.08 - 0.4 * pool, core = smoothstep(th, th + 0.3, b);
         float gr = fp < 0.04 ? mix(0.5 + smoothstep(-0.15, 0.2, bioNoise(q / 0.4, x.seed + 719u)), 1.0, smoothstep(0.01, 0.04, fp)) : 1.0;
-        e = mix(core * core * gr * 0.5 + 0.05 * pool, BIO_FLOOR, pf);
+        e = mix(core * core * gr * 0.4 + 0.05 * pool, BIO_FLOOR, pf);
         halo = mix(smoothstep(th - 0.45, th + 0.05, n1), BIO_FLOOR_HALO, pf);
     } else if (s.mat == 0) {
         // Moss over a terrace lip: hanging clumps, gone round steps too low to hold them.
@@ -6541,7 +6546,7 @@ static float3 bioLight(thread const Ctx& x, thread const Surface& s, int k, int3
         // Lit from within: undersides and the crown's lower leaves, the tops faintly; veins of light close up.
         // Sides fade up each voxel as well as up the crown, so a crown is not lit as a stack of boxes.
         float low = (1.0 - s.up) * (1.0 - s.up) * (n.y == 0 ? 1.0 - 0.7 * fract(p.y) : 1.0);
-        float lo = n.y < 0 ? 0.08 : n.y > 0 ? 0.012 : 0.008 + 0.035 * low;
+        float lo = n.y < 0 ? 0.07 : n.y > 0 ? 0.014 : 0.008 + 0.035 * low;
         halo = 0.25 * low;
         float vf = 1.0 - smoothstep(0.02, 0.08, fp);
         if (vf > 0.0 && n.y <= 0) {
@@ -6549,13 +6554,15 @@ static float3 bioLight(thread const Ctx& x, thread const Surface& s, int k, int3
             float vn = bioNoise(n.y != 0 ? vq.xz : n.x != 0 ? vq.zy : vq.xy, x.seed + 716u);
             lo *= mix(1.0, 0.45 + 2.2 * (1.0 - smoothstep(0.02, 0.07, abs(vn))), vf);
         }
-        // Glowing sprays among the leaves, a couple of voxels across with soft hearts.
-        float bl = 0.0;
-        if (pf < 1.0) {
+        // Glowing sprays among the leaves, a few voxels across with soft hearts, which also leave the undersides and low
+        // sides dark between them (mean 1); both at their means before a spray nears a few pixels, or they read as flecks.
+        float ps = max(pf, smoothstep(0.05, 0.25, fp)), bl = 0.0;
+        if (ps < 1.0) {
             float2 q2 = n.y != 0 ? wp.xz : n.x != 0 ? wp.zy : wp.xy;
-            bl = smoothstep(0.22, 0.52, bioNoise(q2 / 2.0, x.seed + 728u) + 0.35 * bioNoise(q2 / 0.7, x.seed + 729u));
+            bl = smoothstep(0.05, 0.35, bioNoise(q2 / 2.6, x.seed + 728u));
+            if (n.y <= 0) lo *= mix(0.5 + 2.4 * bl, 1.0, ps);
         }
-        e = lo + 0.3 * mix(bl * bl, 0.037, pf);
+        e = lo + 0.15 * mix(bl * bl, 0.159, ps);
         // Far crowns stand for the floor between them as well as themselves.
         if (n.y > 0) e = mix(e, BIO_CROWN, max(band, x.prof & 8192 ? 1.0 : 0.0));
     } else if (n.y == 0) {
@@ -6570,8 +6577,13 @@ static float3 bioLight(thread const Ctx& x, thread const Surface& s, int k, int3
     // The light it casts: a tinted lift on everything in the grove, more in hollows and under crowns.
     // Glades of it a dozen voxels across and dark ground between, out to where they near a few pixels (mean 1).
     float gf = x.prof & 8192 ? 1.0 : smoothstep(2.0, 6.0, fp), glade = 1.0;
-    if (gf < 1.0) glade = mix(0.45 + 1.72 * smoothstep(-0.05, 0.3, bioNoise(wp.xz / 14.0, x.seed + 726u) + 0.5 * bioNoise(wp.xz / 5.5, x.seed + 727u)), 1.0, gf);
-    return hue * D * pulse * glade * (e + alb * halo * 0.3 * (1.3 - 0.5 * sv));
+    if (gf < 1.0) {
+        glade = 0.45 + 1.72 * smoothstep(-0.05, 0.3, bioNoise(wp.xz / 14.0, x.seed + 726u) + 0.5 * bioNoise(wp.xz / 5.5, x.seed + 727u));
+        // Deep in the jungle the light gathers into sparse bright clusters with dim ground between (mean 1).
+        if (jw > 0.0) glade *= mix(1.0, 0.3 + 5.2 * smoothstep(0.15, 0.4, bioNoise(wp.xz / 9.0, x.seed + 730u) + 0.4 * bioNoise(wp.xz / 3.5, x.seed + 731u)), jw);
+        glade = mix(glade, 1.0, gf);
+    }
+    return hue * D * pulse * glade * (e + alb * halo * 0.2 * (1.3 - 0.5 * sv));
 }
 
 // shadows: 0 none, 1 traced near ray and maps, 2 maps only (reflections: ripples hide contact shadows).
@@ -7338,8 +7350,8 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
     float bloom = smoothstep(-0.275, -0.075, big + 0.45 * b2);
     float near = smoothstep(420.0, 180.0, tw) * (1.0 - fres);
     if (bloom <= 0.0 && near <= 0.0 && wake <= 0.0) return 0;
-    // The land's hue for the region, leaning blue offshore.
-    float3 hue0 = mix(bioHue(ww, x.seed), BIO_LAND[0], 0.2 - 0.15 * smoothstep(-0.15, 0.15, b2));
+    // The land's hue for the region, but mostly cyan-blue: violet streaks on water read as dye.
+    float3 hue0 = mix(bioHue(ww, x.seed), mix(BIO_LAND[0], BIO_LAND[1], 0.3 + 0.3 * smoothstep(-0.15, 0.15, b2)), 0.55);
     // Read only where something uses it: most open water near the camera holds no creature.
     float broad = bloom > 0.0 || salt > 0.0 ? seaBroad(x, k, wp.xz) : -1.0;
     // A pan's pools are a still skin a voxel deep; deeper water in a dry basin is open sea and glows in full.
