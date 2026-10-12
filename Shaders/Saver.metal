@@ -1162,6 +1162,22 @@ static inline float isleStretch(float R, uint h) { return (R > 40.0 && (R <= 210
 // Nothing of an island lies further than this from its centre.
 static inline float isleReach(float R, uint h) { return isleStretch(R, h) * (1.45 * R + 8.0); }
 
+// Its form by hash: 0 a lens; 1 a spire (smaller ones only), sheer flanks over a keel twice as deep and a crag on top
+// up to isleCrag; 2 tilted, its top
+// and keel dropping toward one side by up to isleTilt; 3 a prow, its keel's deepest point off toward one side.
+static inline int isleForm(float R, uint h) {
+    float c = hashf(pcg(h + 30u));
+    return R >= 30.0 && R <= 220.0 && c < 0.4 ? 1 : c < 0.58 ? 2 : c < 0.76 ? 3 : 0;
+}
+// The keel's depth before the room under it limits it.
+static inline float isleDepth(float R, uint h) {
+    float u = hashf(pcg(h + 5u));
+    return isleForm(R, h) == 1 ? R * mix(1.8, 2.6, u) + 20.0 : R < 55.0 ? R * mix(0.6, 1.0, u) + 6.0 : R * mix(0.7, 1.4, u) + 10.0;
+}
+// Must match Islands.crag in Sources/Islands.swift.
+static inline float isleCrag(float R, uint h) { return isleForm(R, h) == 1 ? 0.3 * R : 0.0; }
+static inline float isleTilt(float R, uint h) { return isleForm(R, h) == 2 ? min(R * (0.12 + 0.28 * hashf(pcg(h + 31u))), 45.0) : 0.0; }
+
 // A canopy over an island's meadow at world column centre p (d: how far out toward the rim, 0 to 1): its height over
 // the ground there, 0 for none. Crowns packed on a 7-voxel grid over a low fill on the lush, groves on meadow on the
 // rest, a bare one in six; none on the rim, so the edge is a lip of earth, not a wall of leaves.
@@ -1170,7 +1186,8 @@ static inline float isleCanopy(float R, uint h, float2 p, float d, uint seed) {
     if (R < 30.0 || lush < 0.16) return 0.0;
     float sz = clamp(R / 180.0, 0.45, 1.0);
     float open = perlin2(p / 47.0, seed + 720u) + 0.45 * perlin2(p / 17.0, seed + 721u) - mix(0.32, -0.5, lush);
-    float e = smoothstep(0.0, 0.3, open) * (1.0 - smoothstep(0.7, 0.88, d));
+    float dl = 0.86 + 0.1 * perlin2(p / 13.0, seed + 728u);
+    float e = smoothstep(0.0, 0.3, open) * (1.0 - smoothstep(dl - 0.16, dl, d));
     if (e <= 0.0) return 0.0;
     float hi = mix(0.0, 6.0 * sz, e * e) * smoothstep(0.55, 0.85, lush) + 0.8 * perlin2(p / 4.0, seed + 723u);
     int2 c0 = int2(floor(p / 7.0));
@@ -1194,6 +1211,8 @@ static inline float isleCanopy(float R, uint h, float2 p, float d, uint seed) {
 constant uint ISK_ROCK = 0u, ISK_WATER = 1u, ISK_VINE = 2u;
 // A coarse island column of water carries this leaf depth (generateCoarse; coverDepthL reads it back exactly).
 constant float ISLE_WATER_DEPTH = 63.0;
+// ...and one most of whose water is a stream's (whose column is rock under its bed), this one.
+constant float ISLE_STREAM_DEPTH = 62.0;
 
 // (underside, top, leaf) of island r over world column centre p; empty (top <= underside) outside it; leaf > 0 where a
 // canopy stands on the island's ground from leaf to the top. kind: ISK_*. s: the sample spacing (roots and vines hang on
@@ -1218,16 +1237,32 @@ static inline float3 isleSpan(IsleRec r, float2 p, uint seed, int s, thread uint
     float d = rr / max(e, 4.0);
     if (d >= 1.0) return float3(0);
     // A low dome of meadow, rolling on the broad ones, terraced as the lowland is: wide treads, short risers.
-    float top = r.A + 0.06 * R * (1.0 - d * d) + 1.2 * perlin2(p / 37.0, seed + 704u);
+    // Small ones are boulders: a rounder crown, a pointed keel, no beds.
+    float small = 1.0 - smoothstep(35.0, 55.0, R);
+    float top = r.A + mix(0.06, 0.15, small) * R * (1.0 - d * d) + 1.2 * perlin2(p / 37.0, seed + 704u);
     if (R > 120.0) top += 7.0 * fbm2(p / 90.0, 2, seed + 709u) * smoothstep(120.0, 250.0, R) * (1.0 - d * d);
+    int form = isleForm(R, h);
+    if (form == 1) top += isleCrag(R, h) * (1.0 - d) * (1.0 - d) * (0.7 + 0.3 * perlin2(p / 15.0, seed + 729u));
+    if (form == 2) {
+        float th1 = hashf(pcg(h + 32u)) * 6.2831853;
+        top -= isleTilt(R, h) * 0.5 * (1.0 + clamp(dot(q, float2(cos(th1), sin(th1))) / isleReach(R, h), -1.0, 1.0));
+    }
     float tl = floor(top / 5.0);
-    top = (tl + smoothstep(0.6, 0.95, top / 5.0 - tl)) * 5.0 - 3.0 * smoothstep(0.85, 1.0, d);
+    // The rim falls away by a varying step, from nothing to three, so no edge runs round the top at one inset.
+    top = (tl + smoothstep(0.6, 0.95, top / 5.0 - tl)) * 5.0
+        - 3.0 * smoothstep(0.8 + 0.12 * perlin2(p / 17.0, seed + 726u), 1.0, d) * saturate(0.5 + 1.2 * perlin2(p / 29.0, seed + 727u));
     // A rim of rock teeth on some.
     if (hashf(pcg(h + 13u)) < 0.3) top += 3.0 * ridged2(p / 7.0, 2, seed + 710u) * smoothstep(0.88, 0.97, d);
     top = floor(top + 0.5);
-    float t = pow(1.0 - d, 0.55);
+    // A spire: a cliff a third of its depth, then a long taper to a point.
+    float t = form == 1 ? 0.4 * pow(1.0 - d, 0.15) + 0.6 * pow(1.0 - d, 1.2) : pow(1.0 - d, mix(mix(0.35, 0.8, hashf(pcg(h + 34u))), 1.0, small));
+    if (form == 3) {
+        float th2 = hashf(pcg(h + 33u)) * 6.2831853;
+        t = pow(1.0 - length(ql - float2(cos(th2), sin(th2)) * 0.35 * R) / (max(e, 4.0) + 0.35 * R), 0.55);
+    }
     float rag = 0.6 + 0.4 * ridged2(p / (0.3 * R + 8.0), 2, seed + 705u);
-    float th = 5.0 + r.D * t * rag + 6.0 * t * perlin2(p / 6.0, seed + 706u);
+    // Crags a couple of beds deep at a few tens of voxels, so no bed runs on round the keel as a course.
+    float th = 5.0 + r.D * t * (rag + 0.14 * (ridged2(p / 23.0, 2, seed + 730u) - 0.5)) + 6.0 * t * perlin2(p / 6.0, seed + 706u);
     // Two or three drips: spires of rock hanging under a big keel.
     if (R > 150.0) {
         int n = 2 + int(pcg(h + 14u) % 2u);
@@ -1239,9 +1274,13 @@ static inline float3 isleSpan(IsleRec r, float2 p, uint seed, int s, thread uint
             th += r.D * 0.3 * f * f;
         }
     }
-    // The keel steps in beds of seven voxels, each bed's tread facing down: dark seams, not lit lines.
-    float hb = th / 7.0;
-    th = (floor(hb) + smoothstep(0.6, 1.0, fract(hb))) * 7.0;
+    // The keel steps in beds 3 to 13 deep, each tread facing down: dark seams, not lit lines.
+    float thw = th;
+    float b0 = floor(thw / 8.0);
+    float Bb = 8.0 * b0 + 5.0 * (hashf(pcg(h + uint(int(b0) + 4096))) - 0.5);
+    if (thw < Bb) { b0 -= 1.0; Bb = 8.0 * b0 + 5.0 * (hashf(pcg(h + uint(int(b0) + 4096))) - 0.5); }
+    float Bn = 8.0 * b0 + 8.0 + 5.0 * (hashf(pcg(h + uint(int(b0) + 4097))) - 0.5);
+    th = mix(Bb + smoothstep(0.6, 1.0, (thw - Bb) / (Bn - Bb)) * (Bn - Bb), th, small);
     float bot = floor(top - max(th, 4.0));
     // The stream that feeds a fall: a channel cut two deep, wandering in from the lip.
     float bank = 1e9;
@@ -1255,15 +1294,40 @@ static inline float3 isleSpan(IsleRec r, float2 p, uint seed, int s, thread uint
             if (bank < 0.0 && along < Ls - 2.0) { top -= 2.0; kind = ISK_WATER; }
         }
     }
-    if (s <= 2) {
-        // Roots hang in clumps under the outer keel, two columns wide.
-        uint rh = hash2i(int2(floor(p / 2.0)), seed + 707u);
+    if (s <= 2 && R >= 50.0) {
+        // Roots in clumps under the outer keel and vines in curtains from under the rim: tapering cones of columns on a
+        // jittered 5-voxel grid, the centre longest and a short collar round it, some roots forked, the vines finer and
+        // longer, their lengths drifting along a curtain.
         float clump = smoothstep(0.05, 0.35, perlin2(p / 19.0, seed + 711u)) * smoothstep(0.45, 0.9, d);
-        if (hashf(rh) < 0.07 * clump) bot -= floor(4.0 + 26.0 * pow(hashf(pcg(rh)), 2.0));
-        // Vines in curtains from under the rim, longer.
-        uint vh = hash2i(int2(floor(p / 2.0)), seed + 716u);
         float vc = smoothstep(0.25, 0.5, perlin2(p / 23.0, seed + 717u)) * smoothstep(0.86, 0.95, d);
-        if (kind == ISK_ROCK && hashf(vh) < 0.11 * vc) { bot -= floor(8.0 + 28.0 * pow(hashf(pcg(vh)), 1.8)); kind = ISK_VINE; }
+        if (clump > 0.0 || vc > 0.0) {
+            float vlen = 8.0 + 22.0 * saturate(0.5 + 0.9 * perlin2(p / 9.0, seed + 719u));
+            float dr = 0.0, dv = 0.0;
+            int2 g0 = int2(floor(p / 5.0));
+            for (int j = -1; j <= 1; j++)
+                for (int i = -1; i <= 1; i++) {
+                    int2 gc = g0 + int2(i, j);
+                    uint gh = hash2i(gc, seed + 707u);
+                    if (hashf(gh) < 0.45 * clump) {
+                        float2 c1 = (float2(gc) + 0.15 + 0.7 * float2(hashf(pcg(gh + 1u)), hashf(pcg(gh + 2u)))) * 5.0;
+                        float Lr = 5.0 + 20.0 * pow(hashf(pcg(gh + 3u)), 2.0), r0 = 1.2 + 1.4 * hashf(pcg(gh + 4u));
+                        dr = max(dr, Lr * pow(saturate(1.0 - length(p - c1) / r0), 1.6));
+                        if (hashf(pcg(gh + 5u)) < 0.4) {
+                            float an = hashf(pcg(gh + 6u)) * 6.2831853;
+                            float2 c2 = c1 + float2(cos(an), sin(an)) * 1.3 * r0;
+                            dr = max(dr, 0.55 * Lr * pow(saturate(1.0 - length(p - c2) / (0.7 * r0)), 1.6));
+                        }
+                    }
+                    uint vh = hash2i(gc, seed + 716u);
+                    if (hashf(vh) < 0.5 * vc) {
+                        float2 c1 = (float2(gc) + 0.15 + 0.7 * float2(hashf(pcg(vh + 1u)), hashf(pcg(vh + 2u)))) * 5.0;
+                        float r0 = 0.9 + 0.6 * hashf(pcg(vh + 4u));
+                        dv = max(dv, vlen * (0.6 + 0.4 * hashf(pcg(vh + 3u))) * pow(saturate(1.0 - length(p - c1) / r0), 1.3));
+                    }
+                }
+            if (kind == ISK_ROCK && dv >= 2.0 && dv > dr) { bot -= floor(dv); kind = ISK_VINE; }
+            else bot -= floor(dr);
+        }
     }
     float leaf = 0.0;
     if (kind == ISK_ROCK) {
@@ -1274,19 +1338,48 @@ static inline float3 isleSpan(IsleRec r, float2 p, uint seed, int s, thread uint
     return float3(bot, top, leaf);
 }
 
-// The fall off island r over world column centre p, if it is in one: a sheet two voxels thick (wider at the coarser
-// spacings s, up to level 2's) hanging from the lip, its foot frayed and rounded. (underside, top, 0) in sp.
+// How far out from its lip (lipD from the centre) a fall's foot lands (drop L), its whole sheet inside the island's
+// reach. Must match Islands.fallOut in Sources/Islands.swift.
+static inline float isleFallOut(float L, float reach, float lipD) { return clamp(min(0.09 * L, reach - 6.0 - lipD), 2.0, 24.0); }
+// The side a fall drifts to and its spray blows, by its lip. Must match Islands.fallSide.
+static inline float isleFallSide(float2 lip) { return (int(floor(lip.x + lip.y)) & 1) != 0 ? 1.0 : -1.0; }
+
+// Narrows [lo, hi] to the t where c0 + c1 t > 0.
+static inline void isleLin(float c0, float c1, thread float& lo, thread float& hi) {
+    if (c1 > 0.0) lo = max(lo, -c0 / c1);
+    else if (c1 < 0.0) hi = min(hi, -c0 / c1);
+    else if (c0 <= 0.0) hi = -1.0;
+}
+
+// The fall off island r over world column centre p, if it is in one: a sheet two voxels thick (as thick as the spacing
+// s further out, up to level 2's) arcing out from the lip, out 0.09 of its drop at its foot, narrowing as it falls and
+// drifting to one side, its foot frayed and rounded. (underside, top, foot) in sp.
 static inline bool isleFall(IsleRec r, float2 p, uint seed, int s, thread float3& sp) {
     if (r.f.w <= 0.0 || s > 4) return false;
     float2 u = float2(cos(r.fa.x), sin(r.fa.x));
     float2 q = p - r.f.xy;
-    float a = dot(q, u), b = dot(q, float2(-u.y, u.x));
-    float hw = max(r.fa.y, 0.5 * float(s) + 0.5);
-    if (a < -4.0 || a >= 0.5 + max(2.0, float(s)) || abs(b) >= hw) return false;
     float L = r.f.z - r.f.w;
-    float bb = abs(b) / hw;
-    float bot = r.f.w + L * 0.4 * bb * bb + L * 0.1 * (hashf(hash2i(int2(floor(p)), seed + 732u)) - 0.3);
-    sp = float3(floor(min(bot, r.f.z - 6.0)), r.f.z, 0.0);
+    float xo = isleFallOut(L, isleReach(r.R, r.h), length(r.f.xy - r.c));
+    float hT = 0.5 * max(2.0, float(s)) + 0.5;
+    float a = dot(q, u);
+    if (a <= -hT || a >= xo + hT) return false;
+    float side = isleFallSide(r.f.xy);
+    float b = dot(q, float2(-u.y, u.x)) * side;
+    float h0 = max(r.fa.y, 0.5 * float(s) + 0.5);
+    float h1 = max(0.0, min(0.3 * h0, h0 - (0.5 * float(s) + 0.5)));
+    float D = r.fa.y * mix(0.5, 1.0, hashf(pcg(r.h + 33u)));
+    if (abs(b) >= h0 + D) return false;
+    // Where the sheet's front, out xo sqrt(t) at drop t L, passes this column.
+    float lo = a - hT <= 0.0 ? 0.0 : (a - hT) * (a - hT) / (xo * xo);
+    float hi = a + hT >= xo ? 2.0 : (a + hT) * (a + hT) / (xo * xo);
+    // Within its half-width there, h0 - h1 t about its drift D t.
+    isleLin(h0 - b, D - h1, lo, hi);
+    isleLin(h0 + b, -(D + h1), lo, hi);
+    float bb = saturate(abs(b - D) / (h0 - h1));
+    hi = min(hi, 1.0 - 0.4 * bb * bb - 0.1 * (hashf(hash2i(int2(floor(p)), seed + 732u)) - 0.3));
+    if (hi <= lo) return false;
+    float bot = floor(r.f.z - L * hi), top = floor(r.f.z - L * lo + 0.5);
+    sp = float3(bot, max(top, bot + 1.0), r.f.w);
     return true;
 }
 
@@ -1324,7 +1417,7 @@ static inline Col islandColumn(Col col, int2 w, uint seed, int s, device const I
     uint kind;
     if (!isleAt(T, float2(w) + 0.5, seed, s, sp, kind)) return col;
     float G = col.h;
-    float ground = sp.z > 0.0 ? sp.z : sp.y;
+    float ground = kind == ISK_ROCK && sp.z > 0.0 ? sp.z : sp.y;
     // Sunk in a hill: nothing; resting on one: solid to its ground.
     if (ground <= G + 3.0) return col;
     if (sp.x <= G + 3.0) { col.h = ground; return col; }
@@ -1338,9 +1431,9 @@ static inline Col islandColumn(Col col, int2 w, uint seed, int s, device const I
 }
 
 // The map's alpha for an island column from heights to planting, which turns it into its ST_ISLE word: the canopy's
-// first leaf, or -1 a stream or fall, -2 a vine; 0 elsewhere.
+// first leaf; -2 a vine; -4 less a fall's foot (0 a stream's); 0 elsewhere.
 static inline float isleAlpha(Col c) {
-    return !c.island ? 0.0 : c.isk == ISK_WATER ? -1.0 : c.isk == ISK_VINE ? -2.0 : c.leaf;
+    return !c.island ? 0.0 : c.isk == ISK_WATER ? -4.0 - c.leaf : c.isk == ISK_VINE ? -2.0 : c.leaf;
 }
 
 // An island's rock: dark basalt and umber in soft courses that drift sideways, so no bed reads as a line across a keel.
@@ -1348,6 +1441,10 @@ static inline float3 isleRock(float y, float2 w, uint seed, float fp) {
     float yd = y + 4.0 * perlin2(w / 70.0, seed + 713u);
     float k = saturate(0.5 + 0.7 * perlin2(float2(yd / 11.0, 0.37) + w / 500.0, seed + 714u));
     float3 c = mix(float3(0.12, 0.112, 0.125), float3(0.19, 0.14, 0.10), smoothstep(0.25, 0.75, k));
+    // From one island to the next: warmer ochre on some, cooler grey on others.
+    float hue = perlin2(w / 900.0, seed + 725u);
+    c = mix(c, c * float3(1.3, 1.12, 0.86), saturate(2.5 * hue));
+    c = mix(c, dot(c, float3(0.33)) * float3(0.95, 1.0, 1.1), saturate(-2.5 * hue));
     if (fp < 3.0) c *= 1.0 + 0.14 * perlin2(float2(w.x + w.y, yd) / 19.0, seed + 715u) * (1.0 - smoothstep(1.0, 3.0, fp));
     return c;
 }
@@ -1379,7 +1476,7 @@ static float3 isleGlow(int3 v, int3 n, float2 wq, float wy, float gapTop, bool r
     if (root) {
         float tip = 1.0 - smoothstep(1.0, 3.5, wy - gapTop);
         if (tip <= 0.0) return 0.0;
-        uint hr = hash2i(v.xz >> 1, seed + 751u);
+        uint hr = hash2i(v.xz, seed + 751u);
         if (hashf(hr) > 0.55) return 0.0;
         float pulse = 0.7 + 0.3 * sin(time * 0.314 + 6.283 * hashf(pcg(hr)));
         float3 hue = pinkHere && hashf(pcg(hr + 1u)) < 0.5 ? ISLE_GLOW[2] : hashf(pcg(hr + 2u)) < 0.4 ? ISLE_GLOW[0] : ISLE_GLOW[1];
@@ -1405,6 +1502,8 @@ static float3 isleGlow(int3 v, int3 n, float2 wq, float wy, float gapTop, bool r
 // foot (zero: none); mb: its mist bank's bounding sphere (radius 0: none), mp its puffs (centre, radius). World coordinates.
 constant int ISLE_TABLE = 16;
 constant int ISLE_MIST_PUFFS = 6;
+// The mist's depth where its bodies begin (isleMist): banks and plumes that cannot reach most of it alone are not worked out.
+constant float ISLE_MIST_TAU0 = 0.5;
 struct IsleShade { float4 a; float4 b; float4 c; float4 mb; float4 mp[ISLE_MIST_PUFFS]; };
 struct IsleTable { int4 n; IsleShade r[ISLE_TABLE]; };
 
@@ -1767,7 +1866,7 @@ kernel void placeIslands(device IsleRec* out [[buffer(0)]],
         if (massif) {
             float2 bc = ISLE_FIELD_C + float2(600.0, 900.0);
             if (all(int2(floor(bc / ISLE_MCELL)) == cell)) {
-                r.c = bc; r.R = 560.0; r.A = 520.0; r.D = 380.0; r.h = 0x5bd1e995u;
+                r.c = bc; r.R = 560.0; r.A = 520.0; r.h = 0x5bd1e995u; r.D = 380.0 - isleTilt(r.R, r.h);
             }
         } else {
             uint h = hash2i(cell, seed + 700u);
@@ -1777,10 +1876,10 @@ kernel void placeIslands(device IsleRec* out [[buffer(0)]],
                 r.c = c; r.h = h;
                 r.R = 18.0 + 300.0 * u * u * u;
                 r.A = floor(190.0 + 420.0 * hashf(pcg(h + 4u)));
-                r.D = min(r.R * mix(0.7, 1.4, hashf(pcg(h + 5u))) + 10.0, r.A - 120.0);
+                r.D = min(isleDepth(r.R, h), r.A - 120.0 - isleTilt(r.R, h));
             }
         }
-        r.K = r.A + 0.06 * r.R - 8.5 - (r.R > 150.0 ? 1.3 : 1.0) * r.D - 18.0;
+        r.K = r.A + 0.06 * r.R - 8.5 - (r.R > 150.0 ? 1.3 : 1.0) * r.D - 18.0 - isleTilt(r.R, r.h);
         if (r.R > 0.0) isleFallPlace(r, 200.0, seed);
         out[slot] = r;
         return;
@@ -1808,9 +1907,10 @@ kernel void placeIslands(device IsleRec* out [[buffer(0)]],
         float drip = R > 150.0 ? 1.3 : 1.0;
         float A = floor(B + rise);
         float topC = A + 0.06 * R - 8.5;
-        float D = min(R * mix(0.7, 1.4, hashf(pcg(h + 5u))) + 10.0, (topC - 18.0 - B - (R > 150.0 ? 100.0 : 60.0)) / drip);
+        float tilt = isleTilt(R, h);
+        float D = min(isleDepth(R, h), (topC - 18.0 - B - (R > 150.0 ? 100.0 : 60.0) - tilt) / drip);
         r.c = c; r.R = R; r.A = A; r.D = D; r.B = B; r.h = h;
-        r.K = topC - drip * D - 18.0;
+        r.K = topC - drip * D - 18.0 - tilt;
         isleFallPlace(r, B, seed);
     }
     out[slot] = r;
@@ -2517,7 +2617,7 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
     if (gid.x >= n || gid.y >= n) return;
     float4 col = src.read(gid);
     if (col.b > col.g && (gapFlags(gx.read(gid)) & GAP_ISLAND) != 0u) {
-        if (col.a != 0.0) st.write(uint4(ST_ISLE | (col.a == -1.0 ? ST_ISLE_WATER : col.a == -2.0 ? ST_ISLE_VINE : uint(col.a))), gid);
+        if (col.a != 0.0) st.write(uint4(ST_ISLE | (col.a <= -4.0 ? ST_ISLE_WATER | uint(-4.0 - col.a) : col.a == -2.0 ? ST_ISLE_VINE : uint(col.a))), gid);
         dst.write(float4(col.rgb, 0.0), gid);
         return;
     }
@@ -4445,12 +4545,14 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
     bool isl = c0.island || c1.island || c2.island || c3.island;
     float2 vg;
     if (isl) {
-        float g0 = c0.leaf > 0.0 ? c0.leaf : c0.h, g1 = c1.leaf > 0.0 ? c1.leaf : c1.h;
-        float g2 = c2.leaf > 0.0 ? c2.leaf : c2.h, g3 = c3.leaf > 0.0 ? c3.leaf : c3.h;
+        float g0 = c0.isk == ISK_ROCK && c0.leaf > 0.0 ? c0.leaf : c0.h, g1 = c1.isk == ISK_ROCK && c1.leaf > 0.0 ? c1.leaf : c1.h;
+        float g2 = c2.isk == ISK_ROCK && c2.leaf > 0.0 ? c2.leaf : c2.h, g3 = c3.isk == ISK_ROCK && c3.leaf > 0.0 ? c3.leaf : c3.h;
         float dv = H - coarseCombine(g0, g1, g2, g3, float(s));
         float nw = float(c0.isk == ISK_WATER) + float(c1.isk == ISK_WATER) + float(c2.isk == ISK_WATER) + float(c3.isk == ISK_WATER);
         float ni = float(c0.island) + float(c1.island) + float(c2.island) + float(c3.island);
-        vg = float2(H, nw * 2.0 > ni ? ISLE_WATER_DEPTH : clamp(dv, 0.0, 40.0));
+        float nf = float(c0.isk == ISK_WATER && c0.leaf > 0.0) + float(c1.isk == ISK_WATER && c1.leaf > 0.0)
+                 + float(c2.isk == ISK_WATER && c2.leaf > 0.0) + float(c3.isk == ISK_WATER && c3.leaf > 0.0);
+        vg = float2(H, nw * 2.0 > ni ? (nf * 2.0 >= nw ? ISLE_WATER_DEPTH : ISLE_STREAM_DEPTH) : clamp(dv, 0.0, 40.0));
     } else vg = coarseVeg(cw, k, float4(c0.h, c1.h, c2.h, c3.h), H, seed);
     depth = vg.y;
     float Hv = vg.x;
@@ -5570,13 +5672,15 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     // Falls and streams run out to level 2 and the 1-voxel map holds the rest, all well inside the islands' pipeline
     // variant's reach: compiled out of the others.
     uint isw = SCENE_ISLES && isleBody && k == 0 ? st.read(uint2(clamp(v.xz, int2(0), int2(tr.size - 1)))).r : 0u;
-    bool isleWater = SCENE_ISLES && isleBody && (k == 0 ? (isw & ST_ISLE_WATER) != 0u : cdK.y == ISLE_WATER_DEPTH);
+    bool isleWaterCol = SCENE_ISLES && isleBody && (k == 0 ? (isw & ST_ISLE_WATER) != 0u : cdK.y == ISLE_WATER_DEPTH || cdK.y == ISLE_STREAM_DEPTH);
+    // A stream's water is its bed alone; the rock under it is the island's.
+    bool isleWater = isleWaterCol && !(float(v.y) < col.x - 3.0 && (k == 0 ? (isw & 2047u) == 0u : cdK.y == ISLE_STREAM_DEPTH));
     float isleLo = (isw & (ST_ISLE | ST_ISLE_WATER | ST_ISLE_VINE)) == ST_ISLE ? float(isw & 2047u) : col.x;
     bool isleLeaf = k == 0 && isleBody && float(v.y) >= isleLo;
     // A coarse forested column's top is its leaves (coarseVeg).
     float vegLo = col.x - cdK.y;
-    bool vegLeaf = k > 0 && !giant && !isleWater && cdK.y > 0.0 && float(v.y) >= vegLo;
-    if (k > 0 && isleBody && !isleWater) isleLo = vegLo;
+    bool vegLeaf = k > 0 && !giant && !isleWaterCol && cdK.y > 0.0 && float(v.y) >= vegLo;
+    if (k > 0 && isleBody && !isleWaterCol) isleLo = vegLo;
     // Bark and leaves: the ground's own tones (rock strata, painted beds) would be worked out only to be replaced.
     bool vegVox = gWood || vegLeaf || isleLeaf || (tree && float(v.y) >= col.y);
     float H = giant ? (gWood ? col.x : gLoc) : tree ? col.y : built ? (col.z > col.y ? col.y : base) : col.x;
@@ -5616,7 +5720,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         if (isleCol && vy >= col.z) {
             float hang = max(max(a0.a == 0.0 && a0.b > a0.g ? a0.b : 0.0, a1.a == 0.0 && a1.b > a1.g ? a1.b : 0.0),
                              max(a2.a == 0.0 && a2.b > a2.g ? a2.b : 0.0, a3.a == 0.0 && a3.b > a3.g ? a3.b : 0.0));
-            isleRoot = vy < hang - 8.0;
+            isleRoot = vy < hang - ((isw & ST_ISLE_VINE) != 0u ? 3.0 : 8.0);
         }
         // Beside a multi-run column (a giant's, an emergent's) the ground does not see its top as a wall: it would
         // light and paint a ring round every crown's footprint as a cliff foot.
@@ -5833,19 +5937,21 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         s.tread = s.albedo;
         s.face = s.albedo;
     }
-    // Roots and vines under an island: umber and olive, a clump at a time.
+    // Roots and vines under an island: umber and olive, each its own tone, darker toward the tip.
     if (isleRoot) {
-        float rk = hashf(hash2i(v.xz >> 1, seed + 712u));
-        s.albedo = (isw & ST_ISLE_VINE) != 0u ? mix(float3(0.045, 0.075, 0.03), float3(0.07, 0.085, 0.035), rk) * (0.85 + 0.3 * hashf(hash2i(int2(v.x, v.y), seed + 718u)))
-                                             : mix(float3(0.075, 0.058, 0.04), float3(0.058, 0.07, 0.035), rk);
+        float rk = hashf(hash2i(v.xz, seed + 712u));
+        s.albedo = ((isw & ST_ISLE_VINE) != 0u ? mix(float3(0.045, 0.075, 0.03), float3(0.07, 0.085, 0.035), rk) * (0.85 + 0.3 * hashf(hash2i(int2(v.x, v.y), seed + 718u)))
+                                              : mix(float3(0.075, 0.058, 0.04), float3(0.058, 0.07, 0.035), rk))
+                 * mix(0.7, 1.0, smoothstep(0.0, 10.0, wy - col.z));
         s.tread = s.albedo;
         s.face = s.albedo;
     }
     // Water: a stream's bed, ripples running out to the lip; a fall's sheet, foam streaming down it, whiter in the spray
     // at its foot.
     if (isleWater) {
-        float span = max(col.x - col.z, 1.0);
-        float foot = 1.0 - saturate((wy - col.z) / min(span, 45.0));
+        // Whiter toward a fall's foot (its height in the word; a stream's is 0), evenly so on the coarser rings.
+        float fy = float(isw & 2047u);
+        float foot = k > 0 || fy <= 0.0 ? 0.3 : 1.0 - saturate((wy - fy) / 45.0);
         float fine = 1.0 - smoothstep(1.0, 3.0, fpA);
         if (n.y > 0) {
             float rip = fine > 0.0 ? perlin2(float2(wq.x + wq.y, wq.x - wq.y) / 2.5 + float2(time * 1.3, 0.0), seed + 734u) * fine : 0.0;
@@ -5860,7 +5966,8 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         s.tread = s.albedo;
         s.face = s.albedo;
     }
-    if (k == 0 && isleBody) s.isle = float2(float((isleRoot ? 1 : 0) | (isleWater ? 2 : 0) | (float(v.y) < isleLo - 6.0 ? 4 : 0) | 8), col.z);
+    if (k == 0 && isleBody) s.isle = float2(float((isleRoot ? 1 : 0) | (isleWater ? 2 : 0) | (float(v.y) < isleLo - 6.0 ? 4 : 0) | 8),
+                                            isleWater && (isw & 2047u) != 0u ? float(isw & 2047u) : col.z);
     if ((tree && float(v.y) >= col4.a) || vegLeaf || isleLeaf) {
         float leafLo = vegLeaf ? vegLo : isleLeaf ? isleLo : col4.a;
         // Leaves: deep, low-chroma greens that drift slowly across a grove; conifers cooler and darker.
@@ -6972,12 +7079,15 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     float wt = smoothstep(0.33, 0.6, fp);
     // Structures keep their own planes: a column-difference normal would tilt a house's edge columns.
     float wn = (built ? 0.0 : s.mat == 0 && h.normal.y != 0 ? wt : wf) * (1.0 - ov);
+    // An island's top sees the lowland past its rim no lower than a step down: that drop would turn every tread within
+    // the smoothing's reach of the rim outward, a lit ring at one inset round the top.
+    float gFloor = s.gy >= 1e8 && h.normal.y > 0 ? s.H - 6.0 : -1e9;
     if (s.mat == 0 && wt > 0.0 && s.level < 1.0 && shadows != 2) {
         // Side faces take the wall's direction over several columns: a single column's jog in a wall would otherwise
         // turn a narrow face to the light and draw a pale dash down the wall.
         float R = max(max(h.normal.y != 0 ? 2.0 : 6.0, 1.5 * fp), cs);
-        float2 grad = float2(groundSmoothL(x.tr, k, p.xz + float2(R, 0), s.gy) - groundSmoothL(x.tr, k, p.xz - float2(R, 0), s.gy),
-                             groundSmoothL(x.tr, k, p.xz + float2(0, R), s.gy) - groundSmoothL(x.tr, k, p.xz - float2(0, R), s.gy)) / (2.0 * R);
+        float2 grad = float2(max(groundSmoothL(x.tr, k, p.xz + float2(R, 0), s.gy), gFloor) - max(groundSmoothL(x.tr, k, p.xz - float2(R, 0), s.gy), gFloor),
+                             max(groundSmoothL(x.tr, k, p.xz + float2(0, R), s.gy), gFloor) - max(groundSmoothL(x.tr, k, p.xz - float2(0, R), s.gy), gFloor)) / (2.0 * R);
         float3 g = normalize(float3(-grad.x, 1.0, -grad.y));
         nS = h.normal.y != 0 ? g : normalize(mix(nS, g, wt));
     }
@@ -7015,8 +7125,8 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // turn each face of a jogging wall its own way.
     if (s.mat == 0 && wf > 0.0 && s.H > SEA + 20.0 && shadows != 2 && !planar) {
         float R2 = max(16.0, 2.0 * cs);
-        float2 g2 = float2(groundSmoothL(x.tr, k, p.xz + float2(R2, 0), s.gy) - groundSmoothL(x.tr, k, p.xz - float2(R2, 0), s.gy),
-                           groundSmoothL(x.tr, k, p.xz + float2(0, R2), s.gy) - groundSmoothL(x.tr, k, p.xz - float2(0, R2), s.gy)) / (2.0 * R2);
+        float2 g2 = float2(max(groundSmoothL(x.tr, k, p.xz + float2(R2, 0), s.gy), gFloor) - max(groundSmoothL(x.tr, k, p.xz - float2(R2, 0), s.gy), gFloor),
+                           max(groundSmoothL(x.tr, k, p.xz + float2(0, R2), s.gy), gFloor) - max(groundSmoothL(x.tr, k, p.xz - float2(0, R2), s.gy), gFloor)) / (2.0 * R2);
         sus = smoothstep(0.6, 1.1, length(g2)) * (1.0 - ov);
         if (h.normal.y == 0) keep = max(keep, sus);
         // Treads and risers alike light as the face they make up, or every tread is a lit line across it.
@@ -7106,7 +7216,10 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // jump between reaching past the roof's edge and not, striping the wall.
     float2 svAt = planar ? p.xz + s.nrm.xz * 1.5 : mix((float2(h.voxel.xz + h.normal.xz) + 0.5) * cs, p.xz, max(wf2, ov));
     float svY = wf2 > 0.0 ? mix(p.y, groundSmoothL(x.tr, k, p.xz, s.gy), wf2) : p.y;
-    float sv = x.prof & 16 || roofW >= 1.0 || s.isleUnder ? 1.0 : skyVisibility(x.tr, k, svAt, svY, lite || fp > 5.0 ? 2 : fp > 2.0 ? 1 : 0);
+    // Far off, an island's flanks and keel take the open sky and lowland round and under it: its own disc, read as a
+    // shelter's roof, would make every distant keel a black cut-out.
+    float svIsle = s.gy >= 1e8 ? smoothstep(0.8, 2.5, fp) : 0.0;
+    float sv = x.prof & 16 || roofW >= 1.0 || s.isleUnder || svIsle >= 1.0 ? 1.0 : mix(skyVisibility(x.tr, k, svAt, svY, lite || fp > 5.0 ? 2 : fp > 2.0 ? 1 : 0), 1.0, svIsle);
     // Under a roof the sky comes only through the mouth, an even share well under open shade's: the visibility samples
     // only six voxels out, so in a shelter it reads the roof all round and varies column by column with the back wall's
     // jogs, striping it.
@@ -7284,6 +7397,14 @@ static inline float mistLumps(thread const Ctx& x, float3 pm, float sz, float t)
 // plume a fall spills into: in-scatter in front of whatever the ray reaches by tEnd, drawn as opaque bodies with soft,
 // lumpy edges, never a thin veil over the land (which would read as terrain gone translucent). Lit as the cloud sheet
 // is, in the islands' shade. (colour, opacity); faded out (by the table) before the islands' pipeline variant turns off.
+// Whether o + d t meets the ellipsoid (centre c, radii r) before tEnd.
+static inline bool isleMistBound(float3 o, float3 d, float tEnd, float3 c, float3 r) {
+    float3 A = (o - c) / r, B = d / r;
+    float a = dot(B, B), b = dot(A, B), cc = dot(A, A) - 1.0;
+    float disc = b * b - a * cc;
+    return disc > 0.0 && (cc < 0.0 || (b < 0.0 && (-b - sqrt(disc)) < tEnd * a));
+}
+
 static float4 isleMist(thread const Ctx& x, float3 o, float3 d, float tEnd) {
     int n = min(x.isles->n.x, ISLE_TABLE);
     float3 og = float3(float(x.origin.x), 0.0, float(x.origin.y));
@@ -7292,10 +7413,12 @@ static float4 isleMist(thread const Ctx& x, float3 o, float3 d, float tEnd) {
         constant IsleShade& s = x.isles->r[i];
         float fade = s.b.w;
         if (fade <= 0.0) continue;
-        if (s.mb.w > 0.0) {
+        // A bank lies in a flat disc about its ring (its puffs' heights and depths, Islands.table).
+        if (s.mb.w > 0.0 && isleMistBound(o, d, tEnd, s.mb.xyz - og,
+                                          float3(s.mb.w, 0.08 * (s.b.y - s.b.z) + 0.28 * (0.44 * s.b.x + 15.0) + 2.0, s.mb.w))) {
             float3 oc = o - (s.mb.xyz - og);
-            float bb = dot(oc, d), cb = dot(oc, oc) - s.mb.w * s.mb.w;
-            if (bb * bb - cb > 0.0 && (cb < 0.0 || bb < 0.0)) {
+            float bb = dot(oc, d);
+            {
                 float3 pm = o - d * bb;
                 float tr = 0.0, hr = 0.0;
                 for (int j = 0; j < ISLE_MIST_PUFFS; j++) {
@@ -7306,7 +7429,7 @@ static float4 isleMist(thread const Ctx& x, float3 o, float3 d, float tEnd) {
                     tr += t;
                     hr += saturate((pm.y - pc.y) / (0.28 * m.w) * 0.5 + 0.5) * t;
                 }
-                if (tr > 0.0) {
+                if (tr * fade > ISLE_MIST_TAU0 * 0.8) {
                     float k = mistLumps(x, pm, 0.37 * s.b.x + 15.0, -bb) * fade;
                     tau += tr * k;
                     hw += hr * k;
@@ -7315,23 +7438,23 @@ static float4 isleMist(thread const Ctx& x, float3 o, float3 d, float tEnd) {
             }
         }
         if (s.c.w > 0.0) {
-            // The plume: spray billowing out round the fall's foot in three puffs, never down to the ground.
-            float2 u = normalize(s.c.xy - s.a.xy);
+            // The plume: spray wrapping the sheet's lower part and breaking away from its foot, out and downwind, each
+            // puff flatter and smaller than the last, so it thins into the air instead of standing on the land.
+            float2 u = normalize(s.c.xy - s.a.xy), v = float2(-u.y, u.x);
             float L = s.c.z - s.c.w;
-            float rw = 8.0 + 0.03 * s.b.x;
-            float3 lip = float3(s.c.x, s.c.w, s.c.y) - og;
-            float3 oc = o - (lip - float3(0.0, 0.05 * L, 0.0));
-            float Rb = 0.45 * L + 2.0 * rw + 6.0;
-            float bb = dot(oc, d), cb = dot(oc, oc) - Rb * Rb;
-            if (bb * bb - cb > 0.0 && (cb < 0.0 || bb < 0.0)) {
-                float tp = 0.0;
-                for (int j = 0; j < 3; j++) {
-                    float fj = float(j);
-                    float3 pc = lip + float3(u.x * (3.0 + 3.0 * fj), L * (0.18 - 0.16 * fj), u.y * (3.0 + 3.0 * fj));
-                    float r = rw * (1.0 + 0.45 * fj);
-                    tp += mistPuff(o, d, tEnd, pc, float3(r, L * (0.3 - 0.07 * fj), r), 1.3 / r);
-                }
-                if (tp > 0.0) {
+            float rw = 5.0 + 0.012 * s.b.x;
+            float xo = isleFallOut(L, s.a.z, length(s.c.xy - s.a.xy));
+            float3 foot = float3(s.c.x + u.x * xo, s.c.w, s.c.y + u.y * xo) - og;
+            float3 pcen = foot + float3(u.x * 0.6 * rw, 0.06 * L, u.y * 0.6 * rw);
+            float3 oc = o - pcen;
+            float bb = dot(oc, d);
+            if (isleMistBound(o, d, tEnd, pcen, float3(2.6 * rw + 2.0, 0.34 * L + 2.0, 2.6 * rw + 2.0))) {
+                float side = isleFallSide(s.c.xy);
+                float tp = mistPuff(o, d, tEnd, foot + float3(-0.3 * rw * u.x, 0.2 * L, -0.3 * rw * u.y), float3(1.1 * rw, 0.2 * L, 1.1 * rw), 1.2 / rw)
+                         + mistPuff(o, d, tEnd, foot + float3(0.6 * rw * u.x, 0.04 * L, 0.6 * rw * u.y), float3(1.6 * rw, max(0.1 * L, rw), 1.6 * rw), 0.8 / rw)
+                         + mistPuff(o, d, tEnd, foot + float3((1.6 * u.x + side * v.x) * rw, -0.02 * L, (1.6 * u.y + side * v.y) * rw),
+                                    float3(1.1 * rw, 0.07 * L, 1.1 * rw), 1.2 / rw);
+                if (tp * fade > ISLE_MIST_TAU0 * 0.8) {
                     float k = mistLumps(x, o - d * bb, 1.45 * rw, -bb) * fade;
                     tau += tp * k;
                     plume += tp * k;
@@ -7341,9 +7464,8 @@ static float4 isleMist(thread const Ctx& x, float3 o, float3 d, float tEnd) {
             }
         }
     }
-    if (tau <= 0.0) return 0.0;
-    // Thinner under the moon, whose light it would otherwise hang in front of the dark rock as a pale veil.
-    float a = smoothstep(0.1, 0.75, 1.0 - exp(-tau)) * (1.0 - 0.35 * x.L.night);
+    // Opaque where it is drawn: partial cover lives only in a thin shell at a body's edge.
+    float a = smoothstep(ISLE_MIST_TAU0, ISLE_MIST_TAU0 + 0.2, tau);
     if (a <= 0.0) return 0.0;
     float h01 = hw / tau;
     float2 dh = normalize(d.xz + 1e-5), sh2 = normalize(x.L.sun.xz + 1e-5);
@@ -7835,6 +7957,10 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         if (bh.t < tFront) {
             float3 bc = shadeBird(x, o + d * bh.t, bh);
             if (f.misc2.z != 2) bc = applyFog(x, bc, o, d, bh.t);
+            if (SCENE_ISLES && x.isles->n.x > 0 && !(x.prof & 128)) {
+                float4 m = isleMist(x, o, d, bh.t);
+                bc = mix(bc, m.rgb, m.a);
+            }
             bc = hazeAndSmoke(x, bc, sites, lampPos, lampState, refs, f.refs, o, d, bh.t);
             return float4(bc, -bh.t);
         }

@@ -1936,11 +1936,12 @@ enum Snapshot {
                 }
                 if near < 25 { isleScrape += 1; print(String(format: "flight island scrape t=%d pos=(%.0f,%.0f) y=%.0f clearance %.0f", i, p.x, p.z, p.y, near)) }
                 do {
-                    let side = SIMD2(cos(r.camera.yaw), -sin(r.camera.yaw))
+                    // Between two islands: one abreast on each side (its reach spans the camera along the track), within 400 of its rock.
+                    let side = SIMD2(cos(r.camera.yaw), -sin(r.camera.yaw)), fwd = SIMD2(sin(r.camera.yaw), cos(r.camera.yaw))
                     var l = false, rt = false
                     for s in r.world.isles where s.radius > 40 {
-                        let v = s.pos - SIMD2(p.x, p.z), across = simd_dot(v, side)
-                        if simd_length(v) < s.reach + 400, abs(across) > s.reach * 0.5 { if across > 0 { rt = true } else { l = true } }
+                        let v = s.pos - SIMD2(p.x, p.z), across = simd_dot(v, side), along = simd_dot(v, fwd)
+                        if abs(along) < s.reach, abs(across) > s.reach * 0.5, abs(across) < s.reach + 400 { if across > 0 { rt = true } else { l = true } }
                     }
                     if l && rt { isleBetween += 1 }
                     let circ = r.wildlife.flocks.filter { $0.orbit != nil && !$0.leaving }

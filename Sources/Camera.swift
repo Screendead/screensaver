@@ -332,9 +332,9 @@ final class FlightCamera {
             // Clear of the island's rock by its reach either side, or under it where it is passable.
             let gap = abs(across) - s.reach
             if gap > 0 { if across > 0 { right = min(right, gap) } else { left = min(left, gap) } }
-            else if s.passable && abs(across) < 0.5 * s.reach { under = max(under, 0.5) }
+            else if s.passable && abs(across) < 0.5 * s.reach { under = max(under, 0.7) }
         }
-        let between = left < 350 && right < 350 ? 0.6 * (1 - max(left, right) / 350) + 0.2 : 0
+        let between = left < 600 && right < 600 ? 0.6 * (1 - max(left, right) / 600) + 0.3 : 0
         return best + max(between, under)
     }
 
