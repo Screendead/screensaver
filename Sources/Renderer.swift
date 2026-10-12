@@ -1856,7 +1856,8 @@ enum Snapshot {
             print("islands on the table: \(list.count) (massifs \(list.filter(\.massif).count))")
             for s in list.prefix(n) {
                 print(String(format: "island %.0f,%.0f dist %.0f R %.0f reach %.0f top %.0f keel %.0f base %.0f%@", s.pos.x, s.pos.y,
-                             simd_length(s.pos - here), s.radius, s.reach, s.top, s.keel, s.base, s.massif ? " massif" : ""))
+                             simd_length(s.pos - here), s.radius, s.reach, s.top, s.keel, s.base, (s.massif ? " massif" : "")
+                             + (s.fall.map { String(format: " fall lip %.0f,%.0f top %.0f foot %.0f", $0.x, $0.y, $0.z, $0.w) } ?? "")))
             }
         }
         // VR_SHOW=kind,distance,height,bearing[,rank]: hold the camera on the rank-th nearest site of a kind

@@ -11,7 +11,8 @@ struct IsleRec {
     var b: Float = 0
     var k: Float = 0
     var h: UInt32 = 0
-    var pad = SIMD2<Float>()
+    var fa = SIMD2<Float>()
+    var f = SIMD4<Float>()
 }
 
 // A floating island as the camera, the birds and the shading see it, in world coordinates: nothing of it lies further
@@ -26,19 +27,21 @@ struct IslandInfo {
     var base: Double
     var hash: UInt32
     var massif: Bool
+    // Its waterfall: the lip's centre (x, z), the water's top there and the fall's foot.
+    var fall: SIMD4<Double>?
 
     // Room under the keel for the flight to pass beneath.
     var passable: Bool { keel - base >= 90 }
 }
 
 enum Islands {
-    // Must match ISLE_WIN, ISLE_MWIN and ISLE_SLOTS (and IsleRec's 48 bytes) in Shaders/Saver.metal.
+    // Must match ISLE_WIN, ISLE_MWIN and ISLE_SLOTS (and IsleRec's 64 bytes) in Shaders/Saver.metal.
     static let win = 60, mwin = 13
     static let slots = win * win + mwin * mwin
-    static let recordSize = 48
+    static let recordSize = 64
     // Must match ISLE_TABLE and IsleShade in Shaders/Saver.metal: the islands the shading reads, nearest the camera first.
     static let tableSize = 16
-    static let tableBytes = 16 + tableSize * 32
+    static let tableBytes = 16 + tableSize * 48
     // VR_ISLE_FIELD=1: the test field round (-3500, -2500) in place of island country; 2: no islands (tests).
     static let field = Int32(ProcessInfo.processInfo.environment["VR_ISLE_FIELD"] ?? "") ?? 0
 
@@ -54,13 +57,15 @@ enum Islands {
             guard r.r > 0, r.cell.x != Int32.min else { continue }
             let R = Double(r.r)
             out.append(IslandInfo(pos: SIMD2(Double(r.c.x), Double(r.c.y)), radius: R, reach: stretch(R, r.h) * (1.45 * R + 8),
-                                  top: Double(r.a) + 0.06 * R + 10, keel: Double(r.k), base: Double(r.b), hash: r.h, massif: i >= win * win))
+                                  top: Double(r.a) + 0.06 * R + 10, keel: Double(r.k), base: Double(r.b), hash: r.h, massif: i >= win * win,
+                                  fall: r.f.w > 0 ? SIMD4(Double(r.f.x), Double(r.f.y), Double(r.f.z), Double(r.f.w)) : nil))
         }
         return out
     }
 
-    // The shading table: the islands nearest p within reach of the view (count, then per island centre xz, reach,
-    // underside's mean height and radius), as bytes for setFragmentBytes.
+    // The shading table: the islands nearest p within reach of the view (count, then per island centre xz, reach and
+    // underside's mean height; radius, top, keel and the hash's low bits; its fall's lip xz, top and foot, or zeros), as
+    // bytes for setFragmentBytes.
     static func table(_ list: [IslandInfo], near p: SIMD2<Double>, within d: Double) -> [UInt8] {
         let near = list.filter { simd_length($0.pos - p) < d + $0.reach }.sorted { simd_length($0.pos - p) < simd_length($1.pos - p) }
         var bytes = [UInt8](repeating: 0, count: tableBytes)
@@ -69,9 +74,11 @@ enum Islands {
             b.storeBytes(of: Int32(n), as: Int32.self)
             for i in 0..<n {
                 let s = near[i]
-                let o = 16 + i * 32
+                let o = 16 + i * 48
                 b.storeBytes(of: SIMD4<Float>(Float(s.pos.x), Float(s.pos.y), Float(s.reach), Float(0.5 * (s.keel + s.top))), toByteOffset: o, as: SIMD4<Float>.self)
-                b.storeBytes(of: SIMD4<Float>(Float(s.radius), Float(s.top), Float(s.keel), 0), toByteOffset: o + 16, as: SIMD4<Float>.self)
+                b.storeBytes(of: SIMD4<Float>(Float(s.radius), Float(s.top), Float(s.keel), Float(s.hash & 0xffff)), toByteOffset: o + 16, as: SIMD4<Float>.self)
+                let f = s.fall.map { SIMD4<Float>(Float($0.x), Float($0.y), Float($0.z), Float($0.w)) } ?? SIMD4<Float>()
+                b.storeBytes(of: f, toByteOffset: o + 32, as: SIMD4<Float>.self)
             }
         }
         return bytes
