@@ -91,6 +91,16 @@ final class GPU {
         pipeline("taa") { fullscreen(library.makeFunction(name: "taaFragment"), .rgba16Float) }
     }
 
+    func bio() -> MTLRenderPipelineState? {
+        pipeline("bio") { bioDescriptor() }
+    }
+
+    private func bioDescriptor() -> MTLRenderPipelineDescriptor {
+        let d = fullscreen(library.makeFunction(name: "bioFragment"), .rgba16Float)
+        d.vertexFunction = library.makeFunction(name: "bioVertex")
+        return d
+    }
+
     func post(_ format: MTLPixelFormat, dither: Bool) -> MTLRenderPipelineState? {
         pipeline(GPU.postKey(format, dither)) { postDescriptor(format, dither) }
     }
@@ -111,6 +121,7 @@ final class GPU {
         var kernels: [String: MTLComputePipelineState] = [:], renders: [String: MTLRenderPipelineState] = [:]
         let functions = library.functionNames.filter { compute[$0] == nil }.compactMap { library.makeFunction(name: $0) }
         var descriptors = ["taa": fullscreen(library.makeFunction(name: "taaFragment"), .rgba16Float),
+                           "bio": bioDescriptor(),
                            GPU.postKey(output, true): postDescriptor(output, true)]
         for t in [false, true] { for b in [false, true] { descriptors[GPU.sceneKey(t, b)] = sceneDescriptor(t, b) } }
         for f in functions where f.functionType == .kernel {
@@ -991,6 +1002,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     let scenePipelines: [[MTLRenderPipelineState]]
     let postPipeline: MTLRenderPipelineState
     let taaPipeline: MTLRenderPipelineState
+    // The glowing bugs (bioFragment), drawn over the scene in a pass of their own from sunset.
+    private let bioPipeline: MTLRenderPipelineState
     private let cloudPipeline: MTLComputePipelineState
     // Shadow-height maps (see bakeShadowHeight in Shaders/Saver.metal): near and far cascades, a band rebaked per frame.
     private let shadowPipeline: MTLComputePipelineState
@@ -1042,6 +1055,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     private static let lampReach: [Double] = [1, 20, 16, 7, 10, 24, 22, 6]   // LAMP_R in Shaders/Saver.metal
     private var tileMasks = [UInt32](repeating: 0, count: 16 * 16)
     static let ditherCells = 864.0
+    // Sun height the land's glow starts from (BIO_SUN in Shaders/Saver.metal).
+    static let bioSun: Float = 0.07
+    // Bug sprites: one per cube of the MOTE_N^3 block round the camera (bioVertex in Shaders/Saver.metal).
+    static let moteCount = 18 * 18 * 18
     private var historyIndex = 0
     private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
     let world: World
@@ -1096,6 +1113,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         let sceneStates = [false, true].map { t in [false, true].compactMap { b in gpu.scene(towers: t, bands: b) } }
         guard sceneStates.allSatisfy({ $0.count == 2 }),
               let tp = gpu.taa(),
+              let bp = gpu.bio(),
               let pp = gpu.post(outputFormat, dither: dither),
               let cf = gpu.pipeline("cloudField"),
               let csf = gpu.pipeline("cloudSlowField"),
@@ -1115,6 +1133,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         scenePipelines = sceneStates
         postPipeline = pp
         taaPipeline = tp
+        bioPipeline = bp
         cloudPipeline = cf
         slowPipeline = csf
         shadowPipeline = shP
@@ -1470,6 +1489,23 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentBytes(towers.table, length: Towers.tableBytes, index: 9)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
+        }
+        // In its own pass: drawn after the scene in the scene's pass, even a draw doing nothing cost a twilight scene ~0.4 ms.
+        if f.sunDir.y < Renderer.bioSun {
+            let bp = MTLRenderPassDescriptor()
+            bp.colorAttachments[0].texture = sceneTex
+            bp.colorAttachments[0].loadAction = .load
+            bp.colorAttachments[0].storeAction = .store
+            if let enc = cb.makeRenderCommandEncoder(descriptor: bp) {
+                enc.setRenderPipelineState(bioPipeline)
+                enc.setVertexBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
+                enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
+                enc.setVertexTexture(world.heightTex, index: 0)
+                enc.setVertexTexture(world.climateTex, index: 2)
+                enc.setVertexTexture(provTex, index: 16)
+                enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: Renderer.moteCount)
+                enc.endEncoding()
+            }
         }
         let tpd = MTLRenderPassDescriptor()
         tpd.colorAttachments[0].texture = histOut
@@ -1856,8 +1892,11 @@ enum Snapshot {
             r.camera.pitchOverride = nil
         }
         // VR_FLIGHT=minutes: flies the autopilot that long, logging altitude, clearance and climb every 12 s and
-        // writing a frame each minute next to the screenshot path.
+        // writing a frame each minute next to the screenshot path. VR_FTRACE=1 also prints every 0.25 s: time, x, z, y, ground,
+        // yaw, the altitude terms (target, climb rate, need (-1: floor clamp), rim lift, regional floor, ahead, planned climb)
+        // and the routing (blocked ahead, route offset).
         if let mins = Double(env["VR_FLIGHT"] ?? "") {
+            r.camera.tracing = env["VR_FTRACE"] != nil
             var maxClimb = 0.0, minClear = Double.infinity, maxY = 0.0, lows = 0
             var walled = 0, walledRun = 0, maxWalledRun = 0, fastClimb = 0, prevY = r.camera.position.y
             var lastY = r.camera.position.y
@@ -1867,7 +1906,14 @@ enum Snapshot {
             var towerEdge = Double.infinity, towerSeen = 0, towerClose = 0
             var towersMet = Set<SIMD2<Int>>()
             for i in 1...Int(mins * 60) {
-                for _ in 0..<4 { r.simulate(0.25) }
+                for q in 0..<4 {
+                    r.simulate(0.25)
+                    if env["VR_FTRACE"] != nil {
+                        let c = r.camera.position
+                        print(String(format: "ft %.2f %.1f %.1f %.2f %.2f %.3f", Double(i - 1) + Double(q + 1) * 0.25, c.x, c.z, c.y, r.world.height(x: c.x, z: c.z) ?? -1, r.camera.yaw)
+                              + " " + r.camera.terms.map { String(format: "%.1f", $0) }.joined(separator: " "))
+                    }
+                }
                 let p = r.camera.position
                 let g = r.world.height(x: p.x, z: p.z) ?? 0
                 if p.y - lastY > 6 { print(String(format: "flight jump t=%d pos=(%.0f,%.0f) %.0f -> %.0f", i, p.x, p.z, lastY, p.y)) }

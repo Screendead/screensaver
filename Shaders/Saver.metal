@@ -383,14 +383,24 @@ static inline Mega megaLift(float2 p, float lagoon, uint seed) {
         float2 c = (float2(cell) + 0.25 + 0.5 * float2(hashf(pcg(hc)), hashf(pcg(hc + 1u)))) * CELL;
         float R = 900.0 + 600.0 * hashf(pcg(hc + 2u));
         float dd = length(p - c);
-        if (dd < R + 1300.0) {
+        if (dd < R + 1600.0) {
             // Lobes and buttresses, so the rim reads as eroded rock, not a drum.
             float d = dd + 520.0 * fbm2(p / 1100.0, 3, seed + 241u) + 140.0 * perlin2(p / 330.0, seed + 244u)
-                    + 50.0 * perlin2(p / 140.0, seed + 242u);
-            float Hl = 1500.0 + 350.0 * hashf(pcg(hc + 3u));
-            float t = 0.22 * smoothstep(R + 420.0, R + 10.0, d) + 0.78 * smoothstep(R + 10.0, R - 6.0, d);
-            float top = 30.0 * fbm2(p / 350.0, 2, seed + 243u) * smoothstep(R, R - 80.0, d);
-            float T = Hl * t + top;
+                    + 50.0 * perlin2(p / 140.0, seed + 242u)
+                    + 110.0 * smoothstep(0.16, 0.0, abs(perlin2(p / 280.0, seed + 245u)));
+            float Hl = 1450.0 + 300.0 * hashf(pcg(hc + 3u));
+            // Seen from far off a sheer drum is a rectangle: the wall steps back at two ledges whose heights and depths
+            // wander round the rim, and canyons notch the crown, so the outline is never two verticals under a flat top.
+            float a1 = 0.46 + 0.12 * perlin2(p / 900.0, seed + 246u);
+            float a2 = 0.70 + 0.12 * perlin2(p / 700.0 + 9.3, seed + 246u);
+            float r1 = R - 6.0 - R * (0.04 + 0.22 * saturate(perlin2(p / 600.0, seed + 247u) + 0.5));
+            float r2 = r1 - 16.0 - R * (0.04 + 0.22 * saturate(perlin2(p / 520.0 + 4.7, seed + 248u) + 0.5));
+            float crown = 240.0 * fbm2(p / 800.0, 3, seed + 243u) - 380.0 * smoothstep(0.09, 0.0, abs(perlin2(p / 520.0, seed + 249u)));
+            crown = floor(crown / 70.0) * 70.0 + 70.0 * smoothstep(0.7, 1.0, fract(crown / 70.0));
+            float t = 0.32 * pow(smoothstep(R + 900.0, R + 10.0, d), 1.6) + (a1 - 0.32) * smoothstep(R + 10.0, R - 6.0, d)
+                    + 0.02 * smoothstep(R - 6.0, r1, d) + (a2 - a1 - 0.02) * smoothstep(r1 + 16.0, r1, d)
+                    + 0.02 * smoothstep(r1, r2, d);
+            float T = Hl * t + (Hl * (0.96 - a2) + crown) * smoothstep(r2 + 16.0, r2, d);
             if (T > g.U) { g.U = T; g.wK = 0.0; g.lipU = 0.0; g.notchH = 0.0; }
         }
     }
@@ -657,7 +667,7 @@ static inline bool towerNearTepui(float2 p, float d, uint seed) {
             uint hc = hash2i(cell, seed + 240u);
             if (hashf(hc) >= 0.35) continue;
             float2 c = (float2(cell) + 0.25 + 0.5 * float2(hashf(pcg(hc)), hashf(pcg(hc + 1u)))) * CELL;
-            if (length(p - c) < 1500.0 + 1300.0 + 520.0 + d) return true;
+            if (length(p - c) < 1500.0 + 1600.0 + 520.0 + d) return true;
         }
     return false;
 }
@@ -1276,6 +1286,9 @@ constant bool BAND_SKIP = is_function_constant_defined(BAND_FC) && BAND_FC;
 constant int GIANT_LIMBS = 12;
 constant int GIANT_FLANGES = 9;
 constant int GM_WOOD = 0, GM_LEAF = 1, GM_VINE = 2;
+// The coarsest level whose columns carry a giant's vines and aerial roots (one of four sparse samples catching one
+// stands it 8 wide there): on level 4 it would hang a curtain 16 wide.
+constant int GIANT_THIN_LOD = 3;
 
 // One table entry; G <= 0: no giant in the cell. Must match GiantRec in Sources/Renderer.swift.
 struct GiantRec { int2 cell; float2 c; float G; float yT; uint h; uint kind; };
@@ -1417,7 +1430,8 @@ static inline float4 giantPad(thread const Giant& g, int j, thread float& thick)
 }
 
 // Solid runs of a column at offset q from the axis (ground gl): appended as intervals, then sorted and merged.
-struct GRuns { float lo[24]; float hi[24]; int m[24]; int n; };
+// thin: a vine or an aerial root added (coarseColumn keeps those as a union, not a mean).
+struct GRuns { float lo[24]; float hi[24]; int m[24]; int n; bool thin; };
 
 static inline void gAdd(thread GRuns& r, float lo, float hi, int m) {
     if (hi - lo < 0.5 || r.n >= 24) return;
@@ -1505,34 +1519,30 @@ static void giantIntervals(thread const Giant& g, float2 wq, float gl, int lod, 
             }
         }
         if (hi > lo) gAdd(r, G + lo, G + hi, GM_WOOD);
-        // Aerial roots: dropped from the limb, leaning out as they fall, thickening where they root.
+        // Aerial roots: dropped plumb from the limb, swelling toward the ground where they root. Plumb and never
+        // narrower below, each column of one is a single run down to the ground, which the coarse levels keep whole
+        // (a leaning root's columns hold short floating runs, which they cannot).
         for (int k = 0; k < 3; k++) {
             uint hp = pcg(g.h + uint(i) * 97u + uint(k) * 13u + 400u);
-            if (hashf(hp) > (g.kind == 1 ? 0.0 : g.kind == 2 ? 0.25 : 0.45) || lod >= 1) continue;
+            if (hashf(hp) > (g.kind == 1 ? 0.0 : g.kind == 2 ? 0.25 : 0.45) || lod > GIANT_THIN_LOD) continue;
             float t = 0.35 + 0.2 * float(k) + 0.1 * hashf(pcg(hp));
             float3 top = bez(l, t);
-            float2 out = normalize(top.xz + 1e-3) * (4.0 + 10.0 * hashf(pcg(hp + 2u)));
-            float3 foot = float3(top.x + out.x, gl - G - 1.0, top.z + out.y);
+            float3 foot = float3(top.x, gl - G - 1.0, top.z);
             float rad = 0.8 + 2.8 * pow(hashf(pcg(hp + 1u)), 2.0);
-            float2 ab2 = foot.xz - top.xz;
-            float tq = saturate(dot(q - top.xz, ab2) / max(dot(ab2, ab2), 1e-3));
-            if (length(q - (top.xz + ab2 * tq)) > rad + 6.0) continue;
+            float dh = length(q - top.xz);
+            if (dh > rad * 1.8) continue;
             float lo2 = 1e9, hi2 = -1e9;
             for (int m = 0; m <= 24; m++) {
                 float u = float(m) / 24.0;
-                // Straight down at first, swinging out low: a hanging root that found the ground.
-                float3 pp = float3(mix(top.x, foot.x, u * u), mix(top.y, foot.y, u), mix(top.z, foot.z, u * u));
-                pp.xz += float2(perlin2(float2(u * 2.2, hashf(hp) * 40.0), g.h + 42u), perlin2(float2(u * 2.2 + 7.7, hashf(hp) * 40.0), g.h + 43u))
-                       * 4.0 * sin(u * 3.14159);
-                float rr = rad * (1.0 + 0.8 * smoothstep(0.75, 1.0, u));
-                float dh = length(q - pp.xz);
+                float3 pp = float3(top.x, mix(top.y, foot.y, u), top.z);
+                float rr = rad * (0.8 + 0.2 * u) * (1.0 + 0.8 * smoothstep(0.75, 1.0, u));
                 if (dh < rr) {
                     float hh = max(sqrt(rr * rr - dh * dh), 0.5 * abs(top.y - foot.y) / 24.0 + 0.5);
                     lo2 = min(lo2, pp.y - hh);
                     hi2 = max(hi2, pp.y + hh);
                 }
             }
-            if (hi2 > lo2) gAdd(r, G + lo2, G + hi2, GM_WOOD);
+            if (hi2 > lo2) { gAdd(r, G + lo2, G + hi2, GM_WOOD); r.thin = true; }
         }
     }
     // Canopy pads: broad, flat-bottomed clouds of leaves with lumpy tops, the tiers of the crown; vines hang from them.
@@ -1555,13 +1565,19 @@ static void giantIntervals(thread const Giant& g, float2 wq, float gl, int lod, 
         float bot = P.y - T * 0.45 * pow(1.0 - u * u, 0.6) + 3.0 * sag;
         if (top > bot + 1.0) { gAdd(r, floor(bot), floor(top) + 1.0, GM_LEAF); padBot = min(padBot, floor(bot)); }
     }
-    if (padBot < 1e8 && lod == 0) {
-        uint hv = hash2i(int2(floor(wq)), g.h + 30u);
-        float mask = smoothstep(0.0, 0.35, perlin2(wq / 19.0, g.h + 31u));
+    if (padBot < 1e8 && lod <= GIANT_THIN_LOD) {
+        // Strands two voxels square on the even grid: the level-1 column over one is the strand itself, so the
+        // vines neither shorten nor thicken across the first morph band.
+        int2 vb = int2(floor(wq * 0.5));
+        uint hv = hash2i(vb, g.h + 30u);
+        float mask = smoothstep(0.0, 0.35, perlin2((float2(vb) * 2.0 + 1.0) / 19.0, g.h + 31u));
         // A weeping giant trails long curtains; a kapok's crown hardly any.
-        if (hashf(hv) < (g.kind == 2 ? 0.09 : g.kind == 1 ? 0.008 : 0.035) * mask) {
+        // From level 2 a column's four samples fall on four strands: a quarter of them each keeps the curtain's cover,
+        // and they are among the strands of the level inside it.
+        if (hashf(hv) < (g.kind == 2 ? 0.18 : g.kind == 1 ? 0.016 : 0.07) * mask * (lod >= 2 ? 0.25 : 1.0)) {
             float len = 4.0 + (g.kind == 2 ? 55.0 : 30.0) * pow(hashf(pcg(hv)), g.kind == 2 ? 1.3 : 2.0);
             gAdd(r, max(padBot - len, gl + 3.0), padBot + 1.0, GM_VINE);
+            r.thin = true;
         }
     }
 }
@@ -1920,8 +1936,13 @@ static void writeVeg(GCol gc, float G, uint2 gid, texture2d<float, access::write
         dst.write(float4(gc.H, G, gc.n == 2 ? gc.gh : G, max(gc.leafStart, G)), gid);
         return;
     }
-    dst.write(float4(gc.H, gc.gl, gc.gh, GIANT_A), gid);
-    gx.write(uint4(uint(gc.e.x), uint(gc.e.y), uint(gc.e.z) | (GAP_GIANT << 11), uint(gc.e.w)), gid);
+    // The gaps go where the morph sends them to the level-1 column's (coarseColumn): the highest in the principal slot,
+    // toward its principal gap; the taller of any two below it (the air under a crown) in the first extra slot, toward
+    // its second gap; the other in the second, which closes. With one gap the principal slot holds it inverted (lo > hi):
+    // no gap to the trace, but still the bound under which it looks for extra gaps, and air to corner AO.
+    float4 e = gc.n == 2 ? float4(gc.gl, gc.gh, 0, 0) : gc.n == 4 && gc.e.w - gc.e.z > gc.e.y - gc.e.x ? gc.e.zwxy : gc.e;
+    dst.write(float4(gc.H, gc.n == 2 ? float2(gc.gh, gc.gl) : float2(gc.gl, gc.gh), GIANT_A), gid);
+    gx.write(uint4(uint(e.x), uint(e.y), uint(e.z) | (GAP_GIANT << 11), uint(e.w)), gid);
     st.write(uint4(ST_GIANT | uint(G) | (uint(gc.leafStart) << 11) | (gc.mats << 22) | (pal << 28), 0, 0, 0), gid);
 }
 
@@ -2148,10 +2169,11 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
 static inline float solidFloor(float4 c, uint4 gx) {
     if (c.a > 0.0) return c.g;
     float4 e = extraGaps(gx);
-    if (e.w > e.z) return e.z;
-    if (e.y > e.x) return e.x;
     // Structures too: a lintel, eave, deck, stilt house or hull is open in [g, b) whatever its base says.
-    return c.b > c.g ? c.g : c.r;
+    float f = c.b > c.g ? c.g : c.r;
+    if (e.y > e.x) f = min(f, e.x);
+    if (e.w > e.z) f = min(f, e.z);
+    return f;
 }
 
 // Mip 0 of the max-mip texture: the column tops alone, 2 bytes a column for the DDA and sky visibility.
@@ -3834,25 +3856,41 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
     float H = coarseCombine(c0.h, c1.h, c2.h, c3.h, float(s));
     // A giant: where at least two samples stand in it, the mean of their tops, of their lowest gaps (the air under the
     // crown, the second gap) and of the tallest gap above that (between tiers, the principal one); solid where two are
-    // trunk.
+    // trunk or one is a hanging root. A vine or root sample cuts the lowest gap to the air it shares; a buttress sample
+    // raises its floor.
     Giant gi;
     if (giantAt(giants, float2(b + hs / 2) + 0.5, float(s), gi)) {
         float hs4[4] = { c0.h, c1.h, c2.h, c3.h };
         int2 o4[4] = { int2(0), int2(hs, 0), int2(0, hs), int2(hs, hs) };
-        float nT = 0.0, sH = 0.0, nS = 0.0;
+        float nT = 0.0, sH = 0.0, nS = 0.0, nTop = 0.0, sLowH = 0.0, floorH = -1e9;
         float4 sLow = 0.0, sUp = 0.0;   // (sum lo, sum hi, count, -)
+        // Vines and aerial roots: the air all their samples share, so each keeps its length and stands in the column.
+        float2 thinG = float2(-1e9, 1e9);
+        bool thinSolid = false;
         for (int i = 0; i < 4; i++) {
             GCol gc;
             GRuns rr;
             rr.n = 0;
+            rr.thin = false;
             if (giantColumn(gi, float2(b + o4[i]) + 0.5, hs4[i], rr, gc, k)) {
                 nT += 1.0;
-                sH += gc.H;
                 float2 gs[3] = { gc.e.zw, gc.e.xy, float2(gc.gl, gc.gh) };
                 int lowI = -1;
                 for (int j = 0; j < 3; j++) if (gs[j].y > gs[j].x) { lowI = j; break; }
-                if (lowI < 0) { nS += 1.0; continue; }
-                sLow += float4(gs[lowI], 1.0, 0.0);
+                // Under three gaps, the taller of the two below the highest (as the 1-voxel map files it: writeVeg).
+                if (lowI == 0 && gs[1].y - gs[1].x > gs[0].y - gs[0].x) lowI = 1;
+                if (lowI < 0) {
+                    // A buttress or an arching root raises the floor of the crown's air; a trunk, a hanging root or a
+                    // skirt of leaves down to the ground fills the column.
+                    if (!rr.thin && gc.H < gi.G + 120.0) { floorH = max(floorH, gc.H); sLowH += gc.H; continue; }
+                    if (rr.thin) { thinSolid = true; floorH = max(floorH, gc.leafStart); }
+                    nS += 1.0;
+                }
+                sH += gc.H;
+                nTop += 1.0;
+                if (lowI < 0) continue;
+                if (rr.thin) thinG = float2(max(thinG.x, gs[lowI].x), min(thinG.y, gs[lowI].y));
+                else sLow += float4(gs[lowI], 1.0, 0.0);
                 float2 up = float2(0);
                 for (int j = lowI + 1; j < 3; j++) if (gs[j].y - gs[j].x > up.y - up.x) up = gs[j];
                 if (up.y > up.x) sUp += float4(up, 1.0, 0.0);
@@ -3861,18 +3899,25 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
         if (nT >= 2.0) {
             // Marks the column as a giant's for shading (coverDepthL).
             depth = -1.0;
-            float top = floor(sH / nT + 0.5);
-            if (k > GAP_LEVELS || nS >= 2.0 || sLow.z < 1.0) return float3(max(top, H), 0, 0);
-            float2 lowG = floor(sLow.xy / sLow.z + 0.5);
-            lowG.x = max(lowG.x, H);
+            // On levels 1...GAP2_LEVELS a column with no second gap holds an empty one at the top of its wood (roots,
+            // buttresses) for giantSurface; an empty gap is no gap to the trace or the morph.
+            if (nTop < 1.0) { float t = max(floor(sLowH / nT + 0.5), H); g2 = float2(t); return float3(t, 0, 0); }
+            float top = floor(sH / nTop + 0.5);
+            bool thin = thinG.y < 1e8;
+            g2 = float2(max(max(floorH, thinG.x), 0.0));
+            if (k > GAP_LEVELS || nS >= 2.0 || thinSolid || (sLow.z < 1.0 && !thin)) return float3(max(top, H), 0, 0);
+            float2 lowG = sLow.z >= 1.0 ? floor(sLow.xy / sLow.z + 0.5) : thinG;
+            lowG = float2(max(max(lowG.x, thinG.x), max(floorH, H)), min(lowG.y, thinG.y));
+            float nG = sLow.z + (thin ? 1.0 : 0.0);
             if (lowG.y - lowG.x < 2.0 || top - lowG.y < 1.0) {
                 // The lowest gaps disagree (a drooping skirt): the gap between tiers alone, if the samples share one.
                 float2 upA = sUp.z >= 2.0 ? floor(sUp.xy / sUp.z + 0.5) : float2(0);
                 if (upA.y - upA.x >= 2.0 && top - upA.y >= 1.0 && upA.x > H) return float3(top, upA);
                 return float3(max(top, H), 0, 0);
             }
-            float2 upG = sUp.z >= max(1.0, 0.5 * sLow.z) ? floor(sUp.xy / sUp.z + 0.5) : float2(0);
+            float2 upG = sUp.z >= max(1.0, 0.5 * nG) ? floor(sUp.xy / sUp.z + 0.5) : float2(0);
             if (k <= GAP2_LEVELS && upG.y - upG.x >= 2.0 && upG.x >= lowG.y + 2.0 && top - upG.y >= 1.0) { g2 = lowG; return float3(top, upG); }
+            g2 = lowG;
             return float3(top, lowG);
         }
     }
@@ -3991,7 +4036,7 @@ static inline float3 columnAt(texture2d<float> hm, int2 c, int size) {
 static inline bool solid(texture2d<float> hm, int3 v, int size) {
     float3 col = columnAt(hm, v.xz, size);
     float y = float(v.y);
-    return y < col.x && !(y >= col.y && y < col.z);
+    return y < col.x && !(y >= min(col.y, col.z) && y < max(col.y, col.z));
 }
 
 // The LOD rings. Level 0 is the 1-voxel map (texel = frame-local column); level k >= 1 is slice k - 1 of the coarse
@@ -4107,8 +4152,11 @@ static inline bool towerWallAt(constant TowerTable* tt, float2 w) { return tower
 // from the parent's floor where it has none), or closes from the top where the parent has none, so at the handoff the
 // level equals the next one exactly.
 // w: the morph weight (columnMorphW).
-static inline float3 columnMorphW(thread const Terrain& tr, int k, int2 c, float w) {
-    float3 col = columnL(tr, k, c).rgb;
+// w of the result: the height under which the column's extra gaps can lie (the top of its unmorphed principal gap, or of
+// its morphed one's floor).
+static inline float4 columnMorphW(thread const Terrain& tr, int k, int2 c, float w) {
+    float4 col = float4(columnL(tr, k, c).rgb, 0.0);
+    col.w = max(col.y, col.z);
     if (w > 0.0) {
         float ph = parentH(tr, k, c);
         // A column sliding up or down a tower's sheer wall stands part way up it as a sliver, and the band of them rules
@@ -4124,6 +4172,7 @@ static inline float3 columnMorphW(thread const Terrain& tr, int k, int2 c, float
         } else {
             col.z = mix(col.z, col.y, w);
         }
+        col.w = max(col.w, col.y);
     }
     return col;
 }
@@ -4136,7 +4185,7 @@ static inline float2 secondGapW(thread const Terrain& tr, int k, int2 c, float w
 }
 
 static inline float3 columnMorph(thread const Terrain& tr, int k, int2 c) {
-    return columnMorphW(tr, k, c, morphAt(tr, k, (float2(c) + 0.5) * tr.lod[k].w));
+    return columnMorphW(tr, k, c, morphAt(tr, k, (float2(c) + 0.5) * tr.lod[k].w)).xyz;
 }
 
 // The 1-voxel map's extra gaps (lo1, hi1, lo2, hi2) at frame-local column c, closing from the top across the morph band
@@ -4252,11 +4301,11 @@ static Hit trace(thread const Terrain& tr, float3 o, float3 d, float tMax, int m
         // it); a ray passing over it moves on as a skip would. A ray above the column never needs its gaps, which lie
         // at least two voxels under its top: coarse levels read them only for a ray inside.
         float wm = morphAt(tr, k, (float2(lc) + 0.5) * s);
-        float3 col = columnMorphW(tr, k, lc, wm);
+        float4 col = columnMorphW(tr, k, lc, wm);
         float H = col.x, gl = col.y, gh = col.z;
         bool inGap = yA >= gl && yA < gh;
         // Under the principal gap: the 1-voxel map's extra gaps, a coarse giant column's air under its crown.
-        if (!inGap && k <= GAP2_LEVELS && gh > gl && yA < gl) {
+        if (!inGap && k <= GAP2_LEVELS && gh != gl && yA < col.w) {
             float4 e;
             if (k == 0) {
                 e = extraGaps(tr.gx.read(uint2(lc)));
@@ -4537,6 +4586,7 @@ struct Surface {
     float wall;     // megaWall: among the great walls
     float3 nrm;     // the plane a structure's roof voxel or a tower's wall shades as (zero: the face normal)
     float3 emit;    // fire, lanterns and lit windows
+    float up;       // leaves: height up the crown, 0 at its foot, 1 at its top
 };
 
 // Autumn foliage: a slow Perlin hue field runs lingering green, gold, orange, scarlet to crimson;
@@ -4550,6 +4600,67 @@ static inline float3 autumnLeaf(float2 w, float birch, uint seed) {
     if (k < 0.45) return mix(gold, orange, smoothstep(0.2, 0.45, k));
     if (k < 0.7) return mix(orange, scarlet, smoothstep(0.45, 0.7, k));
     return mix(scarlet, crimson, smoothstep(0.7, 1.0, k));
+}
+
+// A wood's leaves at world column w: deep, low-chroma greens that drift slowly across a grove; conifers cooler and
+// darker. A tree's single-run columns and its multi-run ones (old growth, the jungle's roof) must agree, or one crown
+// shows two palettes.
+static float3 woodLeaf(float2 w, Climate c, float painted, float3 fallLeaf, float autumn, uint seed) {
+    float conifer = smoothstep(0.50, 0.32, c.temp);
+    float k = saturate(perlin2(w / 23.0, seed + 93u) * 0.9 + 0.5);
+    float3 leaf = mix(float3(0.035, 0.07, 0.035), float3(0.065, 0.09, 0.04), k);
+    leaf = mix(leaf, float3(0.025, 0.055, 0.045), conifer);
+    leaf = mix(leaf, float3(0.11, 0.125, 0.09), painted);
+    leaf = mix(leaf, fallLeaf, autumn * (1.0 - conifer * 0.5));
+    if (c.jungle > 0.0) {
+        // The jungle's crowns differ one from the next: deep green, olive, now and then a cool teal.
+        float jk = perlin2(w / 9.0, seed + 340u) + 0.6 * perlin2(w / 31.0, seed + 341u);
+        float3 jl = mix(float3(0.028, 0.062, 0.034), float3(0.072, 0.094, 0.032), smoothstep(-0.3, 0.5, jk));
+        jl = mix(jl, float3(0.024, 0.068, 0.058), smoothstep(0.25, 0.6, perlin2(w / 17.0 + 7.3, seed + 342u)));
+        leaf = mix(leaf, jl, smoothstep(0.1, 0.4, c.jungle));
+    }
+    return leaf;
+}
+
+// Crown by crown, species and age: a third cooler and darker, one in five yellower, one in ten light and warm, each
+// lighter or darker again. Over many crowns the mean is 1, the wood's own colour that the coarse rings show. The crown is
+// the nearest trunk (the jungle's: the dome standing highest) among the four cells round w (world column centre); Ht its
+// height when it is old growth, else 0.
+struct Crown { float3 tint; float Ht; };
+
+static Crown crownAt(float2 w, Climate c, uint seed) {
+    float best = 1e9, bestH = 0.0;
+    uint id = 0u;
+    bool jungle = c.jungle >= 0.15, old = !jungle && c.old >= 0.2;
+    float cell = jungle ? JUNGLE_CELL : old ? OLD_CELL : float(TREE_CELL);
+    int2 c0 = int2(floor(w / cell - 0.5));
+    for (int j = 0; j <= 1; j++)
+        for (int i = 0; i <= 1; i++) {
+            int2 cc = c0 + int2(i, j);
+            float2 tc;
+            float R = 1.0, Ht = 0.0;
+            uint h;
+            if (jungle) {
+                h = hash2i(cc, seed + 322u);
+                tc = (float2(cc) + 0.2 + 0.6 * float2(hashf(h), hashf(pcg(h)))) * JUNGLE_CELL;
+                R = 3.5 + 4.0 * hashf(pcg(h + 1u));
+            } else if (old) {
+                float tr;
+                if (!oldTreeIn(cc, seed, c.old, tc, Ht, R, tr, h)) continue;
+            } else {
+                h = hash2i(cc, seed + 92u);
+                tc = float2(cc * TREE_CELL + int2(h % uint(TREE_CELL), (h / 7u) % uint(TREE_CELL))) + 0.5;
+            }
+            float d = length_squared(w - tc) / (R * R);
+            if (d < best) { best = d; id = h; bestH = Ht; }
+        }
+    uint h = pcg(id + 361u);
+    float u = hashf(h);
+    float3 t = u < 0.35 ? float3(0.80, 0.88, 1.05) : u < 0.70 ? float3(1.0) : u < 0.90 ? float3(1.35, 1.15, 0.75) : float3(1.45, 1.3, 0.7);
+    Crown o;
+    o.tint = t / float3(1.045, 1.018, 0.9375) * (0.75 + 0.5 * hashf(pcg(h)));
+    o.Ht = bestH;
+    return o;
 }
 
 // Sedimentary bedding by world height: broad formations, beds of uneven tone and fine laminae. Beds dip gently
@@ -4701,7 +4812,9 @@ static Surface giantSurface(thread const Terrain& tr, Surface s, int k, int3 v, 
     int gm = GM_WOOD;
     if (k == 0) {
         float4 e = extraGaps(tr.gx.read(uint2(clamp(v.xz, int2(0), int2(tr.size - 1)))));
-        float3 g0 = float3(e.z, e.x, col.y), g1 = float3(e.w, e.y, col.z);
+        // The extra gaps in either order (writeVeg), both below the principal one.
+        bool sw = e.w > e.z && e.z < e.x;
+        float3 g0 = float3(sw ? e.z : e.x, sw ? e.x : e.z, col.y), g1 = float3(sw ? e.w : e.y, sw ? e.y : e.w, col.z);
         int ri = 0, nG = 0;
         bool found = false;
         for (int i = 0; i < 3; i++) {
@@ -4720,6 +4833,11 @@ static Surface giantSurface(thread const Terrain& tr, Surface s, int k, int3 v, 
         bool above = col.z > col.y && y >= col.z;
         // Bark only on the trunk; elsewhere a solid coarse column is the crown's skirt of leaves and vines.
         gm = above || length(q) > 40.0 || (y - gi.G > gi.yT * 0.55 && length(q) > 24.0) ? GM_LEAF : GM_WOOD;
+        // Wood under the crown's air: aerial roots, buttresses, arching roots. Levels with a second gap mark its top
+        // there (coarseColumn); further out it is guessed from the lowest limbs.
+        float2 g2 = k <= GAP2_LEVELS ? secondGapW(tr, k, v.xz, 0.0) : float2(0);
+        float woodTop = k <= GAP2_LEVELS ? g2.x : col.z > col.y ? min(col.y, gi.G + gi.yT * 0.42) : col.x < gi.G + 120.0 ? 1e9 : -1e9;
+        if (!above && y < woodTop) gm = GM_WOOD;
         runLo = above ? col.z : gLoc;
     }
     float3 a;
@@ -4728,6 +4846,20 @@ static Surface giantSurface(thread const Terrain& tr, Surface s, int k, int3 v, 
         uint pal = k == 0 ? (gsb >> 28) & 7u : giantPalette(gi.h);
         a = pal == 2u ? mix(float3(0.024, 0.070, 0.060), float3(0.050, 0.098, 0.066), kq)
                       : mix(float3(0.034, 0.078, 0.050), float3(0.075, 0.112, 0.042), kq);
+        s.up = 1.0 - saturate((runHi - 1.0 - y) / 14.0);
+        if (pal == 0u && k == 0) {
+            // Old growth and the jungle: the wood's own leaves (provinces carry no autumn or painted hills).
+            float2 w = float2(v.xz + mapOrigin);
+            Climate c = climateL(tr, 0, float2(v.xz) + 0.5);
+            c.temp = altitudeTemp(c.temp, gLoc);
+            a = woodLeaf(w, c, 0.0, 0.0, 0.0, seed);
+            float ct = 1.0 - smoothstep(0.5, 1.0, fp);
+            if (ct > 0.0) {
+                Crown cr = crownAt(w + 0.5, c, seed);
+                a *= mix(float3(1.0), cr.tint, ct);
+                if (cr.Ht > 0.0) s.up = saturate((y - gLoc - 0.45 * cr.Ht) / (0.55 * cr.Ht));
+            }
+        }
         // A rust flush drifts over part of the crown, strongest on its upper leaves.
         if (pal == 3u) a = mix(a, float3(0.115, 0.062, 0.030), 0.7 * smoothstep(0.05, 0.45, perlin2(wq / 23.0, seed + 604u) + 0.25 * saturate((y - runLo) / max(runHi - runLo, 1.0))));
         int2 tx = int2(floor(uv * 16.0));
@@ -4856,6 +4988,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
                          int k, int3 v, int3 n, float2 uv, float fp, float fpA, float3 p, uint seed, float time, bool lite = false) {
     if (lite) { fp = max(fp, 4.0); fpA = max(fpA, 4.0); }
     Surface s;
+    s.up = 1.0;
     s.slope = 0;
     s.mat = 0;
     s.level = 0;
@@ -5107,19 +5240,16 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     }
     if ((tree && float(v.y) >= col4.a) || vegLeaf) {
         float leafLo = vegLeaf ? vegLo : col4.a;
-        // Leaves: deep, low-chroma greens that drift slowly across a grove; conifers cooler and darker.
-        float conifer = smoothstep(0.50, 0.32, c.temp);
-        float k = saturate(perlin2(w / 23.0, seed + 93u) * 0.9 + 0.5);
-        float3 leaf = mix(float3(0.035, 0.07, 0.035), float3(0.065, 0.09, 0.04), k);
-        leaf = mix(leaf, float3(0.025, 0.055, 0.045), conifer);
-        leaf = mix(leaf, float3(0.11, 0.125, 0.09), painted);
-        leaf = mix(leaf, fallLeaf, autumn * (1.0 - conifer * 0.5));
-        if (c.jungle > 0.0) {
-            // The jungle's crowns differ one from the next: deep green, olive, now and then a cool teal.
-            float jk = perlin2(w / 9.0, seed + 340u) + 0.6 * perlin2(w / 31.0, seed + 341u);
-            float3 jl = mix(float3(0.028, 0.062, 0.034), float3(0.072, 0.094, 0.032), smoothstep(-0.3, 0.5, jk));
-            jl = mix(jl, float3(0.024, 0.068, 0.058), smoothstep(0.25, 0.6, perlin2(w / 17.0 + 7.3, seed + 342u)));
-            leaf = mix(leaf, jl, smoothstep(0.1, 0.4, c.jungle));
+        float3 leaf = woodLeaf(w, c, painted, fallLeaf, autumn, seed);
+        s.up = saturate((float(v.y) - leafLo) / max(col.x - leafLo - 1.0, 1.0));
+        // Gone, like the land's glow, before the 1-voxel ring's morph band.
+        float ct = k == 0 ? (1.0 - smoothstep(0.5, 1.0, fp)) * (1.0 - 0.5 * autumn) : 0.0;
+        if (ct > 0.0) {
+            Crown cr = crownAt(w + 0.5, c, seed);
+            leaf *= mix(float3(1.0), cr.tint, ct);
+            // An old-growth crown's columns run its whole height (multi-run ones too): by each column's own span they
+            // would stripe it.
+            if (cr.Ht > 0.0) s.up = saturate((float(v.y) - col.y - 0.45 * cr.Ht) / (0.55 * cr.Ht));
         }
         // A 16x16 leaf texture: two-tone texels, faded out once a texel nears a pixel.
         if (fp < 0.04) {
@@ -6078,6 +6208,90 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
     }
 }
 
+// MARK: - Bioluminescence
+
+// The land's glow by sun height: faint from just before sunset, full from mid twilight (Renderer.bioSun must match the
+// start).
+constant float BIO_SUN = 0.07;
+static inline float bioRamp(float sunY) { return smoothstep(BIO_SUN, -0.12, sunY); }
+
+// Shared with the sea's glow: deep blue, turquoise and pink (#2a6bff, #2fe3d0, #ff5fc8), linear.
+constant float3 BIO_LAND[3] = { float3(0.023, 0.147, 1.0), float3(0.028, 0.768, 0.630), float3(1.0, 0.114, 0.578) };
+
+// One glowing spot per cell of face coordinates q, present with chance pr: a soft core and halo round a hashed centre,
+// held off the cell's edges so it never needs a neighbour cell. Once the core nears a pixel it widens and dims, keeping
+// its light, so it never shrinks to a speck that sparkles. hues: the chances of blue and turquoise; pink takes the rest.
+// w: the spot's draw against pr, in [0, 1) (2 for none), which the caller compares with the ground's own share.
+static float4 bioSpot(float2 q, int plane, float cell, float pr, float r, float fp, uint salt, float time, float2 hues) {
+    float2 ci = floor(q / cell);
+    uint hh = hash3i(int3(int2(ci), plane), salt);
+    float u = hashf(hh);
+    if (u >= pr) return float4(0, 0, 0, 2);
+    uint h1 = pcg(hh), h2 = pcg(h1), h3 = pcg(h2), h4 = pcg(h3);
+    float m = 0.35 * cell;
+    float2 c = ci * cell + m + (cell - 2.0 * m) * float2(hashf(h1), hashf(h2));
+    float dd = length(q - c);
+    if (dd >= m) return float4(0, 0, 0, 2);
+    float rr = r * (0.6 + 0.8 * hashf(h3));
+    float re = max(rr, 1.8 * fp);
+    float e2 = dd * dd / (re * re);
+    float g = (2.0 * exp(-e2) + 0.5 * exp(-e2 / 9.0)) * (rr * rr) / (re * re) * (1.0 - smoothstep(0.6 * m, m, dd));
+    float hp = hashf(h4);
+    float3 hue = hp < hues.x ? BIO_LAND[0] : hp < hues.x + hues.y ? BIO_LAND[1] : BIO_LAND[2];
+    return float4(hue * g * (0.75 + 0.25 * sin(time * (0.4 + 0.5 * hashf(pcg(h4))) + 6.283 * hp)), u / pr);
+}
+
+// Glowing fungus on trunk feet, speckled leaves (thickest under a giant's crown) and glowing plants on the forest floor:
+// in the forest provinces and on giants, thinly in other damp woods, in patches. Whether a spot is there is fixed by
+// place; distance only dims it.
+static float3 bioGlow(texture2d<float> hm, texture2d<uint> st, texture2d<float> clim, texture2d<float> pv,
+                      int2 origin, uint seed, float time, int mat, int3 v, int3 n, float3 p, float fp) {
+    int size = int(hm.get_width());
+    float4 col4 = hm.read(uint2(clamp(v.xz, int2(0), int2(size - 1))), 0);
+    // Multi-run columns are emergents and old-growth trees as well as giants; only giants carry a palette.
+    bool multi = col4.a == GIANT_A;
+    uint gsb = multi ? st.read(uint2(clamp(v.xz, int2(0), int2(size - 1)))).r : 0u;
+    bool giant = multi && ((gsb >> 28) & 7u) != 0u;
+    // Giants carry their glow farther than the scatter elsewhere, which far off would mass into a sprinkled carpet;
+    // theirs thins with distance one spot at a time (keep, below).
+    float far = giant ? 1.0 - 0.25 * smoothstep(0.3, 0.75, fp) : 1.0 - smoothstep(0.25, 0.5, fp);
+    if (far <= 0.0) return 0;
+    int3 vw = v + int3(origin.x, 0, origin.y);
+    float3 wp = p + float3(float(origin.x), 0.0, float(origin.y));
+    float2 q = n.y != 0 ? wp.xz : float2(n.x != 0 ? wp.z : wp.x, wp.y);
+    int plane = n.x != 0 ? vw.x * 2 + n.x : n.z != 0 ? vw.z * 2 + n.z : n.y;
+    float fade = far;
+    // Per kind: cell, chance, radius, hue chances (blue, turquoise; pink the rest).
+    float4 k4;
+    float2 hues;
+    if (mat == 2 || mat == 3) {
+        if (n.y != 0) return 0;
+        float top = giant ? 16.0 : 4.0, hb = p.y - (multi ? float(gsb & 2047u) : col4.g);
+        if (hb > top) return 0;
+        fade *= 1.0 - smoothstep(0.4 * top, top, hb);
+        k4 = giant ? float4(3.0, 0.6, 0.5, 0) : float4(2.0, 0.45, 0.3, 0);
+        hues = float2(0.3, 0.2);
+    } else if (mat == 1) {
+        k4 = float4(giant ? 5.0 : 4.0, giant ? (n.y < 0 ? 0.4 : 0.25) : 0.015, giant ? 0.45 : 0.35, 1);
+        hues = float2(0.25, 0.6);
+    } else if (mat == 0 && n.y > 0) {
+        k4 = float4(6.0, 0.1, 0.5, 2);
+        hues = float2(0.25, 0.4);
+        plane = 0;
+    } else return 0;
+    float4 sp = bioSpot(q, plane, k4.x, k4.y, k4.z, fp, seed + 701u + uint(k4.w), time, hues);
+    if (sp.w >= 1.0) return 0;
+    if (giant) {
+        float keep = 1.15 * (1.0 - smoothstep(0.25, 0.75, fp));
+        return sp.rgb * fade * (1.0 - smoothstep(keep - 0.15, keep, sp.w));
+    }
+    Climate c = climateAt(clim, float2(v.xz) + 0.5, pv, origin);
+    float prov = smoothstep(0.1, 0.5, provinceAmount(c));
+    float wet = k4.w == 2.0 ? prov : max(prov, 0.3 * smoothstep(0.4, 0.65, c.moist));
+    wet *= (1.0 - smoothstep(0.42, 0.18, c.temp)) * smoothstep(0.05, 0.4, perlin2(float2(vw.xz) / 70.0, seed + 704u));
+    return sp.w < wet ? sp.rgb * fade : float3(0);
+}
+
 // shadows: 0 none, 1 traced near ray and maps, 2 maps only (reflections: ripples hide contact shadows).
 // L: the light (the bed under water takes it refracted); inWater: seen in rippled water.
 static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3 d, Hit h, int shadows, bool inWater = false) {
@@ -6203,6 +6417,18 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // its sand tread.
     float kn = 4.5 * L.night;
     alb *= (1.0 + 0.1 * kn) / (1.0 + kn * dot(alb, float3(0.3, 0.59, 0.11)));
+    // Low light: leaves this dark under a warm key and a violet dome go to brown mud. Light passed and scattered through
+    // a crown takes the leaf's own hue, so the lift saturates as it brightens (autumn crowns are bright already).
+    float dusk = s.mat == 1 ? L.gold * (1.0 - L.night) * mix(0.5, 1.0, L.sunAmt) : 0.0;
+    // A sun on the horizon, dim and amber, lights leaves unlifted and warmed toward bronze: lifted toward green first, it
+    // turns them mustard. A golden-hour sun, and the afterglow, a broad patch of sky, light them lifted like the dome.
+    float3 albK = alb;
+    if (dusk > 0.0) {
+        float la = max(dot(alb, float3(0.3, 0.59, 0.11)), 1e-4);
+        alb *= mix(float3(1.0), clamp(1.5 * sqrt(alb / la), 0.7, 2.0), dusk * (1.0 - 0.6 * s.autumn));
+        albK = mix(albK, la * float3(1.5, 0.95, 0.55), 0.5 * dusk * (1.0 - 0.6 * s.autumn)) * (1.0 + 0.3 * dusk);
+        albK = mix(alb, albK, smoothstep(-0.04, 0.0, L.sun.y) * (1.0 - L.sunAmt));
+    }
     float ndl = mix(max(dot(nl, L.key), 0.0), max(L.key.y, 0.0), lone);
     // A low moon lights a step's riser several times brighter than its tread, drawing a highlight line along
     // every step; under the moon only cliffs outshine the ground they stand in.
@@ -6265,6 +6491,9 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // only six voxels out, so in a shelter it reads the roof all round and varies column by column with the back wall's
     // jogs, striping it.
     skyFill *= mix(1.0 - mix(0.55, 0.85, hiSun) * (1.0 - sv), ROOF_SKY, roofW);
+    // Dusk: a crown's top still holds the glow while its foot and the gaps between crowns sink deeper and cooler than
+    // open shade, so the crowns stand apart.
+    if (dusk > 0.0) skyFill *= mix(float3(1.0), mix(float3(0.52, 0.58, 0.8), float3(1.12, 1.08, 1.0), saturate(sv * sv * (0.4 + 0.75 * s.up))), dusk);
     // A wall sees half the dome, and the half it sees is the dimmer horizon side; without this a riser in shade
     // outshines the sunlit tread above it under a low sun.
     skyFill *= built ? 0.7 + 0.3 * saturate(nl.y) : 0.5 + 0.5 * saturate(nl.y);
@@ -6283,15 +6512,30 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // Deep in the night, land sits below the sky so night reads as night (won night A/B): moonlight is graded
     // to a cool silver and the fill to a deep blue well under it, so slopes facing the moon still model. In
     // early night it is already dark and keeps its contours (darkening lost the dusk A/B).
-    float3 col = alb * (L.keyCol * ndl * sh * mix(1.0, 1.1, L.night) * mix(float3(1.0), float3(0.40, 0.42, 0.47), deep)
-                        + (skyFill * ao * riserShade + bounce) * mix(float3(1.0), float3(0.19, 0.23, 0.38), deep));
+    float3 col = albK * L.keyCol * ndl * sh * mix(1.0, 1.1, L.night) * mix(float3(1.0), float3(0.40, 0.42, 0.47), deep)
+               + alb * (skyFill * ao * riserShade + bounce) * mix(float3(1.0), float3(0.19, 0.23, 0.38), deep);
     // Low sun: up-facing treads take a warm sky-dome tint instead of going to charcoal.
-    col += alb * L.keyCol * 0.07 * (1.0 - smoothstep(0.05, 0.35, L.key.y)) * saturate(nl.y) * (1.0 - L.night);
+    col += albK * L.keyCol * 0.07 * (1.0 - smoothstep(0.05, 0.35, L.key.y)) * saturate(nl.y) * (1.0 - L.night);
     // Backlit leaves: a low sun glows through the canopy edges facing away from it.
     if (s.mat == 1) {
         float back = pow(saturate(dot(d, L.key)), 4.0) * (1.0 - smoothstep(0.08, 0.45, L.key.y)) * (1.0 - L.night);
         float graze = 1.0 - abs(dot(n, d));
         col += alb * mix(float3(0.9, 1.3, 0.3), float3(1.3, 0.9, 0.4), s.autumn) * L.keyCol * back * (1.0 - ndl) * (1.0 - abs(n.y)) * graze * graze * sh;
+    }
+    // The glowing band low over the sun's side of the sky warms the crowns' flanks that face it, the upper ones most,
+    // even where the sun itself is hidden: leaves model warm against cool, and seen toward the sun only their rims catch it.
+    if (dusk > 0.0) {
+        float face = saturate(dot(nl, normalize(float3(L.sun.x, 0.25, L.sun.z)))) * (1.0 - 0.6 * saturate(nl.y));
+        col += albK * L.skyHor * float3(1.0, 0.85, 0.7) * face * (0.1 + 0.9 * s.up * s.up) * sv * 0.8 * L.gold * (1.0 - L.night) * (1.0 - 0.5 * L.sunAmt);
+    }
+    // Waxy crown tops mirror the low sky: amber toward the sun, lavender away from it. Tops only: on side faces the
+    // grazing sheen would rule a pale line along every step.
+    if (dusk > 0.0) {
+        float3 rv = reflect(d, nl);
+        float tw = 0.5 + 0.5 * dot(normalize(rv.xz + 1e-5), normalize(L.sun.xz + 1e-5));
+        float3 env = mix(L.skyHor * mix(float3(0.72, 0.66, 1.0), float3(1.0, 0.8, 0.55), tw * tw), L.skyZen, saturate(rv.y * 3.0));
+        float fr = min(0.02 + 0.3 * pow(1.0 - saturate(-dot(d, nl)), 5.0), 0.08);
+        col += env * fr * saturate(nl.y) * sv * (0.6 + 0.4 * sh) * dusk * s.up * s.up;
     }
     // Lamplight is added in absolute terms, outside the moonlight grade, so firelit ground stays warm in a blue night.
     if (x.lights.w > 0.0) {
@@ -6309,6 +6553,10 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
             col += s.albedo * Lm * ((face * mix(1.0, ao, 0.5)) / (1.0 + dy * dy) + glow) * x.lights.w;
         }
     }
+    // Faintly from sunset; gone before the 1-voxel ring's morph band. Not in reflections, whose ripples would sparkle it.
+    float bio = bioRamp(L.sun.y) * (1.0 - smoothstep(0.5, 1.0, fp));
+    if (bio > 0.0 && k == 0 && shadows == 1 && s.mat < 4)
+        col += bioGlow(x.tr.hm, x.st, x.tr.clim, x.tr.pv, x.origin, x.seed, x.time, s.mat, h.voxel, h.normal, p, fp) * bio;
     return col + s.emit;
 }
 
@@ -6327,16 +6575,19 @@ static float3 shadeL(thread const Ctx& x, thread const Light& L, float3 o, float
     return shade(x, L, o, d, h, shadows, inWater);
 }
 
-// Converges on the actual sky colour as fog thickens (T -> 0), so fogged land meets the sky with no seam.
-static inline float3 fogColor(thread const Ctx& x, float3 d, float T) {
+// Converges on the actual sky colour as fog thickens (T -> 0), so fogged land meets the sky with no seam (less the
+// land's solid floor, which fades out toward the world's edge).
+static inline float3 fogColor(thread const Ctx& x, float3 d, float T, float solid = 0.0) {
     // At night the sky's horizon gradient is mirrored below it, so far land and sea dim smoothly downward.
     float y = max(d.y, -d.y * x.L.night);
     float3 c = skyColor(float3(d.x, mix(y, y * 0.5 + 0.12, T), d.z), x.L, false, x.seed, x.time);
     // Aerial colour cools away from the sun so far ridges separate from the sky.
     float away = saturate(dot(normalize(d.xz + 1e-5), normalize(x.L.sun.xz + 1e-5)) * 0.5 + 0.5);
     float3 cool = mix(float3(0.80, 0.82, 0.95), float3(0.52, 0.55, 0.88), x.L.gold);
-    return c * mix(float3(1.0), mix(cool, float3(1.0), away * away), T);
+    return c * mix(float3(1.0), mix(cool, float3(1.0), away * away), T) * mix(float3(1.0), cool * 0.9, solid * (1.0 - T));
 }
+
+constant float LAND_SOLID = 0.5;
 
 // Share of the lowland air haze left at height y (Sources/Sight.swift ports it).
 static inline float airAloft(float y) { return exp(-max(y - 120.0, 0.0) / 400.0); }
@@ -6383,16 +6634,22 @@ static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, 
     return exp(-((heightTerm + air + mist) * clear + 6.0 * smoothstep(x.tr.fadeStart, x.tr.rmax, r)));
 }
 
-static float3 applyFogT(thread const Ctx& x, float3 col, float3 o, float3 d, float T) {
+// solid: land, which even fully hazed stays a shade darker and cooler than the sky behind it, so a far range or a
+// tepui's upper wall reads as a solid layer and not a cut-out of the sky; 0 at the world's edge, which goes to sky.
+static float3 applyFogT(thread const Ctx& x, float3 col, float3 o, float3 d, float T, float solid = 0.0) {
     // Thin haze in-scatters less than the full horizon radiance; only thick fog converges on the sky.
     // Forward scatter fades out above the horizon as the sky's does, so fully hazed land matches the sky behind it.
     float scatter = min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night) * mix(1.0, smoothstep(0.1, 0.0, d.y), smoothstep(0.5, 0.0, T));
-    float3 f = (fogColor(x, d, T) + x.L.keyCol * scatter) * mix(mix(0.3, 0.12, x.L.gold), 1.0, smoothstep(0.1, 0.9, 1.0 - T));
+    float3 f = (fogColor(x, d, T, solid) + x.L.keyCol * scatter) * mix(mix(0.3, 0.12, x.L.gold), 1.0, smoothstep(0.1, 0.9, 1.0 - T));
     return mix(f, col, T);
 }
 
 static float3 applyFog(thread const Ctx& x, float3 col, float3 o, float3 d, float t) {
     return applyFogT(x, col, o, d, fogTransmittance(x, o, d, t));
+}
+
+static inline float landSolid(thread const Ctx& x, float3 p) {
+    return LAND_SOLID * (1.0 - smoothstep(x.tr.fadeStart, x.tr.rmax, length(p.xz - x.tr.cam)));
 }
 
 // In-scatter of the nearest lamps' light along a ray to tEnd: the closed-form integral of 1/(r^2 + 4) - 1/(Rh^2 + 4)
@@ -6768,6 +7025,273 @@ static float3 hazeAndSmoke(thread const Ctx& x, float3 col, device const Site* s
     return col;
 }
 
+// MARK: - Sea glow
+
+// Value noise in about [-0.5, 0.5]: perlin2's gradients cost a sine and cosine per corner, too dear for every water pixel.
+static inline float seaNoise(float2 p, uint s) {
+    float2 i = floor(p), f = p - i;
+    int2 c = int2(i);
+    float2 u = f * f * (3.0 - 2.0 * f);
+    float a = hashf(hash2i(c, s)), b = hashf(hash2i(c + int2(1, 0), s));
+    float cc = hashf(hash2i(c + int2(0, 1), s)), d = hashf(hash2i(c + int2(1, 1), s));
+    return mix(mix(a, b, u.x), mix(cc, d, u.x), u.y) - 0.5;
+}
+
+// The bed's depth on the 8-voxel level: a broad ramp off the shore, which a lake's one-step shelf lacks. Surf, the
+// shore fade and the creatures follow it; on the fine depth they would trace the bed's voxel stairs.
+static float seaBroad(thread const Ctx& x, int k, float2 p) {
+    int kc = max(k, 3);
+    float b = SEA - groundSmoothL(x.tr, kc, p);
+    float mc = kc < x.tr.levels - 1 ? morphAt(x.tr, kc, p) : 0.0;
+    if (mc > 0.0) b = mix(b, SEA - groundSmoothL(x.tr, kc + 1, p), mc);
+    return b;
+}
+
+// Bioluminescence from dusk to night: bacteria blooming in some seas, lit along the swell's crests and brightest where
+// they break over the shallows; below the surface sparse jellies, plankton swirls and rare
+// rays. wp: the surface point (frame-local), ww: its world xz, k: its level; salt: the pan's saltAmount.
+static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k, float tw, float e0, float fres, float amt, float salt) {
+    float t = x.time;
+    // Voxels per pixel along the foreshortened view: detail hands over to its mean before it shrinks to a pixel.
+    float fpv = tw * x.pixelAngle / max(-d.y, 0.1);
+    float3 c = 0;
+    float b2 = seaNoise(ww * (1.0 / 230.0), x.seed + 145u);
+    float big = seaNoise(ww * (1.0 / 900.0), x.seed + 144u);
+    float bloom = smoothstep(0.0, 0.15, big + 0.45 * b2);
+    float near = smoothstep(420.0, 180.0, tw) * (1.0 - fres);
+    if (bloom <= 0.0 && near <= 0.0) return 0;
+    // Read only where something uses it: most open water near the camera holds no creature.
+    float broad = bloom > 0.0 || salt > 0.0 ? seaBroad(x, k, wp.xz) : -1.0;
+    // A pan's pools are a still skin a voxel deep; deeper water in a dry basin is open sea and glows in full.
+    if (salt > 0.0) amt *= 1.0 - 0.7 * salt * (1.0 - smoothstep(1.2, 2.2, broad));
+    if (bloom > 0.0) {
+        // The fine depth, smooth across its voxel steps and through the morph band, catches the last voxel of shore.
+        float fine = 3.0;
+        if (broad < 1.2) {
+            fine = SEA - groundSmoothL(x.tr, k, wp.xz);
+            float mw = k < x.tr.levels - 1 ? morphAt(x.tr, k, wp.xz) : 0.0;
+            if (mw > 0.0) fine = mix(fine, SEA - groundSmoothL(x.tr, k + 1, wp.xz), mw);
+        }
+        // Surf over the shallows; the glow dies out before the waterline.
+        float sh = smoothstep(0.7, 1.5, broad) * (1.0 - smoothstep(1.6, 2.7, broad));
+        float shore = smoothstep(0.35, 1.3, broad) * smoothstep(0.0, 0.9, fine);
+        // Patches tens of voxels across, so no crest or stretch of surf is lit end to end.
+        float patch = smoothstep(-0.4, 0.1, seaNoise(ww * 0.035 + float2(t * 0.01, 0), x.seed + 81u));
+        // Far out the flecks' mean; the surf no brighter than open water, or it would trace the shore.
+        float crest = 0.04;
+        float surf = sh * (1.0 - saturate(fpv * 0.8));
+        if (fpv < 1.0 / 0.6) {
+            // Two swells from directions fixed per seed, one or the other ruling each region with a calm seam between.
+            // Each swell's crests are narrow ridges bent by the warp; a second train at an angle groups them, so only
+            // stretches of uneven length and spacing are lit.
+            float a0 = hashf(pcg(x.seed + 73u)) * 6.2831853;
+            float2 wd1 = float2(cos(a0), sin(a0)), wd2 = float2(wd1.x * 0.765 - wd1.y * 0.644, wd1.x * 0.644 + wd1.y * 0.765);
+            float2 wd1b = float2(wd1.x * 0.765 + wd1.y * 0.644, -wd1.x * 0.644 + wd1.y * 0.765);
+            float2 wd2b = float2(wd2.x * 0.814 + wd2.y * 0.581, -wd2.x * 0.581 + wd2.y * 0.814);
+            float warp = 6.0 * seaNoise(ww * 0.012, x.seed + 72u) + 3.0 * seaNoise(ww * 0.05, x.seed + 79u);
+            float sel = smoothstep(0.19, 0.21, big);
+            // Flecks are near round, so they shrink to a pixel on a footprint between the foreshortened and the square one.
+            float fa = tw * x.pixelAngle * rsqrt(max(-d.y, 0.1));
+            // More of each wave breaks in the surf; close up a crest is a narrow line of foam.
+            float lo = 0.7 - 0.3 * sh + 0.12 * (1.0 - saturate(fa * 3.0));
+            float cr = 0;
+            if (sel < 1.0) cr += (1.0 - sel) * smoothstep(lo, lo + 0.25, sin(dot(ww, wd1) * 0.33 + warp - t * 0.9))
+                                            * smoothstep(-0.3, 0.6, sin(dot(ww, wd1b) * 0.11 + 0.6 * warp - t * 0.2));
+            if (sel > 0.0) cr += sel * smoothstep(lo, lo + 0.25, sin(dot(ww, wd2) * 0.27 - warp - t * 0.75))
+                                     * smoothstep(-0.3, 0.6, sin(dot(ww, wd2b) * 0.09 - 0.6 * warp - t * 0.17));
+            // Foam flecks a few voxels long along the crest, with gaps, each of its own brightness.
+            float2 wd = sel < 0.5 ? wd1 : wd2;
+            float2 fq = float2(dot(ww, wd) * 0.35, (ww.x * wd.y - ww.y * wd.x) * 0.26);
+            float fl = seaNoise(fq + float2(-t * 0.6, t * 0.25), x.seed + 82u);
+            // Runs of a crest a dozen voxels long, the rest of it calm.
+            cr *= smoothstep(-0.25, 0.1, seaNoise(fq * float2(0.3, 0.3) + float2(t * 0.05, 7.3), x.seed + 83u));
+            // The surf breaks up again every few voxels whatever way the shore runs, so it never draws its outline.
+            if (sh > 0.0) cr *= mix(1.0, smoothstep(-0.1, 0.2, seaNoise(ww * 0.16 + float2(0, t * 0.1), x.seed + 85u)), sh);
+            float fleck = smoothstep(0.05 - 0.15 * sh, 0.28, fl) * (0.3 + 1.1 * smoothstep(0.05, 0.4, e0));
+            // Close up the foam is a grain of sparks rather than smooth blobs.
+            if (fa < 0.4) fleck *= mix(0.45 + 1.1 * smoothstep(0.0, 0.45, seaNoise(ww * 2.3 + float2(t * 0.3, -t * 0.2), x.seed + 84u)), 1.0, fa * 2.5);
+            fleck = mix(fleck, 0.25, saturate(fa * 0.8));
+            crest = mix(cr * fleck, crest, saturate(fpv * 0.45));
+        }
+        float glow = crest * (0.3 + 0.9 * surf) * shore * patch;
+        float3 hue = mix(BIO_LAND[0], BIO_LAND[1], 0.15 + 0.3 * smoothstep(-0.15, 0.15, b2));
+        hue = mix(hue, mix(BIO_LAND[0], BIO_LAND[1], 0.6) * 1.3, saturate(glow * 2.0 - 0.6));
+        c += hue * bloom * glow * 1.4;
+    }
+    if (near > 0.0) {
+        float3 g = 0;
+        float3 rd = refract(d, float3(0, 1, 0), 0.75);
+        float2 slant = rd.xz / max(-rd.y, 0.2);
+        // Jellies: one in some 16-voxel cells, 0.8 to 3 under the surface, drifting about the cell's middle; the
+        // deeper, the dimmer, bluer and more blurred.
+        {
+            float2 q = ww + slant * 1.9;
+            int2 cell = int2(floor(q / 16.0));
+            uint h = hash2i(cell, x.seed + 75u);
+            if (hashf(h) < 0.07) {
+                if (broad < -0.5) broad = seaBroad(x, k, wp.xz);
+                float fj = smoothstep(1.5, 2.3, broad);
+                float ph = hashf(pcg(h)) * 6.2831853;
+                float dj = 0.8 + 2.2 * hashf(pcg(h + 2u));
+                float2 cc = (float2(cell) + 0.5) * 16.0 + 4.5 * float2(sin(t * 0.05 + ph), cos(t * 0.037 + ph * 1.7)) - slant * (dj - 1.9);
+                if (length_squared(q - cc) < 64.0) {
+                    float pulse = 0.5 + 0.5 * sin(t * 0.9 + ph * 3.0);
+                    float r = (0.9 + 0.7 * hashf(pcg(h + 1u))) * (1.0 + 0.1 * pulse);
+                    float blur = 0.2 + 0.22 * dj + 0.5 * fpv;
+                    float re = sqrt(r * r + blur * blur);
+                    float2 v = (q - cc) / re;
+                    float rho2 = length_squared(v);
+                    // A dome lit from within, brightest at its crown, its margin a soft shoulder rather than a ring;
+                    // faint tendrils trail behind its drift.
+                    float2 back = -normalize(float2(cos(t * 0.05 + ph), -sin(t * 0.037 + ph * 1.7) * 0.74) + 1e-4);
+                    float along = dot(v, back), side = v.x * back.y - v.y * back.x;
+                    float tent = smoothstep(0.6, 1.1, along) * smoothstep(4.5, 1.0, along)
+                               * smoothstep(0.1, 0.9, cos(side * 8.0 + sin(along * 1.7 - t * 1.2) * 1.4)) * smoothstep(0.75, 0.3, abs(side));
+                    float body = exp(-rho2 * 2.2) * (0.7 + 0.3 * pulse) + 0.2 * exp(-rho2 * 0.6);
+                    float3 jc = (h & 192u) == 192u ? mix(BIO_LAND[2], BIO_LAND[0], 0.35) : mix(BIO_LAND[1], BIO_LAND[0], 0.3);
+                    jc = mix(jc, BIO_LAND[0], saturate(dj * 0.25));
+                    float lum = (r * r) / (re * re) * exp(-dj * 0.3);
+                    g += jc * (body + 0.22 * tent) * lum * 0.3 * smoothstep(260.0, 140.0, tw) * fj;
+                }
+            }
+        }
+        // Plankton: a swirl of sparks in some 48-voxel cells, just under the surface.
+        {
+            float2 q = ww + slant * 0.6;
+            int2 cell = int2(floor(q / 48.0));
+            uint h = hash2i(cell, x.seed + 76u);
+            if (hashf(h) < 0.12) {
+                if (broad < -0.5) broad = seaBroad(x, k, wp.xz);
+                float fp = smoothstep(0.8, 1.5, broad);
+                float ph = hashf(pcg(h)) * 6.2831853;
+                float2 cc = (float2(cell) + 0.5) * 48.0 + 11.0 * float2(sin(t * 0.03 + ph), cos(t * 0.023 + ph * 1.3));
+                float R = 5.0 + 3.0 * hashf(pcg(h + 1u));
+                float2 v = q - cc;
+                float rr = length(v) / R;
+                if (rr < 1.6) {
+                    float a = atan2(v.y, v.x);
+                    float arms = smoothstep(-0.2, 1.0, sin(3.0 * a - 5.0 * rr + t * 0.5 + ph));
+                    float sa = t * 0.15 / (0.4 + rr);
+                    float2 vr = float2(v.x * cos(sa) - v.y * sin(sa), v.x * sin(sa) + v.y * cos(sa));
+                    float dots = mix(smoothstep(0.22, 0.42, seaNoise(vr * 3.5, x.seed + 77u)), 0.1, saturate(fpv * 2.5));
+                    float body = exp(-rr * rr * 2.0);
+                    float3 pc = mix(BIO_LAND[1], BIO_LAND[0], 0.4 + 0.6 * saturate(rr));
+                    g += pc * body * (0.05 + (0.3 + 0.7 * arms) * dots) * 0.11 * smoothstep(320.0, 160.0, tw) * fp;
+                }
+            }
+        }
+        // Rays: rare, gliding slow circles 2 under the surface.
+        {
+            float2 q = ww + slant * 2.0;
+            int2 cell = int2(floor(q / 140.0));
+            uint h = hash2i(cell, x.seed + 78u);
+            if (hashf(h) < 0.22) {
+                if (broad < -0.5) broad = seaBroad(x, k, wp.xz);
+                float fr = smoothstep(2.1, 2.7, broad);
+                float ph = hashf(pcg(h)) * 6.2831853;
+                float dir = (h & 128u) ? 1.0 : -1.0;
+                float an = t * 0.012 * dir + ph;
+                float2 cc = (float2(cell) + 0.5) * 140.0 + 38.0 * float2(cos(an), sin(an));
+                float2 v = q - cc;
+                if (dot(v, v) < 196.0) {
+                    float2 fw = dir * float2(-sin(an), cos(an));
+                    float u = dot(v, fw), s = v.x * fw.y - v.y * fw.x;
+                    float W = 7.5 * (1.0 + 0.1 * sin(t * 0.7 + ph)), L = 4.5;
+                    // Wingtips swept back from a rounded head, the trailing edge cut in between tip and body; dv: the distance
+                    // outside the outline, in voxels (inside negative). A diffuse glow, thickest along the spine and
+                    // thinning to the wingtips, its edge blurred by the water above.
+                    float a = min(abs(s) / W, 1.0);
+                    float uf = L * (1.0 - a * a) - 2.3 * a, ub = -2.4 + 1.1 * sin(3.14159 * a);
+                    float dv = max((abs(s) - W), max(u - uf, ub - u));
+                    float blur = 1.2 + 0.6 * fpv;
+                    float inner = smoothstep(blur, -blur - 1.5, dv);
+                    float spine = exp(-s * s / (W * W * 0.12));
+                    float halo = exp(-max(dv, 0.0) * 0.7 / blur);
+                    float tail = smoothstep(1.2, 0.0, abs(s)) * smoothstep(-0.5, -2.4, u) * smoothstep(-10.0, -2.4, u);
+                    float flap = 0.85 + 0.15 * sin(t * 0.7 + ph - abs(s) * 0.3);
+                    float3 rc = mix(BIO_LAND[1], BIO_LAND[0], 0.35 + 0.4 * a) * (inner * (0.25 + 0.75 * spine) * flap + 0.12 * halo + 0.1 * tail);
+                    g += rc * 0.16 * smoothstep(420.0, 220.0, tw) * fr;
+                }
+            }
+        }
+        c += g * near;
+    }
+    return c * amt;
+}
+
+// Glowing bugs drifting in and around the foliage after dusk: at most one in each MOTE_CELL cube, drawn as a small
+// sprite over the scene (Renderer: one instance per cube of the MOTE_N^3 block round the camera). Whether a bug is there
+// is decided at its anchor, so drifting over a column edge never switches it.
+constant float MOTE_CELL = 6.0;
+constant float MOTE_REACH = 50.0;
+constant int MOTE_N = 18; // cubes along each side of the block, which must hold the sphere of MOTE_REACH; Renderer.moteCount
+
+struct MoteOut { float4 pos [[position]]; float3 m [[flat]]; float re [[flat]]; float3 col [[flat]]; };
+
+vertex MoteOut bioVertex(uint vid [[vertex_id]], uint iid [[instance_id]], constant Frame& f [[buffer(0)]],
+                         texture2d<float> hm [[texture(0)]], texture2d<float> clim [[texture(2)]], texture2d<float> pv [[texture(16)]]) {
+    MoteOut o;
+    o.pos = float4(0, 0, -1, 1);
+    o.m = 0; o.re = 1; o.col = 0;
+    float sky = bioRamp(f.sunDir.y);
+    if (sky <= 0.0) return o;
+    int2 origin = f.mapInfo.xy;
+    uint seed = uint(f.mapInfo.w);
+    float time = f.camRight.w;
+    float2 org = float2(origin);
+    float3 wo = f.camPos.xyz + float3(org.x, 0.0, org.y);
+    int3 c = int3(floor((wo - MOTE_REACH) / MOTE_CELL)) + int3(int(iid) % MOTE_N, (int(iid) / MOTE_N) % MOTE_N, int(iid) / (MOTE_N * MOTE_N));
+    uint hh = pcg(uint(c.x) * 1597334677u ^ uint(c.y) * 3812015801u ^ uint(c.z) * 2798796415u ^ (seed + 710u));
+    if (hashf(hh) >= 0.5) return o;
+    uint h1 = pcg(hh), h2 = pcg(h1), h3 = pcg(h2), h4 = pcg(h3), h5 = pcg(h4);
+    float3 a = float3(c) * MOTE_CELL + 1.3 + (MOTE_CELL - 2.6) * float3(hashf(h1), hashf(h2), hashf(h3));
+    float ph = 6.283 * hashf(h4);
+    float3 m = a + 0.8 * float3(sin(time * 0.31 + ph), 0.5 * sin(time * 0.47 + 1.7 * ph), sin(time * 0.23 + 2.3 * ph));
+    float3 v = m - wo;
+    float dist = length(v), z = dot(v, f.camFwd.xyz);
+    float fade = smoothstep(3.0, 10.0, dist) * (1.0 - smoothstep(0.65 * MOTE_REACH, MOTE_REACH, dist));
+    if (fade <= 0.0 || z < 0.5) return o;
+    float2 ml = a.xz - org;
+    float4 col4 = hm.read(uint2(clamp(int2(floor(ml)), int2(0), int2(hm.get_width() - 1))), 0);
+    bool veg = col4.a > 0.0 || col4.a == GIANT_A;
+    float above = a.y - col4.r;
+    if (above >= 8.0 || above <= (veg ? -25.0 : -1.0)) return o;
+    Climate cl = climateAt(clim, ml, pv, origin);
+    float w = max(smoothstep(0.1, 0.5, provinceAmount(cl)), veg ? 0.2 * smoothstep(0.35, 0.6, cl.moist) : 0.0)
+            * (1.0 - smoothstep(0.42, 0.18, cl.temp));
+    if (hashf(h5) >= w) return o;
+    float tanH = f.camPos.w;
+    float re = max(0.1, 0.8 * dist * 2.0 * tanH * f.resolution.w);
+    float2 corner = float2(float(vid & 1u), float(vid >> 1)) * 2.0 - 1.0;
+    float3 p = v + (f.camRight.xyz * corner.x + f.camUp.xyz * corner.y) * 4.5 * re;
+    float pz = dot(p, f.camFwd.xyz);
+    float2 ndc = float2(dot(p, f.camRight.xyz) / (tanH * f.camFwd.w), dot(p, f.camUp.xyz) / tanH) / pz;
+    o.pos = float4(ndc - f.jitter.xy, 0.5, 1.0);
+    o.m = m - float3(org.x, 0.0, org.y);
+    o.re = re;
+    // Each flashes on its own slow rhythm, fading in and out over a second or so.
+    float blink = 0.15 + 0.85 * smoothstep(0.3, 1.0, sin(time * (0.5 + 0.6 * hashf(pcg(h5))) + ph));
+    float hp = hashf(pcg(h5 + 1u));
+    float3 hue = hp < 0.2 ? BIO_LAND[0] : hp < 0.75 ? BIO_LAND[1] : BIO_LAND[2];
+    o.col = hue * blink * fade * sky;
+    return o;
+}
+
+// Adds a bug's glow along the pixel's ray up to the depth the scene left in alpha.
+fragment float4 bioFragment(MoteOut in [[stage_in]], float4 dst [[color(0)]], constant Frame& f [[buffer(0)]]) {
+    float2 ndc = in.pos.xy * f.resolution.zw * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+    ndc += f.jitter.xy;
+    float tanH = f.camPos.w;
+    float3 d = normalize(f.camFwd.xyz + f.camRight.xyz * ndc.x * tanH * f.camFwd.w + f.camUp.xyz * ndc.y * tanH);
+    float3 v = in.m - f.camPos.xyz;
+    float tm = dot(v, d);
+    if (tm > abs(dst.a)) return dst;
+    float e2 = (dot(v, v) - tm * tm) / (in.re * in.re);
+    float g = (3.0 * exp(-e2) + 0.4 * exp(-e2 / 9.0)) * (0.1 * 0.1) / (in.re * in.re) * (1.0 - smoothstep(9.0, 20.0, e2));
+    return float4(dst.rgb + in.col * g, dst.a);
+}
+
 fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0)]],
                               texture2d<float> hm [[texture(0)]], texture2d<float> cloudTex [[texture(1)]],
                               texture2d<float> clim [[texture(2)]], texture2d<uint> st [[texture(3)]],
@@ -6932,7 +7456,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
                 open = 0.0;
                 // Land the haze all but hides needs no shading.
                 float T = fogTransmittance(x, wp, r, rh.t, 2);
-                refl = applyFogT(x, T < 0.01 || (x.prof & 8) ? float3(0.0) : shadeL(x, x.L, wp, r, rh, x.shadowMode == 1.0 ? 2 : 1, true), wp, r, T);
+                refl = applyFogT(x, T < 0.01 || (x.prof & 8) ? float3(0.0) : shadeL(x, x.L, wp, r, rh, x.shadowMode == 1.0 ? 2 : 1, true), wp, r, T,
+                                 landSolid(x, wp + r * rh.t));
             } else {
                 refl = softCloudSky(x, wp, r);
             }
@@ -7011,6 +7536,9 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
                 col += E * (0.06 + 0.5 * spark) * x.lights.w;
             }
         }
+        float glowAmt = smoothstep(0.03, -0.14, x.L.sun.y);
+        if (glowAmt > 0.0 && !(x.prof & 128))
+            col += seaGlow(x, d, wp, ww, wl, tw, e0, fres, glowAmt, salt);
         tSurf = tw;
     } else if (h.hit) {
         col = lit;
@@ -7054,7 +7582,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             }
     }
     if (f.misc2.z == 3) return float4(float3(fogTransmittance(x, o, d, tSurf)), 1);
-    if (f.misc2.z != 2) col = Tfog >= 0.0 ? applyFogT(x, col, o, d, Tfog) : applyFog(x, col, o, d, tSurf);
+    if (f.misc2.z != 2) col = Tfog >= 0.0 ? applyFogT(x, col, o, d, Tfog, landSolid(x, o + d * h.t)) : applyFog(x, col, o, d, tSurf);
     // A summit above the cloud base is seen through the slab in front of it.
     if (!(x.prof & 32) && !water && h.hit && o.y < CLOUD_Y0 && o.y + d.y * h.t > CLOUD_Y0) {
         CloudSample cl = cloudSheet(x, o, d, h.t, 6);
