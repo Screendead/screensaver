@@ -290,15 +290,13 @@ static inline float3 coralGlowHue(uint g) {
     return k < 0.45 ? SEAGLOW_TURQ : k < 0.7 ? mix(SEAGLOW_TURQ, SEAGLOW_BLUE, 0.5) : SEAGLOW_PINK * 0.8;
 }
 
-// The colony at world column w. Colonies lie within REEF_CELL / 2 of their centres, so a column asks the 2x2 cells
-// nearest it. glow: also sums the night glow there (about one colony in six, at its tips, with a soft halo in the
-// water round it); top: whether the glow is seen on a top face.
-static inline Coral coralAt(int2 w, uint seed, bool glow, float time, bool top, thread float3& g) {
+// The colony at world column w (h: 7 bits of its hash). Colonies lie within REEF_CELL / 2 of their centres, so a column
+// asks the 2x2 cells nearest it.
+static inline Coral coralAt(int2 w, uint seed) {
     Coral best;
     best.rise = 0; best.kind = 0; best.tip = 0; best.h = 0;
     float2 q = float2(w) + 0.5;
     int2 c0 = int2(floor(q / REEF_CELL - 0.5));
-    float3 bestHue = 0;
     // Staghorn branches by column; every kind's shape is worked out and one picked, as branching by kind would run
     // them all one after another wherever neighbouring pixels differ.
     uint hb = reefHash(w, seed + 151u);
@@ -329,17 +327,8 @@ static inline Coral coralAt(int2 w, uint seed, bool glow, float time, bool top, 
             float rise = kind == CORAL_BOULDER ? boulder : kind == CORAL_STAG ? stag : kind == CORAL_TABLE ? table : fan;
             float tip = kind == CORAL_BOULDER ? step(Hc - 0.5, rise) : kind == CORAL_STAG ? step(1.5, rise)
                       : kind == CORAL_TABLE ? smoothstep(R - 1.2, R - 0.4, dd) : 1.0;
-            float3 hue = 0;
-            if (glow) {
-                uint gh = reefMix(h2 ^ 0x5bd1e995u);
-                if (byteOf(gh, 0) < 0.18) {
-                    hue = coralGlowHue(gh) * (0.7 + 0.3 * sin(time * (0.4 + 0.3 * byteOf(gh, 2)) + 6.2831853 * byteOf(gh, 3)));
-                    g += hue * 0.045 * exp(-dd * dd / (R * R * 0.5));
-                }
-            }
-            if (rise > best.rise) { best.rise = rise; best.kind = kind; best.tip = tip; best.h = h2; bestHue = hue; }
+            if (rise > best.rise) { best.rise = rise; best.kind = kind; best.tip = tip; best.h = h2 & 127u; }
         }
-    if (glow && best.rise > 0.0) g += bestHue * 0.07 * (top ? 1.0 : 0.45) * max(best.tip, 0.3);
     return best;
 }
 
@@ -356,6 +345,22 @@ static inline float3 coralColour(Coral cr) {
     c = mix(float3(dot(c, float3(0.3, 0.59, 0.11))), c, 1.3);
     return mix(c, c * 1.08, cr.tip);
 }
+// The 1-voxel map keeps each reef column's make in the spare high bits of its extra-gap word (bits 11-15 of x, y and w;
+// extraGaps reads the low 11): bits 0-3 the reef's share (reefRegion, in 15ths), 4 a colony, 5-6 its kind, 7 a tip,
+// 8-14 its hash. The shading reads it rather than working the colonies out again.
+static inline uint4 reefPack(uint4 g, uint code) {
+    return uint4(g.x | ((code & 31u) << 11), g.y | (((code >> 5) & 31u) << 11), g.z, g.w | (((code >> 10) & 31u) << 11));
+}
+static inline uint reefCode(uint4 g) { return (g.x >> 11) | ((g.y >> 11) << 5) | ((g.w >> 11) << 10); }
+
+// Night: about one colony in six glows, soft and dim, at its tips most.
+static inline float3 coralGlowCode(uint code, float time) {
+    if ((code & 16u) == 0u) return 0;
+    uint gh = reefMix((code >> 8) ^ 0x5bd1e995u);
+    if (byteOf(gh, 0) >= 0.18) return 0;
+    return coralGlowHue(gh) * (0.7 + 0.3 * sin(time * (0.4 + 0.3 * byteOf(gh, 2)) + 6.2831853 * byteOf(gh, 3))) * ((code & 128u) != 0u ? 1.0 : 0.4);
+}
+
 // The reef floor between colonies: sand under algal turf and rubble.
 constant float3 REEF_TURF = float3(0.27, 0.27, 0.19);
 // The mean of a reef's colonies and floor, for coarse columns.
@@ -531,7 +536,7 @@ static inline Mega megaLift(float2 p, float lagoon, uint seed) {
 // A generated column: solid where y < h, except inside its gaps. [gl, gh) is the principal (highest) gap, [lo1, hi1) and
 // [lo2, hi2) up to two more below it, highest first (empty when hi <= lo). carved: the gaps are rock carved by the mega
 // relief (overhangs, caves, bridges), whose roofs rest on any neighbour rather than all four; canyon arches are not.
-struct Col { float h, gl, gh, lo1, hi1, lo2, hi2; bool carved; };
+struct Col { float h, gl, gh, lo1, hi1, lo2, hi2; bool carved; uint reef; };
 
 // Extra gaps (World gx, rgba16Uint): x lo1, y hi1, z lo2, w hi2 in the low 11 bits (heights stay under 2048); the top 5
 // bits of z hold flags (bit 0: carved). An empty gap is lo = hi = 0.
@@ -611,6 +616,7 @@ static inline Col terrainColumnBase(int2 w, uint seed, int s = 1) {
     // Lagoon shallows: the land sinks to a sandy bed rolling a few voxels either side of the surface,
     // so sand bars and islets break it and channels run deeper between them.
     float lagBed = 0.0;
+    uint reef = 0u;
     if (lagoon > 0.0) {
         float bed = fbm2((p + warp * 0.3 + ew) / 210.0, 3, seed + 15u) + 0.25 * perlin2(p / 600.0, seed + 16u);
         lagBed = SEA - 2.5 + bed * 14.0;
@@ -656,9 +662,11 @@ static inline Col terrainColumnBase(int2 w, uint seed, int s = 1) {
             float groove = step(0.08, reefNoise(p / 9.0, seed + 146u) + 0.5 * reefNoise(p / 4.0, seed + 147u));
             float hr = max(max(mix(h, top - 2.0 - groove, flat), mix(h, top - 1.0, crest)), mix(h, top - 2.0 - floor(2.5 * (1.0 - smoothstep(0.24, 0.4, blob))), patch));
             h = max(h, floor(mix(h, hr, smoothstep(0.3, 0.7, reg)) + 0.5));
+            reef = uint(saturate(reg) * 15.0 + 0.5);
             if (reg > 0.5 && s <= 2 && h >= REEF_FLOOR) {
-                float3 g0 = 0;
-                h = max(h, min(h + coralAt(w, seed, false, 0.0, false, g0).rise, top - 1.0));
+                Coral cr = coralAt(w, seed);
+                h = max(h, min(h + cr.rise, top - 1.0));
+                if (cr.rise > 0.0) reef |= 16u | (uint(cr.kind) << 5) | (cr.tip > 0.5 ? 128u : 0u) | (cr.h << 8);
             }
         }
     }
@@ -697,6 +705,7 @@ static inline Col terrainColumnBase(int2 w, uint seed, int s = 1) {
         if (hi < h - 8.0 && hi - lo >= 3.0) { gl = lo; gh = hi; col.carved = true; }
     }
     col.h = h; col.gl = gl; col.gh = gh;
+    col.reef = reef;
     return col;
 }
 
@@ -1319,7 +1328,7 @@ kernel void generateHeight(texture2d<float, access::write> out [[texture(0)]],
     int2 w = int2(gid) + info.xy;
     Col c = terrainColumn(w, uint(info.w));
     out.write(float4(c.h, c.gl, c.gh, 0), gid);
-    gxOut.write(packGaps(c), gid);
+    gxOut.write(c.h < SEA && c.gh <= c.gl ? reefPack(packGaps(c), c.reef) : packGaps(c), gid);
 }
 
 // Solid at height y in a column (H, gapLo, gapHi) with extra gaps e (lo1, hi1, lo2, hi2).
@@ -7076,26 +7085,48 @@ static inline SeaLife seaLife(thread const Ctx& x, float3 o, float3 d, Hit h, fl
         // Reefs: the bed was shaded as sand; colonies and the turf between them take their colours as a ratio to it.
         float3 bp = o + d * h.t;
         float2 bw = bp.xz + float2(x.origin);
-        float reg = reefRegion(bw + seedOffset(x.seed), lagRaw, x.seed);
-        float4 hc = h.level == 0 ? x.tr.hm.read(uint2(clamp(h.voxel.xz, int2(0), int2(x.tr.size - 1)))) : float4(0);
-        if (reg > 0.0 && hc.r < SEA && hc.a == 0.0) {
-            float hand = h.level == 0 ? max(max(smoothstep(0.8, 2.0, h.t * x.pixelAngle), smoothstep(260.0, 420.0, h.t)), morphAt(x.tr, 0, bp.xz)) : 1.0;
+        float reg = 0.0, hand = 1.0;
+        uint code = 0u;
+        bool bed = true;
+        if (h.level == 0) {
+            uint2 vc = uint2(clamp(h.voxel.xz, int2(0), int2(x.tr.size - 1)));
+            float4 hc = x.tr.hm.read(vc);
+            bed = hc.r < SEA && hc.a == 0.0;
+            code = reefCode(x.tr.gx.read(vc));
+            reg = float(code & 15u) / 15.0;
+            hand = max(max(smoothstep(0.8, 2.0, h.t * x.pixelAngle), smoothstep(260.0, 420.0, h.t)), morphAt(x.tr, 0, bp.xz));
+        } else {
+            reg = reefRegion(bw + seedOffset(x.seed), lagRaw, x.seed);
+        }
+        if (reg > 0.0 && bed) {
             float cw = smoothstep(0.5, 0.7, reg);
-            bool glow = x.L.night > 0.0 && cw > 0.0;
-            float3 g = 0;
-            Coral cr;
-            cr.rise = 0; cr.h = 0; cr.tip = 0; cr.kind = 0;
-            if (cw > 0.0 && hand < 1.0 && bp.y > REEF_FLOOR - 1.0)
-                cr = coralAt(h.voxel.xz + x.origin, x.seed, glow, x.time, h.normal.y > 0, g);
-            if (hc.r < REEF_FLOOR) cr.rise = 0.0;
             float3 sandA = mix(float3(0.33, 0.29, 0.21), float3(0.37, 0.33, 0.245), lagoon);
             float3 alb = mix(sandA, REEF_TURF, 0.8 * smoothstep(0.3, 0.7, reg));
-            alb = mix(alb, mix(cr.rise > 0.0 ? coralColour(cr) : alb, REEF_MEAN, hand), cw);
+            float3 cc = alb;
+            if ((code & 16u) != 0u) {
+                Coral cr;
+                cr.rise = 1.0; cr.kind = int((code >> 5) & 3u); cr.tip = float((code >> 7) & 1u); cr.h = code >> 8;
+                cc = coralColour(cr);
+            }
+            alb = mix(alb, mix(cc, REEF_MEAN, hand), cw);
             life.litMul = alb / sandA;
-            // The halo of a colony on the deeper sand, where none grow, fades out with the bed.
-            if (glow) life.add += (g * (1.0 - hand) * smoothstep(REEF_FLOOR - 2.0, REEF_FLOOR, bp.y)
-                                   + mix(SEAGLOW_TURQ, SEAGLOW_BLUE, 0.3) * 0.012 * hand) * cw * x.L.night
-                                  * exp(-bedPath * float3(0.30, 0.09, 0.065)) * (1.0 - fres);
+            if (x.L.night > 0.0 && cw > 0.0) {
+                // Glowing colonies, soft across the columns about the point and brightest on their tips' tops.
+                float3 g = 0;
+                if (hand < 1.0) {
+                    float2 fq = bp.xz - 0.5;
+                    int2 i0 = int2(floor(fq));
+                    float2 fw = fq - floor(fq);
+                    float3 s00 = coralGlowCode(reefCode(x.tr.gx.read(uint2(clamp(i0, int2(0), int2(x.tr.size - 1))))), x.time);
+                    float3 s10 = coralGlowCode(reefCode(x.tr.gx.read(uint2(clamp(i0 + int2(1, 0), int2(0), int2(x.tr.size - 1))))), x.time);
+                    float3 s01 = coralGlowCode(reefCode(x.tr.gx.read(uint2(clamp(i0 + int2(0, 1), int2(0), int2(x.tr.size - 1))))), x.time);
+                    float3 s11 = coralGlowCode(reefCode(x.tr.gx.read(uint2(clamp(i0 + int2(1, 1), int2(0), int2(x.tr.size - 1))))), x.time);
+                    float3 soft = mix(mix(s00, s10, fw.x), mix(s01, s11, fw.x), fw.y);
+                    g = 0.05 * coralGlowCode(code, x.time) * (h.normal.y > 0 ? 1.0 : 0.45) + 0.035 * soft;
+                }
+                life.add += (g * (1.0 - hand) + mix(SEAGLOW_TURQ, SEAGLOW_BLUE, 0.3) * 0.012 * hand) * cw * x.L.night
+                            * exp(-bedPath * float3(0.30, 0.09, 0.065)) * (1.0 - fres);
+            }
         }
     }
     if (fishOn) {
