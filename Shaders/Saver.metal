@@ -230,6 +230,137 @@ constant float PAN = 20.0;
 static inline float poolNoise(float2 p, uint seed) { return fbm2(p / 140.0, 3, seed + 16) + 0.25 * perlin2(p / 35.0, seed + 17); }
 static inline float poolLevel(float salt) { return 0.08 + 0.5 * (1.0 - smoothstep(0.8, 0.95, salt)); }
 
+// MARK: - Reefs
+
+// Value noise in about [-0.5, 0.5], one hash a corner.
+static inline float reefNoise(float2 p, uint s) {
+    float2 i = floor(p), f = p - i;
+    uint2 c = uint2(int2(i));
+    float2 u = f * f * (3.0 - 2.0 * f);
+    uint cx0 = c.x * 1597334677u, cx1 = (c.x + 1u) * 1597334677u, cz0 = c.y * 3812015801u ^ s, cz1 = (c.y + 1u) * 3812015801u ^ s;
+    float a = hashf(pcg(cx0 ^ cz0)), b = hashf(pcg(cx1 ^ cz0)), cc = hashf(pcg(cx0 ^ cz1)), d = hashf(pcg(cx1 ^ cz1));
+    return mix(mix(a, b, u.x), mix(cc, d, u.x), u.y) - 0.5;
+}
+
+// Reefs grow in the warm lagoons only. Where, from cheap fields of seed-offset position p alone, so the shading can ask
+// again what the terrain decided: broad reefy reaches, cut by meandering sandy channels.
+static inline float reefRegion(float2 p, float lagoonRaw, uint seed) {
+    float r = smoothstep(-0.06, 0.06, reefNoise(p / 520.0, seed + 140u) + 0.14) * smoothstep(0.45, 0.65, lagoonRaw);
+    if (r <= 0.0) return 0.0;
+    float ch = abs(reefNoise(p / 75.0, seed + 141u) + 0.25 * reefNoise(p / 21.0, seed + 142u));
+    return r * smoothstep(0.03, 0.06, ch);
+}
+
+constant float REEF_CELL = 5.0;
+constant int CORAL_BOULDER = 0, CORAL_STAG = 1, CORAL_TABLE = 2, CORAL_FAN = 3;
+// Colonies grow on the reef's shallows, not on the deeper sand: scattered there they would leave the trace no open water
+// to skip.
+constant float REEF_FLOOR = 14.0;
+
+// A coral colony stands on a reef: rise, its height in voxels over the reef at this column; tip, 1 on its upper
+// voxels (staghorn branch ends, a table's rim, a boulder's crown, a fan's edge); h, its hash.
+struct Coral { float rise; int kind; float tip; uint h; };
+
+static inline float byteOf(uint h, uint k) { return float((h >> (8u * k)) & 255u) / 255.0; }
+
+// The colony of REEF_CELL cell c, if any: its centre cc (world xz), kind, size 0..1 and hash h2.
+static inline bool coralColony(int2 c, uint seed, thread float2& cc, thread int& kind, thread float& sz, thread uint& h2) {
+    uint h = hash2i(c, seed + 150u);
+    if (hashf(h) > 0.82) return false;
+    h2 = pcg(h);
+    cc = (float2(c) + 0.2 + 0.6 * float2(byteOf(h2, 0), byteOf(h2, 1))) * REEF_CELL;
+    float k01 = byteOf(h2, 2);
+    kind = k01 < 0.34 ? CORAL_BOULDER : k01 < 0.70 ? CORAL_STAG : k01 < 0.86 ? CORAL_TABLE : CORAL_FAN;
+    sz = byteOf(h, 3);
+    return true;
+}
+
+// The land glow's palette (BIO_LAND), shared with the sea glow: blue #2a6bff, turquoise #2fe3d0, pink #ff5fc8, linear.
+constant float3 SEAGLOW_BLUE = float3(0.023, 0.147, 1.0);
+constant float3 SEAGLOW_TURQ = float3(0.028, 0.768, 0.630);
+constant float3 SEAGLOW_PINK = float3(1.0, 0.115, 0.578);
+
+static inline float3 coralGlowHue(uint g) {
+    float k = byteOf(g, 1);
+    return k < 0.45 ? SEAGLOW_TURQ : k < 0.7 ? mix(SEAGLOW_TURQ, SEAGLOW_BLUE, 0.5) : SEAGLOW_PINK * 0.8;
+}
+
+// The colony at world column w. Colonies lie within REEF_CELL / 2 of their centres, so a column asks the 2x2 cells
+// nearest it. glow: also sums the night glow there (about one colony in six, at its tips, with a soft halo in the
+// water round it); top: whether the glow is seen on a top face.
+static inline Coral coralAt(int2 w, uint seed, bool glow, float time, bool top, thread float3& g) {
+    Coral best;
+    best.rise = 0; best.kind = 0; best.tip = 0; best.h = 0;
+    float2 q = float2(w) + 0.5;
+    int2 c0 = int2(floor(q / REEF_CELL - 0.5));
+    float3 bestHue = 0;
+    for (int j = 0; j < 2; j++)
+        for (int i = 0; i < 2; i++) {
+            float2 cc;
+            int kind;
+            float sz;
+            uint h2;
+            if (!coralColony(c0 + int2(i, j), seed, cc, kind, sz, h2)) continue;
+            float2 v = q - cc;
+            float dd = length(v);
+            float rise = 0, tip = 0, R = 0;
+            if (kind == CORAL_BOULDER) {
+                R = 1.4 + 1.4 * sz;
+                float Hc = 1.0 + floor(2.2 * sz + 0.5);
+                if (dd < R) { rise = floor(Hc * sqrt(1.0 - dd * dd / (R * R)) + 0.65); tip = step(Hc - 0.5, rise); }
+            } else if (kind == CORAL_STAG) {
+                R = 1.8 + 1.2 * sz;
+                if (dd < R) {
+                    uint hb = hash2i(w, seed + 151u);
+                    float b = byteOf(hb, 0);
+                    float Hb = 1.0 + floor(2.99 * byteOf(hb, 1) * (1.0 - 0.5 * dd / R));
+                    rise = b < 0.55 ? Hb : b < 0.8 ? 1.0 : 0.0;
+                    tip = step(1.5, rise);
+                }
+            } else if (kind == CORAL_TABLE) {
+                R = 1.6 + 1.3 * sz;
+                if (dd < R) { rise = 2.0 + floor(1.4 * sz); tip = smoothstep(R - 1.2, R - 0.4, dd); }
+            } else {
+                float a = byteOf(h2, 3) * 3.14159;
+                float2 ax = float2(cos(a), sin(a));
+                float L = 1.5 + 1.3 * sz;
+                R = L;
+                float u = clamp(dot(v, ax), -L, L);
+                float off = length(v - ax * u);
+                if (off < 0.62) { rise = floor(3.0 - 1.6 * abs(u) / L + 0.5); tip = 1.0; }
+            }
+            float3 hue = 0;
+            if (glow) {
+                uint gh = pcg(h2 ^ 0x9e3779b9u);
+                if (byteOf(gh, 0) < 0.18) {
+                    hue = coralGlowHue(gh) * (0.7 + 0.3 * sin(time * (0.4 + 0.3 * byteOf(gh, 2)) + 6.2831853 * byteOf(gh, 3)));
+                    g += hue * 0.03 * exp(-dd * dd / (R * R * 1.4));
+                }
+            }
+            if (rise > best.rise) { best.rise = rise; best.kind = kind; best.tip = tip; best.h = h2; bestHue = hue; }
+        }
+    if (glow && best.rise > 0.0) g += bestHue * 0.07 * (top ? 1.0 : 0.45) * max(best.tip, 0.3);
+    return best;
+}
+
+// Day colours of a colony, muted so the water's own tint leads: dark olive boulders, mauve and brown staghorn, sage and
+// tan tables, rose and violet fans, one in five warmer; barely paler at the tips.
+static inline float3 coralColour(Coral cr) {
+    uint g = pcg(cr.h + 3u);
+    float k = byteOf(g, 0);
+    bool warm = byteOf(g, 1) < 0.2;
+    float3 c = cr.kind == CORAL_BOULDER ? (warm ? float3(0.36, 0.27, 0.12) : mix(float3(0.22, 0.21, 0.11), float3(0.18, 0.22, 0.12), k))
+             : cr.kind == CORAL_STAG ? (warm ? float3(0.34, 0.20, 0.13) : mix(float3(0.25, 0.17, 0.23), float3(0.28, 0.17, 0.12), k))
+             : cr.kind == CORAL_TABLE ? mix(float3(0.15, 0.22, 0.17), float3(0.26, 0.23, 0.15), k)
+             : (warm ? float3(0.38, 0.15, 0.22) : mix(float3(0.30, 0.12, 0.19), float3(0.26, 0.14, 0.28), k));
+    c = mix(float3(dot(c, float3(0.3, 0.59, 0.11))), c, 1.3);
+    return mix(c, c * 1.08, cr.tip);
+}
+// The reef floor between colonies: sand under algal turf and rubble.
+constant float3 REEF_TURF = float3(0.27, 0.27, 0.19);
+// The mean of a reef's colonies and floor, for coarse columns.
+constant float3 REEF_MEAN = float3(0.33, 0.28, 0.21);
+
 // MARK: - Mega relief
 
 // Heights are rgba16Float/r16Float everywhere (map, rings, gaps, first leaf, the CPU copy): integers are exact only
@@ -430,7 +561,7 @@ static inline float megaTerrace(float h, float U, float wK, float td, uint seed)
     return min(mix(hm, (lv3 + smoothstep(e3, 1.0, hn3 - lv3)) * tdm, smoothstep(0.5, 30.0, U) * (1.0 - wK)), TERRAIN_CEIL);
 }
 
-static inline Col terrainColumnBase(int2 w, uint seed) {
+static inline Col terrainColumnBase(int2 w, uint seed, int s = 1) {
     float2 p = float2(w) + seedOffset(seed);
     float2 warp = float2(fbm2(p / 900.0, 2, seed + 1), fbm2(p / 900.0 + 37.1, 2, seed + 2)) * 300.0;
     float c = saturate(fbm2((p + warp) / 2000.0, 3, seed + 3) * 1.4 + 0.5);
@@ -479,9 +610,11 @@ static inline Col terrainColumnBase(int2 w, uint seed) {
     h = mix(SEA - 3.0, h, valley);
     // Lagoon shallows: the land sinks to a sandy bed rolling a few voxels either side of the surface,
     // so sand bars and islets break it and channels run deeper between them.
+    float lagBed = 0.0;
     if (lagoon > 0.0) {
         float bed = fbm2((p + warp * 0.3 + ew) / 210.0, 3, seed + 15u) + 0.25 * perlin2(p / 600.0, seed + 16u);
-        h = mix(h, SEA - 2.5 + bed * 14.0, lagoon);
+        lagBed = SEA - 2.5 + bed * 14.0;
+        h = mix(h, lagBed, lagoon);
     }
     Mega mg = megaLift(p, lagoon, seed);
     float U = mg.U;
@@ -507,6 +640,28 @@ static inline Col terrainColumnBase(int2 w, uint seed) {
     }
     // Lake beds are one flat shelf: submerged terraces read as stepping stones under the surface.
     if (h < SEA && !pool) h = floor(mix(floor(SEA) - 2.0, h, lagoon) + 0.5);
+    // Reefs: a flat behind a crest along the shallows (a fringing reef, its crest at the drop-off), patch reefs and
+    // bommies rising from the deeper bed, colonies of coral on all of them; never breaking the surface.
+    if (lagoon > 0.45 && !pool && h < SEA && h >= SEA - 12.0 && U <= 0.5) {
+        float reg = reefRegion(p, lagoon, seed);
+        if (reg > 0.0) {
+            float D = SEA - lagBed;
+            float top = floor(SEA);
+            float fringe = smoothstep(-0.05, 0.08, reefNoise(p / 180.0, seed + 145u) + 0.1);
+            float flat = smoothstep(0.4, 1.0, D) * (1.0 - smoothstep(3.6, 5.0, D)) * fringe;
+            float crest = exp(-(D - 3.9) * (D - 3.9) / 0.6) * fringe;
+            float blob = reefNoise(p / 34.0, seed + 143u) + 0.35 * reefNoise(p / 11.0, seed + 144u);
+            float patch = smoothstep(0.16, 0.32, blob) * smoothstep(4.0, 6.0, D);
+            // Spur and groove: the flat rolls a voxel up and down across the shallows.
+            float groove = step(0.08, reefNoise(p / 9.0, seed + 146u) + 0.5 * reefNoise(p / 4.0, seed + 147u));
+            float hr = max(max(mix(h, top - 2.0 - groove, flat), mix(h, top - 1.0, crest)), mix(h, top - 2.0 - floor(2.5 * (1.0 - smoothstep(0.24, 0.4, blob))), patch));
+            h = max(h, floor(mix(h, hr, smoothstep(0.3, 0.7, reg)) + 0.5));
+            if (reg > 0.5 && s <= 2 && h >= REEF_FLOOR) {
+                float3 g0 = 0;
+                h = max(h, min(h + coralAt(w, seed, false, 0.0, false, g0).rise, top - 1.0));
+            }
+        }
+    }
 
     // Arches and undercuts: noise blobs hollow out a band low in each mesa tier.
     float gl = 0, gh = 0;
@@ -1102,7 +1257,7 @@ static inline float towerIvyDrop(float2 w, float2 c, float rot, int N, uint th, 
     return min(room, 20.0 + 90.0 * wet) * smoothstep(-0.25, 0.2, mat + 0.4 * wet - 0.1) * (0.75 + 0.25 * perlin2(q / 9.0, seed + 562u));
 }
 
-static inline Col terrainColumnS(int2 w, uint seed, int s) { return towerColumn(terrainColumnBase(w, seed), w, seed, s); }
+static inline Col terrainColumnS(int2 w, uint seed, int s) { return towerColumn(terrainColumnBase(w, seed, s), w, seed, s); }
 static inline Col terrainColumn(int2 w, uint seed) { return terrainColumnS(w, seed, 1); }
 
 // The shading table (fragment buffer 9; stage 3's giants hold 8): the towers standing nearest the camera (Sources/Towers.swift fills it from placeTowers).
@@ -6768,6 +6923,192 @@ static float3 hazeAndSmoke(thread const Ctx& x, float3 col, device const Site* s
     return col;
 }
 
+// MARK: - Reef glow and fish
+
+// Fish: in some FISH_CELL cells a school (6 to 10) or a single larger fish, wandering about the cell's middle and now
+// and then darting. Everything is a smooth function of world position and time, and a school with its last second of
+// track stays inside its cell, so a pixel asks its own cell alone.
+constant float FISH_CELL = 40.0;
+constant float FISH_DEPTH = 1.2;
+
+struct FishSample { float wake; float body; float shade; float glint; };
+
+static inline float2 fishWander(float t, uint h) {
+    uint g = pcg(h + 1u);
+    float4 ph = float4(byteOf(g, 0), byteOf(g, 1), byteOf(g, 2), byteOf(g, 3)) * 6.2831853;
+    return 5.5 * float2(sin(0.31 * t + ph.x) + 0.45 * sin(0.83 * t + ph.y), sin(0.27 * t + ph.z) + 0.45 * sin(0.71 * t + ph.w));
+}
+
+// A dart: out 4.5 voxels in a twelfth of the period, drifting back over the rest; zero with zero slope at its ends.
+static inline float2 fishDart(float t, uint h, float period) {
+    float u = t / period + hashf(pcg(h + 5u));
+    float k = floor(u), f = u - k;
+    uint hk = hash2i(int2(int(k), 7), h);
+    if (hashf(hk) > 0.65) return 0;
+    float a = hashf(pcg(hk)) * 6.2831853;
+    return float2(cos(a), sin(a)) * 4.5 * (smoothstep(0.0, 0.08, f) - smoothstep(0.3, 1.0, f));
+}
+
+// A fin flick: a brief pulse once every five to eight seconds, per fish (hash hi).
+static inline float fishFlick(float t, uint hi) {
+    float ph = fract(t * (0.13 + 0.08 * byteOf(hi, 3)) + byteOf(hi, 2));
+    float b = saturate(1.0 - abs(ph - 0.5) * 40.0);
+    return b * b * (3.0 - 2.0 * b);
+}
+
+// A school's formation: points in the unit disc, turned and scaled per school.
+constant float2 FISH_SPOTS[8] = { float2(0.0, 0.0), float2(0.62, 0.21), float2(-0.48, 0.55), float2(-0.2, -0.71),
+                                  float2(0.37, -0.52), float2(0.93, -0.18), float2(-0.85, -0.1), float2(0.15, 0.92) };
+
+// q: world xz at the fishes' depth along the view; bs: the bed point's xz moved toward the sun to where a fish shadows
+// it (unused when shadows is false); fpv: voxels per pixel there. wake (at night): the glowing track fast movement
+// leaves in the water (fin flicks, darts), about [0, 1]; else body: a fish's silhouette; shade: its shadow on the bed;
+// glint: a flank catching the light as it flicks. Kept lean in registers: inlined in the scene pass, a heavier body
+// slowed every pixel.
+static inline FishSample fishAt(thread const Ctx& x, float2 q, float2 bs, bool shadows, float fpv, bool wake) {
+    FishSample r = { 0, 0, 0, 0 };
+    int2 cell = int2(floor(q / FISH_CELL));
+    uint h = hash2i(cell, x.seed + 160u);
+    if (hashf(h) > 0.22) return r;
+    float2 C = (float2(cell) + 0.5) * FISH_CELL;
+    bool single = (h & 7u) < 3u;
+    float t = x.time, per = single ? 3.4 : 5.5;
+    float spread = single ? 0.0 : 3.2;
+    int n = single ? 1 : 5 + int((h >> 4) % 4u);
+    float L = single ? 1.3 : 0.55;
+    uint hs = pcg(h + 9u);
+    float sa = byteOf(hs, 0) * 6.2831853;
+    float2 rot = float2(cos(sa), sin(sa)) * spread;
+    float2 c0 = C + fishWander(t, h) + fishDart(t, h, per);
+    if (wake) {
+        // A dart runs out and back along one line, so the last second keeps within the school's spread, the glow's
+        // reach and a little bow of the chord from then to now.
+        float2 c5 = C + fishWander(t - 0.95, h) + fishDart(t - 0.95, h, per);
+        float2 a0 = q - c0, s0 = c5 - c0;
+        if (length(a0 - s0 * saturate(dot(a0, s0) / max(dot(s0, s0), 1e-4))) > 1.25 * spread + 3.0 + 2.5 * fpv) return r;
+        const float tau[6] = { 0.0, 0.12, 0.25, 0.42, 0.65, 0.95 };
+        float2 ca = c0;
+        for (int j = 0; j < 5; j++) {
+            float2 cb = j == 4 ? c5 : C + fishWander(t - tau[j + 1], h) + fishDart(t - tau[j + 1], h, per);
+            float tm = 0.5 * (tau[j] + tau[j + 1]);
+            float2 sg = cb - ca;
+            // The school's speed along this step lights it: a dart, not the slow wander.
+            float Id = smoothstep(3.0, 8.0, length(sg) / (tau[j + 1] - tau[j]));
+            float E = exp(-tm / 0.35);
+            float wv = (single ? 0.6 : 0.4) + 0.6 * tm;
+            float w2 = wv * wv + 0.25 * fpv * fpv;
+            float k = (single ? 1.4 : 0.6) * E * wv * wv / w2;
+            for (int i = 0; i < n; i++) {
+                uint hi = pcg(h + uint(i) * 31u + 11u);
+                float I = Id + 0.6 * fishFlick(t - tm, hi);
+                if (I * E < 0.01) continue;
+                float2 sp = FISH_SPOTS[i] * (0.75 + 0.5 * byteOf(hi, 0));
+                float2 a = q - ca - float2(sp.x * rot.x - sp.y * rot.y, sp.x * rot.y + sp.y * rot.x);
+                float2 e = a - sg * saturate(dot(a, sg) / max(dot(sg, sg), 1e-4));
+                r.wake += I * k * exp(-dot(e, e) / w2);
+            }
+            ca = cb;
+        }
+    } else {
+        float dB = length(q - c0);
+        if (shadows) dB = min(dB, length(bs - c0));
+        if (dB > 1.25 * spread + 2.0) return r;
+        // The school swims as one, heading along its track.
+        float2 hd = normalize(c0 - (C + fishWander(t - 0.12, h) + fishDart(t - 0.12, h, per)) + float2(1e-4, 0));
+        for (int i = 0; i < n; i++) {
+            uint hi = pcg(h + uint(i) * 31u + 11u);
+            float wf = 0.8 + 0.5 * byteOf(hi, 3), pf = 6.2831853 * byteOf(hi, 2);
+            float2 sp = FISH_SPOTS[i] * (0.75 + 0.5 * byteOf(hi, 0));
+            float2 P0 = c0 + float2(sp.x * rot.x - sp.y * rot.y, sp.x * rot.y + sp.y * rot.x);
+            float2 a = q - P0;
+            float u = dot(a, hd), sv = a.x * hd.y - a.y * hd.x;
+            sv -= 0.25 * L * sin(t * 9.0 * wf + pf) * saturate(-u / L);
+            float m = (u * u) / (L * L) + (sv * sv) / (0.1 * L * L);
+            float body = smoothstep(1.0, 0.45, m);
+            r.body = max(r.body, body);
+            r.glint = max(r.glint, body * fishFlick(t, hi));
+            if (shadows) {
+                float2 b = bs - P0;
+                float ub = dot(b, hd), vb = b.x * hd.y - b.y * hd.x;
+                r.shade = max(r.shade, smoothstep(1.6, 0.4, (ub * ub) / (L * L) + (vb * vb) / (0.14 * L * L)));
+            }
+        }
+    }
+    if (r.wake + r.body + r.shade <= 0.0) return r;
+    // Fish keep off the shallows, fading on the bed's broad depth under the school.
+    float fade = smoothstep(1.5, 2.6, SEA - groundSmoothL(x.tr, min(3, x.tr.levels - 1), c0 - float2(x.origin)));
+    r.wake *= fade; r.body *= fade; r.shade *= fade; r.glint *= fade;
+    return r;
+}
+
+// The wake term alone, for the sea glow to light its crests by: q, world xz just under the surface.
+static inline float seaWake(thread const Ctx& x, float2 q, float fpv) { return fishAt(x, q, q, false, fpv, true).wake; }
+
+struct SeaLife { float3 litMul; float underMul; float3 add; };
+
+// The reef and its fish at a water pixel: litMul tints the bed's sand shading to the reef's colours, underMul darkens
+// the water under fish and their shadows, add is the glints, glowing corals and wakes over the surface.
+static inline SeaLife seaLife(thread const Ctx& x, float3 o, float3 d, Hit h, float tw, float2 ww, float lagRaw,
+                                                 float lagoon, float fishAmt, float fres, float bedShows, bool reefOn, bool fishOn) {
+    SeaLife life = { float3(1), 1.0, float3(0) };
+    float bedPath = h.t - tw;
+    if (reefOn) {
+        // Reefs: the bed was shaded as sand; colonies and the turf between them take their colours as a ratio to it.
+        float3 bp = o + d * h.t;
+        float2 bw = bp.xz + float2(x.origin);
+        float reg = reefRegion(bw + seedOffset(x.seed), lagRaw, x.seed);
+        float4 hc = h.level == 0 ? x.tr.hm.read(uint2(clamp(h.voxel.xz, int2(0), int2(x.tr.size - 1)))) : float4(0);
+        if (reg > 0.0 && hc.r < SEA && hc.a == 0.0) {
+            float hand = h.level == 0 ? max(max(smoothstep(0.8, 2.0, h.t * x.pixelAngle), smoothstep(260.0, 420.0, h.t)), morphAt(x.tr, 0, bp.xz)) : 1.0;
+            float cw = smoothstep(0.5, 0.7, reg);
+            bool glow = x.L.night > 0.0 && cw > 0.0;
+            float3 g = 0;
+            Coral cr;
+            cr.rise = 0; cr.h = 0; cr.tip = 0; cr.kind = 0;
+            if (cw > 0.0 && hand < 1.0 && bp.y > REEF_FLOOR - 1.0)
+                cr = coralAt(h.voxel.xz + x.origin, x.seed, glow, x.time, h.normal.y > 0, g);
+            if (hc.r < REEF_FLOOR) cr.rise = 0.0;
+            float3 sandA = mix(float3(0.33, 0.29, 0.21), float3(0.37, 0.33, 0.245), lagoon);
+            float3 alb = mix(sandA, REEF_TURF, 0.8 * smoothstep(0.3, 0.7, reg));
+            alb = mix(alb, mix(cr.rise > 0.0 ? coralColour(cr) : alb, REEF_MEAN, hand), cw);
+            life.litMul = alb / sandA;
+            // The halo of a colony on the deeper sand, where none grow, fades out with the bed.
+            if (glow) life.add += (g * (1.0 - hand) * smoothstep(REEF_FLOOR - 2.0, REEF_FLOOR, bp.y)
+                                   + mix(SEAGLOW_TURQ, SEAGLOW_BLUE, 0.3) * 0.012 * hand) * cw * x.L.night
+                                  * exp(-bedPath * float3(0.30, 0.09, 0.065)) * (1.0 - fres);
+        }
+    }
+    if (fishOn) {
+        // By day fish are shadows and glints; from dusk, once they have faded, the wakes they leave glow in their stead.
+        bool wakes = x.L.night > 0.3;
+        float fpv = tw * x.pixelAngle / max(-d.y, 0.1);
+        float3 rd = refract(d, float3(0, 1, 0), 0.75);
+        float2 q = ww + rd.xz / max(-rd.y, 0.2) * FISH_DEPTH;
+        bool shadows = !wakes && h.hit && x.L.sunAmt > 0.0 && bedShows > 0.01;
+        float2 bs = q;
+        if (shadows) {
+            float3 bp = o + d * h.t;
+            float2 kh = x.L.key.xz / 1.33;
+            float3 kr = float3(kh.x, sqrt(max(1.0 - dot(kh, kh), 0.0)), kh.y);
+            bs = bp.xz + float2(x.origin) + kr.xz / kr.y * max(SEA - FISH_DEPTH - bp.y, 0.0);
+        }
+        FishSample fs = fishAt(x, q, bs, shadows, fpv, wakes);
+        if (wakes) {
+            float wake = fs.wake * fishAmt * smoothstep(340.0, 160.0, tw) * smoothstep(0.3, 0.6, x.L.night);
+            if (wake > 0.002) {
+                float rip = perlin3(float3(ww * 4.5, x.time * 2.0), x.seed + 161u);
+                float spark = mix(0.3 + 2.4 * smoothstep(0.12, 0.32, rip), 0.6, saturate(fpv * 3.0));
+                life.add += mix(SEAGLOW_TURQ, SEAGLOW_BLUE, 0.35) * 0.35 * wake * spark * x.L.night * (1.0 - 0.5 * fres);
+            }
+        } else {
+            float nb = fishAmt * smoothstep(200.0, 100.0, tw) * (1.0 - smoothstep(0.25, 0.6, fpv)) * (1.0 - smoothstep(0.0, 0.3, x.L.night));
+            life.underMul = (1.0 - 0.5 * fs.body * nb * (1.0 - 0.5 * x.L.night)) * (1.0 - 0.3 * fs.shade * nb * x.L.sunAmt);
+            life.add += x.L.keyCol * 0.12 * fs.glint * nb * x.L.sunAmt * (1.0 - fres);
+        }
+    }
+    return life;
+}
+
 fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0)]],
                               texture2d<float> hm [[texture(0)]], texture2d<float> cloudTex [[texture(1)]],
                               texture2d<float> clim [[texture(2)]], texture2d<uint> st [[texture(3)]],
@@ -6835,6 +7176,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         c = mix(c, float3(0.9, 0.5, 0.1), 0.45 * smoothstep(0.15, 0.6, pv.x));
         c = mix(c, float3(0.2, 0.4, 1.0), 0.45 * smoothstep(0.2, 0.6, pv.y));
         { Giant gm; if (giantAt(giants, wc, 0.0, gm)) c = float3(1); }
+        // Reefs coral-orange.
+        if (h0 < SEA) c = mix(c, float3(1.0, 0.45, 0.2), 0.7 * smoothstep(0.5, 0.7, reefRegion(wc + seedOffset(uint(f.mapInfo.w)), lagoonAmount(climate(wc, uint(f.mapInfo.w))), uint(f.mapInfo.w))));
         float px = 1300.0 * cs / f.resolution.y;
         float2 g1 = abs(wc - 2000.0 * floor(wc / 2000.0 + 0.5)), g2 = abs(wc - 10000.0 * floor(wc / 10000.0 + 0.5));
         if (any(g1 < px * 0.6)) c = mix(c, float3(0), 0.35);
@@ -6880,7 +7223,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     // The lagoon bed's shading and the land's share one call: each call site inlines all of shade.
     float3 wp = 0, n = 0, r = 0;
     float2 ww = 0;
-    float e0 = 0, lagoon = 0, salt = 0, fres = 0, bedShows = 0;
+    float e0 = 0, lagoon = 0, lagRaw = 0, salt = 0, fres = 0, bedShows = 0, warm = 0;
     int wl = 0;
     Light Ls = x.L;
     bool shadeHit = false;
@@ -6892,9 +7235,11 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         float ez = perlin3(float3((ww + float2(0, 0.05)) * 0.3, x.time * 0.25), x.seed + 60u);
         wl = levelAt(x.tr, length(wp.xz - x.tr.cam));
         Climate wc = climateL(x.tr, wl, wp.xz);
-        lagoon = smoothstep(0.0, 0.35, lagoonAmount(wc));
+        lagRaw = lagoonAmount(wc);
+        lagoon = smoothstep(0.0, 0.35, lagRaw);
         // Pools on a salt pan are a still skin over pale crust: a near-perfect mirror.
         salt = saltAmount(wc);
+        warm = smoothstep(0.45, 0.6, wc.temp) * (1.0 - salt);
         float rs = max(0.35 * saturate(1.0 - tw * x.pixelAngle * 4.0) * (1.0 - 0.6 * lagoon), 0.08 * x.L.night) * (1.0 - 0.7 * salt);
         n = normalize(float3(-(ex - e0) * rs, 1.0, -(ez - e0) * rs));
         r = reflect(d, n);
@@ -6944,6 +7289,14 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         } else {
             refl = softCloudSky(x, wp, r);
         }
+        // Reefs and fish.
+        SeaLife life = { float3(1), 1.0, float3(0) };
+        float fishAmt = warm * (0.4 + 0.6 * lagoon);
+        bool wakes = x.L.night > 0.3;
+        bool reefOn = lagRaw > 0.45 && h.hit && h.t - tw < 16.0 && (shadeHit || x.L.night > 0.0) && !(x.prof & 128);
+        bool fishOn = fishAmt > 0.0 && (wakes ? tw < 340.0 : tw < 200.0 && bedShows > 0.01 && x.L.night < 0.3) && !(x.prof & 256);
+        if (reefOn || fishOn) life = seaLife(x, o, d, h, tw, ww, lagRaw, lagoon, fishAmt, fres, bedShows, reefOn, fishOn);
+        lit *= life.litMul;
         float3 deep = x.L.zenith * 0.18 + x.L.horizon * 0.06 + float3(0.004, 0.014, 0.018);
         float3 under = deep;
         float bedPath = h.t - tw;
@@ -6962,7 +7315,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             }
         }
         under *= 1.0 - 0.4 * x.L.night;
-        col = mix(under, refl, fres);
+        under *= life.underMul;
+        col = mix(under, refl, fres) + life.add;
         // Glitter path toward the sun or moon: the main EDR highlight.
         col += x.L.keyCol * 6.0 * pow(max(dot(r, x.L.key), 0.0), mix(mix(900.0, 4000.0, x.L.night), 350.0, x.L.gold)) * fres * (x.L.shadows ? 1.0 : 0.3) * (1.0 + 0.5 * x.L.night) * open;
         // Golden hour: a broad sheen of the aureole on the water under the sun.
