@@ -7145,12 +7145,15 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
             int2 cell = int2(floor(q / 16.0));
             uint h = hash2i(cell, x.seed + 75u);
             if (hashf(h) < 0.07) {
-                if (broad < -0.5) broad = seaBroad(x, k, wp.xz);
-                float fj = smoothstep(1.5, 2.3, broad);
                 float ph = hashf(pcg(h)) * 6.2831853;
                 float dj = 0.8 + 2.2 * hashf(pcg(h + 2u));
                 float2 cc = (float2(cell) + 0.5) * 16.0 + 4.5 * float2(sin(t * 0.05 + ph), cos(t * 0.037 + ph * 1.7)) - slant * (dj - 1.9);
+                float fj = 0.0;
                 if (length_squared(q - cc) < 64.0) {
+                    if (broad < -0.5) broad = seaBroad(x, k, wp.xz);
+                    fj = smoothstep(1.5, 2.3, broad);
+                }
+                if (fj > 0.0) {
                     float pulse = 0.5 + 0.5 * sin(t * 0.9 + ph * 3.0);
                     float r = (0.9 + 0.7 * hashf(pcg(h + 1u))) * (1.0 + 0.1 * pulse);
                     float blur = 0.2 + 0.22 * dj + 0.5 * fpv;
@@ -7177,14 +7180,17 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
             int2 cell = int2(floor(q / 48.0));
             uint h = hash2i(cell, x.seed + 76u);
             if (hashf(h) < 0.12) {
-                if (broad < -0.5) broad = seaBroad(x, k, wp.xz);
-                float fp = smoothstep(0.8, 1.5, broad);
                 float ph = hashf(pcg(h)) * 6.2831853;
                 float2 cc = (float2(cell) + 0.5) * 48.0 + 11.0 * float2(sin(t * 0.03 + ph), cos(t * 0.023 + ph * 1.3));
                 float R = 5.0 + 3.0 * hashf(pcg(h + 1u));
                 float2 v = q - cc;
                 float rr = length(v) / R;
+                float fp = 0.0;
                 if (rr < 1.6) {
+                    if (broad < -0.5) broad = seaBroad(x, k, wp.xz);
+                    fp = smoothstep(0.8, 1.5, broad);
+                }
+                if (fp > 0.0) {
                     float a = atan2(v.y, v.x);
                     float arms = smoothstep(-0.2, 1.0, sin(3.0 * a - 5.0 * rr + t * 0.5 + ph));
                     float sa = t * 0.15 / (0.4 + rr);
@@ -7202,14 +7208,17 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
             int2 cell = int2(floor(q / 140.0));
             uint h = hash2i(cell, x.seed + 78u);
             if (hashf(h) < 0.22) {
-                if (broad < -0.5) broad = seaBroad(x, k, wp.xz);
-                float fr = smoothstep(2.1, 2.7, broad);
                 float ph = hashf(pcg(h)) * 6.2831853;
                 float dir = (h & 128u) ? 1.0 : -1.0;
                 float an = t * 0.012 * dir + ph;
                 float2 cc = (float2(cell) + 0.5) * 140.0 + 38.0 * float2(cos(an), sin(an));
                 float2 v = q - cc;
+                float fr = 0.0;
                 if (dot(v, v) < 196.0) {
+                    if (broad < -0.5) broad = seaBroad(x, k, wp.xz);
+                    fr = smoothstep(2.1, 2.7, broad);
+                }
+                if (fr > 0.0) {
                     float2 fw = dir * float2(-sin(an), cos(an));
                     float u = dot(v, fw), s = v.x * fw.y - v.y * fw.x;
                     float W = 7.5 * (1.0 + 0.1 * sin(t * 0.7 + ph)), L = 4.5;
