@@ -1263,7 +1263,7 @@ static inline float3 isleSpan(IsleRec r, float2 p, uint seed, int s, thread uint
         // Vines in curtains from under the rim, longer.
         uint vh = hash2i(int2(floor(p / 2.0)), seed + 716u);
         float vc = smoothstep(0.25, 0.5, perlin2(p / 23.0, seed + 717u)) * smoothstep(0.86, 0.95, d);
-        if (kind == ISK_ROCK && hashf(vh) < 0.16 * vc) { bot -= floor(8.0 + 34.0 * pow(hashf(pcg(vh)), 1.7)); kind = ISK_VINE; }
+        if (kind == ISK_ROCK && hashf(vh) < 0.11 * vc) { bot -= floor(8.0 + 28.0 * pow(hashf(pcg(vh)), 1.8)); kind = ISK_VINE; }
     }
     float leaf = 0.0;
     if (kind == ISK_ROCK) {
@@ -7105,7 +7105,8 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // only six voxels out, so in a shelter it reads the roof all round and varies column by column with the back wall's
     // jogs, striping it.
     skyFill *= mix(1.0 - mix(0.55, 0.85, hiSun) * (1.0 - sv), ROOF_SKY, roofW);
-    if (SCENE_ISLES && x.isles->n.x > 0) skyFill *= 1.0 - 0.85 * isleSkyOcc(x, p);
+    // An island's own rock is the occluder itself (s.gy): under its own disc its keel would go black.
+    if (SCENE_ISLES && x.isles->n.x > 0 && s.gy < 1e8) skyFill *= 1.0 - 0.85 * isleSkyOcc(x, p);
     // A wall sees half the dome, and the half it sees is the dimmer horizon side; without this a riser in shade
     // outshines the sunlit tread above it under a low sun.
     skyFill *= built ? 0.7 + 0.3 * saturate(nl.y) : 0.5 + 0.5 * saturate(nl.y);
@@ -7113,7 +7114,8 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // face on where it reaches the shelter's own floor: dim, never black; an underside stays well under the lit top of
     // its slab.
     float keyUp = mix(max(L.key.y, 0.0), max(L.key.y, 0.3) * saturate(L.key.y * 10.0), ov);
-    float3 bounce = (1.0 - saturate(nl.y)) * (built ? 0.6 : 0.35) * alb * L.keyCol * keyUp;
+    // An island's keel hangs over sunlit lowland, which lights it from below more than a shelter's mouth does.
+    float3 bounce = (1.0 - saturate(nl.y)) * (built ? 0.6 : s.gy >= 1e8 ? 0.6 : 0.35) * alb * L.keyCol * keyUp;
     // High sun: risers sit in cooler shade so terraces keep their modelling at noon.
     float3 riserShade = mix(float3(1.0), float3(0.82, 0.86, 0.95),
                             (h.normal.y == 0 ? 1.0 - saturate(nl.y) : 0.0) * smoothstep(0.3, 0.6, L.key.y) * smoothstep(1.5, 4.0, drop) * (1.0 - ov));
@@ -7334,7 +7336,8 @@ static float4 isleMist(thread const Ctx& x, float3 o, float3 d, float tEnd) {
         }
     }
     if (tau <= 0.0) return 0.0;
-    float a = smoothstep(0.1, 0.75, 1.0 - exp(-tau));
+    // Thinner under the moon, whose light it would otherwise hang in front of the dark rock as a pale veil.
+    float a = smoothstep(0.1, 0.75, 1.0 - exp(-tau)) * (1.0 - 0.35 * x.L.night);
     if (a <= 0.0) return 0.0;
     float h01 = hw / tau;
     float2 dh = normalize(d.xz + 1e-5), sh2 = normalize(x.L.sun.xz + 1e-5);
