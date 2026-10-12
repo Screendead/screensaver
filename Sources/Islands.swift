@@ -57,7 +57,7 @@ enum Islands {
     // Its form (Shaders/Saver.metal isleForm) and the crag a spire carries over its top (isleCrag).
     static func form(_ r: Double, _ h: UInt32) -> Int {
         let c = Provinces.hashf(Provinces.pcg(h &+ 30))
-        return r >= 30 && r <= 220 && c < 0.4 ? 1 : c < 0.58 ? 2 : c < 0.76 ? 3 : 0
+        return r >= 30 && r <= 130 && c < 0.4 ? 1 : c < 0.58 ? 2 : c < 0.76 ? 3 : 0
     }
     static func crag(_ r: Double, _ h: UInt32) -> Double { form(r, h) == 1 ? 0.3 * r : 0 }
 

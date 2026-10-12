@@ -1167,7 +1167,7 @@ static inline float isleReach(float R, uint h) { return isleStretch(R, h) * (1.4
 // and keel dropping toward one side by up to isleTilt; 3 a prow, its keel's deepest point off toward one side.
 static inline int isleForm(float R, uint h) {
     float c = hashf(pcg(h + 30u));
-    return R >= 30.0 && R <= 220.0 && c < 0.4 ? 1 : c < 0.58 ? 2 : c < 0.76 ? 3 : 0;
+    return R >= 30.0 && R <= 130.0 && c < 0.4 ? 1 : c < 0.58 ? 2 : c < 0.76 ? 3 : 0;
 }
 // The keel's depth before the room under it limits it.
 static inline float isleDepth(float R, uint h) {
@@ -1254,8 +1254,8 @@ static inline float3 isleSpan(IsleRec r, float2 p, uint seed, int s, thread uint
     // A rim of rock teeth on some.
     if (hashf(pcg(h + 13u)) < 0.3) top += 3.0 * ridged2(p / 7.0, 2, seed + 710u) * smoothstep(0.88, 0.97, d);
     top = floor(top + 0.5);
-    // A spire: a cliff a third of its depth, then a long taper to a point.
-    float t = form == 1 ? 0.4 * pow(1.0 - d, 0.15) + 0.6 * pow(1.0 - d, 1.2) : pow(1.0 - d, mix(mix(0.35, 0.8, hashf(pcg(h + 34u))), 1.0, small));
+    // A spire: steep flanks half its depth, then a long taper to a point.
+    float t = form == 1 ? 0.5 * pow(1.0 - d, 0.3) + 0.5 * pow(1.0 - d, 1.3) : pow(1.0 - d, mix(mix(0.5, 0.9, hashf(pcg(h + 34u))), 1.0, small));
     if (form == 3) {
         float th2 = hashf(pcg(h + 33u)) * 6.2831853;
         t = pow(1.0 - length(ql - float2(cos(th2), sin(th2)) * 0.35 * R) / (max(e, 4.0) + 0.35 * R), 0.55);
