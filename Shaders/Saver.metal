@@ -8456,7 +8456,11 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             // across the moon's bearing break the path into bands, and past them the cover itself remains.
             float fpv = tw * x.pixelAngle / max(-d.y, 0.1);
             float fine = perlin3(float3(ww * 1.6, x.time * 0.7), x.seed + 61u);
-            float2 mz = normalize(x.L.moon.xz);
+            // Crests face the moon's midnight bearing, within 45 degrees of it all night. Facing the moon itself
+            // turned the axes with every step of its bearing about a world origin some 10^5 voxels off, so the swell
+            // under the path jumped frame to frame.
+            constexpr float az0 = 0.75 * M_PI_F + 0.9;
+            const float2 mz = -float2(sin(az0), cos(az0));
             float swell = perlin3(float3(dot(ww, mz) * 0.07, (ww.x * mz.y - ww.y * mz.x) * 0.02, x.time * 0.1), x.seed + 62u);
             float rip = mix(swell, mix(e0, fine, saturate(2.0 - fpv * 10.0)), saturate(2.0 - fpv * 1.8));
             // The ripple noise is near-Gaussian (sd ~0.22); a logistic quantile turns cover into its threshold.

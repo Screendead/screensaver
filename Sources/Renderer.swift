@@ -1291,6 +1291,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 print(String(format: "camera low: y=%.1f ground=%.1f", camera.position.y, g))
             }
             clock.advance(step)
+            if let p = pinnedPhase { clock.phase = p }
             world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
             towers.update(center: SIMD2(camera.position.x, camera.position.z), queue: queue, wait: world.synchronous)
             // Snapshots simulate long stretches without frames: keep the far heights following the camera.

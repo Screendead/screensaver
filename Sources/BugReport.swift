@@ -374,6 +374,7 @@ enum BugReport {
             if rec.battery { a.append("--battery") }
             a += ["--scale", "\(rec.renderScale)"]
             if !dither { a.append("--nodither") }
+            if let p = r.pinnedPhase { a += ["--phase", "\(p)"] }
             return a.joined(separator: " ")
         }
         var text = "STRATA bug report \(dir.lastPathComponent)\n\n"
