@@ -5567,8 +5567,10 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     bool isleCol = !tree && !built && !giant && col.z > col.y && isleGapL(tr, k, v.xz, col4);
     bool isleBody = isleCol && float(v.y) >= col.z;
     // Its canopy, stream, fall or vine: the column's ST_ISLE word on the 1-voxel map, its leaf depth further out.
-    uint isw = isleBody && k == 0 ? st.read(uint2(clamp(v.xz, int2(0), int2(tr.size - 1)))).r : 0u;
-    bool isleWater = isleBody && (k == 0 ? (isw & ST_ISLE_WATER) != 0u : cdK.y == ISLE_WATER_DEPTH);
+    // Falls and streams run out to level 2 and the 1-voxel map holds the rest, all well inside the islands' pipeline
+    // variant's reach: compiled out of the others.
+    uint isw = SCENE_ISLES && isleBody && k == 0 ? st.read(uint2(clamp(v.xz, int2(0), int2(tr.size - 1)))).r : 0u;
+    bool isleWater = SCENE_ISLES && isleBody && (k == 0 ? (isw & ST_ISLE_WATER) != 0u : cdK.y == ISLE_WATER_DEPTH);
     float isleLo = (isw & (ST_ISLE | ST_ISLE_WATER | ST_ISLE_VINE)) == ST_ISLE ? float(isw & 2047u) : col.x;
     bool isleLeaf = k == 0 && isleBody && float(v.y) >= isleLo;
     // A coarse forested column's top is its leaves (coarseVeg).
@@ -5687,8 +5689,12 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     bool beach = H <= SEA + 1.2;
     // Rock tone shows on side and under faces, and on high treads; a low tread never reads it.
     bool needStone = !beach && !vegVox && (!(n.y > 0 && !underGap) || Hc - SEA > 0.55 * 110.0);
-    float3 stone = !needStone ? float3(0) : isleCol && float(v.y) >= col.z ? isleRock(wy, wq, seed, fpA)
-                 : strataTone(wy, wq, seed, max(desert, rimW), fpA, wallM, lite);
+    // Branches, not selects: a select would work out both tones for every pixel.
+    float3 stone = 0;
+    if (needStone) {
+        if (isleBody) stone = isleRock(wy, wq, seed, fpA);
+        else stone = strataTone(wy, wq, seed, max(desert, rimW), fpA, wallM, lite);
+    }
 
     float lagoon = smoothstep(0.0, 0.35, lagoonAmount(c));
     // Pale ground (sand, salt, snow) sits well below the clouds, and drifts in tone so open flats never read as one sheet.
