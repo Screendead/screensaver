@@ -6982,11 +6982,11 @@ static inline FishSample fishAt(thread const Ctx& x, float2 q, float2 bs, bool s
     float sa = byteOf(hs, 0) * 6.2831853;
     float2 rot = float2(cos(sa), sin(sa)) * spread;
     if (wake) {
-        // Calm water stays dark: unless a dart began within the last second and a half, or some fish flicked within
-        // the last second, nothing is lit, and the track need not be worked out.
+        // Calm water stays dark: unless a dart's outward rush or a fin flick fell within the last second, nothing is
+        // lit, and the track need not be worked out.
         float u = t / per + hashf(pcg(h + 5u));
         float k = floor(u);
-        bool lit = (u - k) * per < 0.08 * per + 1.0 && hashf(hash2i(int2(int(k), 7), h)) <= 0.65;
+        bool lit = (u - k) * per < 0.08 * per + 0.95 && hashf(hash2i(int2(int(k), 7), h)) <= 0.65;
         for (int i = 0; i < n && !lit; i++) {
             uint hi = pcg(h + uint(i) * 31u + 11u);
             float rate = fishFlickRate(hi);
@@ -6999,21 +6999,25 @@ static inline FishSample fishAt(thread const Ctx& x, float2 q, float2 bs, bool s
     if (wake) {
         // A dart runs out and back along one line, so the last second keeps within the school's spread, the glow's
         // reach and a little bow of the chord from then to now.
-        float2 c5 = C + fishWander(t - 0.95, h) + fishDart(t - 0.95, h, per);
+        float2 d5 = fishDart(t - 0.95, h, per);
+        float2 c5 = C + fishWander(t - 0.95, h) + d5;
         float2 a0 = q - c0, s0 = c5 - c0;
         if (length(a0 - s0 * saturate(dot(a0, s0) / max(dot(s0, s0), 1e-4))) > 1.25 * spread + 3.0 + 2.5 * fpv) return r;
         const float tau[6] = { 0.0, 0.12, 0.25, 0.42, 0.65, 0.95 };
-        float2 ca = c0;
+        float2 ca = c0, da = fishDart(t, h, per);
         for (int j = 0; j < 5; j++) {
-            float2 cb = j == 4 ? c5 : C + fishWander(t - tau[j + 1], h) + fishDart(t - tau[j + 1], h, per);
+            float2 db = j == 4 ? d5 : fishDart(t - tau[j + 1], h, per);
+            float2 cb = j == 4 ? c5 : C + fishWander(t - tau[j + 1], h) + db;
             float tm = 0.5 * (tau[j] + tau[j + 1]);
             float2 sg = cb - ca;
-            // The school's speed along this step lights it: a dart, not the slow wander.
-            float Id = smoothstep(3.0, 8.0, length(sg) / (tau[j + 1] - tau[j]));
-            float E = exp(-tm / 0.35);
+            // A dart's outward rush lights the water, never the wander or the drift back: then the window above
+            // holds every lit step.
+            float Id = saturate((length(db - da) / (tau[j + 1] - tau[j]) - 2.5) / 10.0);
+            da = db;
+            float E = exp(-tm / 0.3);
             float wv = (single ? 0.6 : 0.4) + 0.6 * tm;
             float w2 = wv * wv + 0.25 * fpv * fpv;
-            float k = (single ? 1.4 : 0.6) * E * wv * wv / w2;
+            float k = (single ? 1.8 : 0.8) * E * wv * wv / w2;
             for (int i = 0; i < n; i++) {
                 uint hi = pcg(h + uint(i) * 31u + 11u);
                 float I = Id + ((single || (hi & 0x100000u) != 0u) ? 0.6 * fishFlick(t - tm, hi) : 0.0);
