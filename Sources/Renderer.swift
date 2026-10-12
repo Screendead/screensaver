@@ -87,6 +87,19 @@ final class GPU {
         return fullscreen(try? library.makeFunction(name: "sceneFragment", constantValues: fc), .rgba16Float)
     }
 
+    // The giants' hanging strands, drawn over the scene (vineFragment): the towers and the band test compiled out.
+    func vine() -> MTLRenderPipelineState? {
+        pipeline("vine") { vineDescriptor() }
+    }
+
+    private func vineDescriptor() -> MTLRenderPipelineDescriptor {
+        let fc = MTLFunctionConstantValues()
+        var no = false
+        fc.setConstantValue(&no, type: .bool, index: 0)
+        fc.setConstantValue(&no, type: .bool, index: 1)
+        return fullscreen(try? library.makeFunction(name: "vineFragment", constantValues: fc), .rgba16Float)
+    }
+
     func taa() -> MTLRenderPipelineState? {
         pipeline("taa") { fullscreen(library.makeFunction(name: "taaFragment"), .rgba16Float) }
     }
@@ -124,6 +137,7 @@ final class GPU {
                            "bio": bioDescriptor(),
                            GPU.postKey(output, true): postDescriptor(output, true)]
         for t in [false, true] { for b in [false, true] { descriptors[GPU.sceneKey(t, b)] = sceneDescriptor(t, b) } }
+        descriptors["vine"] = vineDescriptor()
         for f in functions where f.functionType == .kernel {
             group.enter()
             device.makeComputePipelineState(function: f) { p, _ in
@@ -205,6 +219,9 @@ struct GiantInfo {
     var top: Double
     // 0 banyan, 1 kapok, 2 weeping (placeGiants).
     var kind = 0
+    // The record's trunk height and hash (Vines bakes its strands from them).
+    var yT = 0.0
+    var h: UInt32 = 0
 }
 
 // A structure site as the camera and the smoke and halo lists see it, in world coordinates.
@@ -730,7 +747,7 @@ final class World {
             let r = p[i]
             // The crown's top: giantPad's dome in Shaders/Saver.metal rises about yT + 36 + 0.55 * 56 + 9.5, the high limbs'
             // clumps to about yT + 84.
-            return r.g > 0 ? GiantInfo(pos: SIMD2(Double(r.c.x), Double(r.c.y)), ground: Double(r.g), top: Double(r.g + r.yT) + 85, kind: Int(r.kind)) : nil
+            return r.g > 0 ? GiantInfo(pos: SIMD2(Double(r.c.x), Double(r.c.y)), ground: Double(r.g), top: Double(r.g + r.yT) + 85, kind: Int(r.kind), yT: Double(r.yT), h: r.h) : nil
         }
     }
 
@@ -1000,6 +1017,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     // view need them), constant 0 the band test in the DDA (BAND_FC, only while a giant or the jungle is near). Each
     // costs every pixel a little even unused.
     let scenePipelines: [[MTLRenderPipelineState]]
+    // The giants' hanging strands, a pass over the scene while a giant stands within the world's edge (vineFragment).
+    private let vinePipeline: MTLRenderPipelineState
     let postPipeline: MTLRenderPipelineState
     let taaPipeline: MTLRenderPipelineState
     // The glowing bugs (bioFragment), drawn over the scene in a pass of their own from sunset.
@@ -1064,6 +1083,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     let world: World
     let clipmap: Clipmap
     let towers: Towers
+    // The giants' hanging strands: their slots of baked maps and the frame's table.
+    let vines: Vines
     let camera: FlightCamera
     let wildlife: Wildlife
     // Ring of bird buffers, one per frame in flight; the semaphore keeps the CPU from overwriting one the GPU reads.
@@ -1112,6 +1133,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard let queue = device.makeCommandQueue() else { return nil }
         let sceneStates = [false, true].map { t in [false, true].compactMap { b in gpu.scene(towers: t, bands: b) } }
         guard sceneStates.allSatisfy({ $0.count == 2 }),
+              let vp = gpu.vine(),
               let tp = gpu.taa(),
               let bp = gpu.bio(),
               let pp = gpu.post(outputFormat, dither: dither),
@@ -1127,7 +1149,8 @@ final class Renderer: NSObject, MTKViewDelegate {
               let lstate = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.maxLamps * 16, options: .storageModePrivate),
               let world = World(gpu: gpu, seed: seed),
               let clipmap = Clipmap(gpu: gpu, seed: seed),
-              let towers = Towers(gpu: gpu, seed: seed) else { return nil }
+              let towers = Towers(gpu: gpu, seed: seed),
+              let vines = Vines(gpu: gpu) else { return nil }
         self.device = device
         self.queue = queue
         scenePipelines = sceneStates
@@ -1163,6 +1186,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         self.world = world
         self.clipmap = clipmap
         self.towers = towers
+        self.vines = vines
+        vinePipeline = vp
         // Spec offset displays by 90 s of the same flight; steering reads GPU heights, so displays
         // instead start at different places in the same world.
         camera = FlightCamera(seed: seed &+ UInt32(screenIndex) &* 7919, world: world, far: far)
@@ -1436,6 +1461,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.dispatchThreads(MTLSize(width: 16, height: 1024, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 1, depth: 1))
         }
         bakes?.endEncoding()
+        // The giants within the world's edge: their strand maps (baked on arrival) and the frame's table of them.
+        vines.update(giants: world.giants, eye: SIMD2(camera.position.x, camera.position.z), reach: Double(f.fade.y), origin: world.origin, seed: world.seed, into: cb)
         // Snapshots refresh the far heights synchronously as they simulate.
         if !world.synchronous { updateFar(into: cb) }
         birdSlots.wait()
@@ -1489,6 +1516,49 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentBytes(towers.table, length: Towers.tableBytes, index: 9)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
+        }
+        // The giants' hanging strands over the scene (vineFragment): the scene's bindings less the birds and the lamp
+        // references, plus the strand maps. VR_PROFILE=bits2048 leaves them out.
+        if vines.tableCount > 0 && !(Renderer.profile.hasPrefix("bits") && (Int(Renderer.profile.dropFirst(4)) ?? 0) & 2048 != 0) {
+            let vp = MTLRenderPassDescriptor()
+            vp.colorAttachments[0].texture = sceneTex
+            vp.colorAttachments[0].loadAction = .load
+            vp.colorAttachments[0].storeAction = .store
+            if let enc = cb.makeRenderCommandEncoder(descriptor: vp) {
+                enc.setRenderPipelineState(vinePipeline)
+                enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
+                enc.setFragmentTexture(world.heightTex, index: 0)
+                enc.setFragmentTexture(cloudTex, index: 1)
+                enc.setFragmentTexture(world.climateTex, index: 2)
+                enc.setFragmentBuffer(world.siteBuffer, offset: 0, index: 1)
+                enc.setFragmentTexture(world.structTex, index: 3)
+                enc.setFragmentTexture(lightMap, index: 4)
+                enc.setFragmentTexture(lightDir, index: 5)
+                enc.setFragmentTexture(clipmap.height, index: 6)
+                enc.setFragmentTexture(clipmap.climate, index: 7)
+                enc.setFragmentTexture(clipmap.cover, index: 8)
+                enc.setFragmentTexture(shadowMaps[0], index: 9)
+                enc.setFragmentTexture(shadowMaps[1], index: 10)
+                enc.setFragmentTexture(slowTex, index: 11)
+                enc.setFragmentTexture(world.maxTex, index: 12)
+                enc.setFragmentTexture(world.gapTex, index: 13)
+                enc.setFragmentTexture(clipmap.gaps, index: 14)
+                enc.setFragmentTexture(clipmap.gaps2, index: 17)
+                enc.setFragmentTexture(world.bandTex, index: 15)
+                enc.setFragmentTexture(provTex, index: 16)
+                enc.setFragmentBuffer(lampPos, offset: 0, index: 2)
+                enc.setFragmentBuffer(lampState, offset: 0, index: 3)
+                enc.setFragmentBytes(&tileMasks, length: tileMasks.count * 4, index: 7)
+                enc.setFragmentBuffer(world.giantBuffer, offset: 0, index: 8)
+                enc.setFragmentBytes(towers.table, length: Towers.tableBytes, index: 9)
+                enc.setFragmentBytes(vines.table, length: Vines.tableBytes, index: 10)
+                enc.setFragmentTexture(vines.fine, index: 18)
+                enc.setFragmentTexture(vines.coarse, index: 19)
+                enc.setFragmentTexture(vines.sup, index: 20)
+                enc.setFragmentTexture(vines.bands, index: 21)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                enc.endEncoding()
+            }
         }
         // In its own pass: drawn after the scene in the scene's pass, even a draw doing nothing cost a twilight scene ~0.4 ms.
         if f.sunDir.y < Renderer.bioSun {

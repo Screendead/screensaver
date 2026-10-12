@@ -1456,8 +1456,8 @@ constant bool BAND_SKIP = is_function_constant_defined(BAND_FC) && BAND_FC;
 constant int GIANT_LIMBS = 12;
 constant int GIANT_FLANGES = 9;
 constant int GM_WOOD = 0, GM_LEAF = 1, GM_VINE = 2;
-// The coarsest level whose columns carry a giant's vines and aerial roots (one of four sparse samples catching one
-// stands it 8 wide there): on level 4 it would hang a curtain 16 wide.
+// The coarsest level whose columns carry a giant's aerial roots (one of four sparse samples catching one stands it 8
+// wide there): on level 4 it would hang a pillar 16 wide. (Vines are no part of any level: traceStrands.)
 constant int GIANT_THIN_LOD = 3;
 
 // One table entry; G <= 0: no giant in the cell. Must match GiantRec in Sources/Renderer.swift.
@@ -1600,7 +1600,7 @@ static inline float4 giantPad(thread const Giant& g, int j, thread float& thick)
 }
 
 // Solid runs of a column at offset q from the axis (ground gl): appended as intervals, then sorted and merged.
-// thin: a vine or an aerial root added (coarseColumn keeps those as a union, not a mean).
+// thin: an aerial root added (coarseColumn keeps those as a union, not a mean).
 struct GRuns { float lo[24]; float hi[24]; int m[24]; int n; bool thin; };
 
 static inline void gAdd(thread GRuns& r, float lo, float hi, int m) {
@@ -1617,6 +1617,35 @@ static inline float giantTrunkR(thread const Giant& g, float2 q, float yr) {
     float th = atan2(q.y, q.x) + yr / 150.0;
     float f = perlin3(float3(cos(th) * 2.6, sin(th) * 2.6, yr / 34.0), g.h + 5u);
     return R * (1.0 + (g.kind == 1 ? 0.10 : 0.34) * f);
+}
+
+// The crown's pads over world column wq: broad, flat-bottomed clouds of leaves with lumpy tops. Returns the crown's
+// underside there, the lowest pad bottom (1e9 under none); add: their leaf runs go into r as well.
+// Fine terms break the clumps' smooth profiles, which column by column read as ribs.
+static float giantPads(thread const Giant& g, float2 wq, thread GRuns& r, bool add) {
+    float2 q = wq - g.c;
+    float lump = 0.6 * perlin2(wq / 13.0, g.h + 20u) + 0.4 * perlin2(wq / 5.5, g.h + 21u) + 0.35 * perlin2(wq / 2.3, g.h + 25u);
+    float sag = perlin2(wq / 7.0, g.h + 22u) + 0.6 * perlin2(wq / 2.7 + 3.1, g.h + 26u);
+    float padBot = 1e9;
+    for (int j = 0; j < GIANT_PADS; j++) {
+        float T;
+        float4 P = giantPad(g, j, T);
+        if (P.w <= 0.0) continue;
+        float2 dq = q - P.xz;
+        float dd = length(dq);
+        if (dd > P.w * 1.3) continue;
+        float2 u2 = dq / max(dd, 1e-3);
+        float edge = P.w * (1.0 + 0.32 * perlin2(u2 * 1.8 + float(j) * 5.3, g.h + 23u) + 0.12 * perlin2(u2 * 4.5 + float(j), g.h + 24u));
+        if (dd >= edge) continue;
+        float u = dd / edge;
+        float top = P.y + T * 0.55 * sqrt(1.0 - u * u) + 7.0 * lump;
+        float bot = P.y - T * 0.45 * pow(1.0 - u * u, 0.6) + 3.0 * sag;
+        if (top > bot + 1.0) {
+            if (add) gAdd(r, floor(bot), floor(top) + 1.0, GM_LEAF);
+            padBot = min(padBot, floor(bot));
+        }
+    }
+    return padBot;
 }
 
 static void giantIntervals(thread const Giant& g, float2 wq, float gl, int lod, thread GRuns& r) {
@@ -1715,41 +1744,9 @@ static void giantIntervals(thread const Giant& g, float2 wq, float gl, int lod, 
             if (hi2 > lo2) { gAdd(r, G + lo2, G + hi2, GM_WOOD); r.thin = true; }
         }
     }
-    // Canopy pads: broad, flat-bottomed clouds of leaves with lumpy tops, the tiers of the crown; vines hang from them.
-    // Fine terms break the clumps' smooth profiles, which column by column read as ribs.
-    float lump = 0.6 * perlin2(wq / 13.0, g.h + 20u) + 0.4 * perlin2(wq / 5.5, g.h + 21u) + 0.35 * perlin2(wq / 2.3, g.h + 25u);
-    float sag = perlin2(wq / 7.0, g.h + 22u) + 0.6 * perlin2(wq / 2.7 + 3.1, g.h + 26u);
-    float padBot = 1e9;
-    for (int j = 0; j < GIANT_PADS; j++) {
-        float T;
-        float4 P = giantPad(g, j, T);
-        if (P.w <= 0.0) continue;
-        float2 dq = q - P.xz;
-        float dd = length(dq);
-        if (dd > P.w * 1.3) continue;
-        float2 u2 = dq / max(dd, 1e-3);
-        float edge = P.w * (1.0 + 0.32 * perlin2(u2 * 1.8 + float(j) * 5.3, g.h + 23u) + 0.12 * perlin2(u2 * 4.5 + float(j), g.h + 24u));
-        if (dd >= edge) continue;
-        float u = dd / edge;
-        float top = P.y + T * 0.55 * sqrt(1.0 - u * u) + 7.0 * lump;
-        float bot = P.y - T * 0.45 * pow(1.0 - u * u, 0.6) + 3.0 * sag;
-        if (top > bot + 1.0) { gAdd(r, floor(bot), floor(top) + 1.0, GM_LEAF); padBot = min(padBot, floor(bot)); }
-    }
-    if (padBot < 1e8 && lod <= GIANT_THIN_LOD) {
-        // Strands two voxels square on the even grid: the level-1 column over one is the strand itself, so the
-        // vines neither shorten nor thicken across the first morph band.
-        int2 vb = int2(floor(wq * 0.5));
-        uint hv = hash2i(vb, g.h + 30u);
-        float mask = smoothstep(0.0, 0.35, perlin2((float2(vb) * 2.0 + 1.0) / 19.0, g.h + 31u));
-        // A weeping giant trails long curtains; a kapok's crown hardly any.
-        // From level 2 a column's four samples fall on four strands: a quarter of them each keeps the curtain's cover,
-        // and they are among the strands of the level inside it.
-        if (hashf(hv) < (g.kind == 2 ? 0.18 : g.kind == 1 ? 0.016 : 0.07) * mask * (lod >= 2 ? 0.25 : 1.0)) {
-            float len = 4.0 + (g.kind == 2 ? 55.0 : 30.0) * pow(hashf(pcg(hv)), g.kind == 2 ? 1.3 : 2.0);
-            gAdd(r, max(padBot - len, gl + 3.0), padBot + 1.0, GM_VINE);
-            r.thin = true;
-        }
-    }
+    // Canopy pads: the tiers of the crown (giantPads). The vines that hang from them are no part of any column: the
+    // strand pass draws them (traceStrands) at every distance alike.
+    giantPads(g, wq, r, true);
 }
 
 // A vegetation column from its solid intervals over ground gl: up to four solid runs (the lowest from the ground), as
@@ -4026,7 +4023,7 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
     float H = coarseCombine(c0.h, c1.h, c2.h, c3.h, float(s));
     // A giant: where at least two samples stand in it, the mean of their tops, of their lowest gaps (the air under the
     // crown, the second gap) and of the tallest gap above that (between tiers, the principal one); solid where two are
-    // trunk or one is a hanging root. A vine or root sample cuts the lowest gap to the air it shares; a buttress sample
+    // trunk or one is a hanging root. A root sample cuts the lowest gap to the air it shares; a buttress sample
     // raises its floor.
     Giant gi;
     if (giantAt(giants, float2(b + hs / 2) + 0.5, float(s), gi)) {
@@ -4034,7 +4031,7 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
         int2 o4[4] = { int2(0), int2(hs, 0), int2(0, hs), int2(hs, hs) };
         float nT = 0.0, sH = 0.0, nS = 0.0, nTop = 0.0, sLowH = 0.0, floorH = -1e9;
         float4 sLow = 0.0, sUp = 0.0;   // (sum lo, sum hi, count, -)
-        // Vines and aerial roots: the air all their samples share, so each keeps its length and stands in the column.
+        // Aerial roots: the air all their samples share, so each keeps its length and stands in the column.
         float2 thinG = float2(-1e9, 1e9);
         bool thinSolid = false;
         for (int i = 0; i < 4; i++) {
@@ -7754,6 +7751,467 @@ static inline SeaLife seaLife(thread const Ctx& x, float3 o, float3 d, Hit h, fl
     return SeaLife { half3(litMul), half(underMul), half3(add), half(wake) };
 }
 
+static inline float3 tmap(float3 v) { return v / (1.0 + max(max(v.r, v.g), v.b)); }
+static inline float3 itmap(float3 v) { return v / max(1.0 - max(max(v.r, v.g), v.b), 1e-4); }
+
+// A part-cover blend as the temporal resolve averages jittered samples: in tone-mapped space, so a cover of thin
+// strands matches what the strands themselves resolve to.
+static inline float3 coverMix(float3 a, float3 b, float w) { return itmap(mix(tmap(a), tmap(b), w)); }
+
+// MARK: - Hanging strands
+
+// A giant's vines are no part of the column maps, whose rings and morph bands shortened and dropped them: each giant's
+// strands are baked once from its own rule (bakeVines) and traced analytically by a pass of their own over the scene
+// (traceStrands, vineFragment), so a strand's length and presence are the same at every distance. Near, a strand is
+// the 2x2 voxel column it always was; narrower than a pixel, the same set is drawn as its expected cover along the
+// ray. The maps and the trace know only strands over a window, so an island's roots could share them.
+
+// A window of VINE_W voxels a side round a giant, 8-aligned on the world grid: strand cells 2 voxels square (the fine
+// map: bottom, top; top <= bottom holds none), cells of 8 (coarse) and of 32 (super) summing them.
+constant int VINE_W = 512;
+constant int VINE_FINE = VINE_W / 2, VINE_COARSE = VINE_W / 8, VINE_SUPER = VINE_W / 32;
+// Must match Vines.slots in Sources/Vines.swift.
+constant int VINE_SLOTS = 6;
+
+// Must match VineRec in Sources/Vines.swift. a: axis xz (map-local), G, yT; b: the strands' box (map-local) in xz
+// (lo) and the strands' lowest bottom and highest top; c: hash, kind, slice; d: window origin xz (world), the box's
+// hi xz (map-local).
+struct VineRec { float4 a; float4 b; uint4 c; int4 d; };
+struct VineTable { int4 n; VineRec r[VINE_SLOTS]; };
+
+// Must match VineBake in Sources/Vines.swift. a: axis xz (world), G, yT; b: window origin xz (world); c: hash, kind,
+// seed, slice.
+struct VineBake { float4 a; int4 b; uint4 c; };
+
+// Strand heights are summed in bands of VINE_BAND voxels up from the giant's ground: a cell's band bits say where
+// along a column its strands lie, so a ray crossing it between two tiers' curtains passes.
+constant float VINE_BAND = 20.0;
+
+// A coarse or super cell: bits (coarse: which of its 4x4 strand cells hold a strand, bit y * 4 + x; super: which of its
+// 4x4 coarse cells hold any), their count, the ranges of their bottoms and of their tops, and their band bits. A super
+// cell also has, per band, which of its coarse cells hold a strand in it: two texels of the bands map, eight bands
+// each, two to a word (the lower band in the low half).
+static inline uint4 packStrands(uint bits, uint count, float minBot, float maxBot, float minTop, float maxTop, uint bands) {
+    return uint4(bits | (count << 16), uint(minBot) | (uint(maxBot) << 16), uint(minTop) | (uint(maxTop) << 16), bands);
+}
+
+// The band bits of heights [lo, hi) over ground G.
+static inline uint strandBands(float lo, float hi, float G) {
+    int a = clamp(int(floor((lo - G) / VINE_BAND)), 0, 15), b = clamp(int(floor((hi - 1.0 - G) / VINE_BAND)), 0, 15);
+    return ((2u << uint(b)) - 1u) & ~((1u << uint(a)) - 1u);
+}
+
+// The fine map of one giant's window: giantIntervals' strand rule, over the crown's underside.
+kernel void bakeVines(texture2d_array<float, access::write> fine [[texture(0)]],
+                      constant VineBake& b [[buffer(0)]],
+                      uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= uint(VINE_FINE) || gid.y >= uint(VINE_FINE)) return;
+    Giant g;
+    g.c = b.a.xy; g.G = b.a.z; g.yT = b.a.w; g.h = b.c.x; g.kind = int(b.c.y);
+    uint seed = b.c.z;
+    // The strand cell on the world's even grid.
+    int2 vb = (b.b.xy >> 1) + int2(gid);
+    float2 wq = float2(vb * 2) + 1.0;
+    float2 out = 0.0;
+    uint hv = hash2i(vb, g.h + 30u);
+    float mask = smoothstep(0.0, 0.35, perlin2((float2(vb) * 2.0 + 1.0) / 19.0, g.h + 31u));
+    // A weeping giant trails long curtains; a kapok's crown hardly any.
+    if (length(wq - g.c) < GIANT_REACH - 1.0 && hashf(hv) < (g.kind == 2 ? 0.18 : g.kind == 1 ? 0.016 : 0.07) * mask) {
+        // The crown's underside over the strand: the highest of its four columns', so it reaches into the leaves of
+        // each.
+        GRuns r;
+        r.n = 0;
+        float hi = -1e9;
+        for (int i = 0; i < 4; i++) {
+            float pb = giantPads(g, float2(vb * 2) + float2(i & 1, i >> 1) + 0.5, r, false);
+            if (pb < 1e8) hi = max(hi, pb);
+        }
+        if (hi > -1e8) {
+            float len = 4.0 + (g.kind == 2 ? 55.0 : 30.0) * pow(hashf(pcg(hv)), g.kind == 2 ? 1.3 : 2.0);
+            float gl = terrainColumn(vb * 2, seed).h;
+            out = float2(max(hi - len, gl + 3.0), hi + 1.0);
+        }
+    }
+    fine.write(float4(out, 0, 0), gid, b.c.w);
+}
+
+kernel void vineCoarse(texture2d_array<float, access::read> fine [[texture(0)]],
+                       texture2d_array<uint, access::write> coarse [[texture(1)]],
+                       constant VineBake& b [[buffer(0)]],
+                       uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= uint(VINE_COARSE) || gid.y >= uint(VINE_COARSE)) return;
+    uint slice = b.c.w;
+    uint bits = 0u, n = 0u, bands = 0u;
+    float minBot = 1e9, maxBot = -1e9, minTop = 1e9, maxTop = -1e9;
+    for (uint j = 0; j < 4; j++)
+        for (uint i = 0; i < 4; i++) {
+            float2 s = fine.read(gid * 4 + uint2(i, j), slice).rg;
+            if (s.y <= s.x) continue;
+            bits |= 1u << (j * 4 + i);
+            n++;
+            bands |= strandBands(s.x, s.y, b.a.z);
+            minBot = min(minBot, s.x); maxBot = max(maxBot, s.x);
+            minTop = min(minTop, s.y); maxTop = max(maxTop, s.y);
+        }
+    coarse.write(n > 0u ? packStrands(bits, n, minBot, maxBot, minTop, maxTop, bands) : uint4(0), gid, slice);
+}
+
+kernel void vineSuper(texture2d_array<uint, access::read> coarse [[texture(0)]],
+                      texture2d_array<uint, access::write> sup [[texture(1)]],
+                      texture2d_array<uint, access::write> bandMap [[texture(2)]],
+                      constant VineBake& b [[buffer(0)]],
+                      uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= uint(VINE_SUPER) || gid.y >= uint(VINE_SUPER)) return;
+    uint slice = b.c.w;
+    uint bits = 0u, n = 0u, bands = 0u;
+    uint occ[16];
+    for (int k = 0; k < 16; k++) occ[k] = 0u;
+    float minBot = 1e9, maxBot = -1e9, minTop = 1e9, maxTop = -1e9;
+    for (uint j = 0; j < 4; j++)
+        for (uint i = 0; i < 4; i++) {
+            uint4 c = coarse.read(gid * 4 + uint2(i, j), slice);
+            if ((c.x & 0xffffu) == 0u) continue;
+            bits |= 1u << (j * 4 + i);
+            n += c.x >> 16;
+            bands |= c.w;
+            for (uint m = c.w; m != 0u; m &= m - 1u) occ[ctz(m)] |= 1u << (j * 4 + i);
+            minBot = min(minBot, float(c.y & 0xffffu)); maxBot = max(maxBot, float(c.y >> 16));
+            minTop = min(minTop, float(c.z & 0xffffu)); maxTop = max(maxTop, float(c.z >> 16));
+        }
+    sup.write(n > 0u ? packStrands(bits, n, minBot, maxBot, minTop, maxTop, bands) : uint4(0), gid, slice);
+    for (uint h = 0; h < 2; h++) {
+        uint4 wd;
+        for (uint c = 0; c < 4; c++) wd[c] = occ[h * 8 + c * 2] | (occ[h * 8 + c * 2 + 1] << 16);
+        bandMap.write(wd, uint2(gid.x * 2 + h, gid.y), slice);
+    }
+}
+
+// The window's strands' bounds (Vines reads them back to bound the trace): their lowest bottom and highest top, and the
+// super cells they lie in (lo xy, hi xy, in cells).
+kernel void vineRange(texture2d_array<uint, access::read> sup [[texture(0)]],
+                      device float4* range [[buffer(0)]],
+                      constant VineBake& b [[buffer(1)]],
+                      uint gid [[thread_position_in_grid]]) {
+    if (gid != 0u) return;
+    float lo = 1e9, hi = -1e9;
+    int2 cLo = int2(VINE_SUPER), cHi = int2(-1);
+    for (int j = 0; j < VINE_SUPER; j++)
+        for (int i = 0; i < VINE_SUPER; i++) {
+            uint4 c = sup.read(uint2(i, j), b.c.w);
+            if ((c.x & 0xffffu) == 0u) continue;
+            lo = min(lo, float(c.y & 0xffffu));
+            hi = max(hi, float(c.z >> 16));
+            cLo = min(cLo, int2(i, j));
+            cHi = max(cHi, int2(i, j));
+        }
+    range[b.c.w * 2u] = float4(lo, hi, float(cLo.x), float(cLo.y));
+    range[b.c.w * 2u + 1u] = float4(float(cHi.x), float(cHi.y), 0, 0);
+}
+
+struct StrandHit {
+    bool hit;      // a strand's face in front of tMax, with its distance, face and cell (on the world's even grid)
+    float t;
+    int3 n;
+    int2 cell;
+    float top;     // that strand's top
+    float w;       // 0: the strands themselves; 1: their cover (by pixel footprint)
+    float alpha;   // the cover along the ray, to the hit if any
+    float tm;      // the cover's mean distance and top
+    float topm;
+};
+
+// Share of a uniform spread over [a, b] (integers) below y.
+static inline float strandRamp(float y, float a, float b) { return saturate((y - a) / max(b - a, 1.0)); }
+
+// The strands along o + d t, t in [0, tMax): the first one hit, where they still span a pixel, and the cover they
+// are expected to give, where they do not; both across the hand-over. The ray walks the cells of 32; in one holding
+// strands at its heights, the cells of 8 that hold strands in its bands (vineBands) are tested against its run, and
+// the strands of those it crosses. A strand is its own voxel column (a box 2 wide), so near strands look as they did
+// in the column maps.
+static StrandHit traceStrands(texture2d_array<float> fine, texture2d_array<uint> coarse, texture2d_array<uint> sup,
+                              texture2d_array<uint> bands, constant VineTable* vt, int2 origin, float3 o, float3 d,
+                              float tMax, float pixelAngle) {
+    StrandHit r;
+    r.hit = false; r.t = tMax; r.n = int3(0); r.cell = int2(0); r.top = 0.0; r.w = 0.0; r.alpha = 0.0; r.tm = 0.0; r.topm = 0.0;
+    float3 inv = 1.0 / select(d, copysign(float3(1e-6), d), abs(d) < 1e-6);
+    int2 stp = select(int2(-1), int2(1), d.xz > 0.0);
+    float2 fwd = select(float2(0.0), float2(1.0), d.xz > 0.0);
+    float lam = 0.0, tSum = 0.0, topSum = 0.0, wSum = 0.0;
+    int n = min(vt->n.x, VINE_SLOTS);
+    for (int gi = 0; gi < n && !r.hit; gi++) {
+        VineRec v = vt->r[gi];
+        float2 org = float2(v.d.xy - origin);
+        uint slice = v.c.z;
+        float G = v.a.z;
+        // The ray's run through the strands' box and the giant's reach, in front of tMax.
+        float3 bLo = float3(v.b.x, v.b.z, v.b.y), bHi = float3(float(v.d.z), v.b.w, float(v.d.w));
+        float3 ta = (bLo - o) * inv, tb3 = (bHi - o) * inv;
+        float3 tn = min(ta, tb3), tf = max(ta, tb3);
+        float t0 = max(max(max(tn.x, tn.y), tn.z), 0.0), t1 = min(min(min(tf.x, tf.y), tf.z), r.t);
+        if (t0 >= t1) continue;
+        float2 q = o.xz - v.a.xy;
+        float a = dot(d.xz, d.xz), bq = dot(q, d.xz), c = dot(q, q) - GIANT_REACH * GIANT_REACH;
+        if (a < 1e-8) {
+            if (c > 0.0) continue;
+        } else {
+            float disc = bq * bq - a * c;
+            if (disc <= 0.0) continue;
+            float sq = sqrt(disc);
+            t0 = max(t0, (-bq - sq) / a);
+            t1 = min(t1, (-bq + sq) / a);
+        }
+        if (t0 >= t1) continue;
+        // Strands 2 wide: themselves to about a pixel and a half, their cover from under a pixel.
+        float w = smoothstep(1.2, 3.0, t0 * pixelAngle);
+        // The cover alone is summed over the cells of 32.
+        bool coverOnly = w >= 1.0;
+        float t = t0;
+        float2 q0 = o.xz + d.xz * (t + 1e-3) - org;
+        int2 mc = clamp(int2(floor(q0 / 32.0)), int2(0), int2(VINE_SUPER - 1));
+        float2 tDelta = abs(32.0 * inv.xz);
+        float2 tMaxA = ((float2(mc) + fwd) * 32.0 + org - o.xz) * inv.xz;
+        int lastAxis = tn.x >= tn.z ? 0 : 1;
+        for (int i = 0; i < 40; i++) {
+            float tCell = min(tMaxA.x, tMaxA.y), tEnd = min(tCell, t1);
+            float yA = o.y + d.y * t, yB = o.y + d.y * tEnd;
+            float yLo = min(yA, yB), yHi = max(yA, yB);
+            uint rb = strandBands(yLo, yHi + 1.0, G);
+            uint4 cs = sup.read(uint2(mc), slice);
+            if ((cs.w & rb) != 0u && yHi >= float(cs.y & 0xffffu) && yLo < float(cs.z >> 16)) {
+                if (coverOnly) {
+                    // Strands scattered over the cell: a run of l across it meets each with chance (2 l + 4) / area,
+                    // and a strand reaches the ray's heights where its bottom lies below them and its top above.
+                    float l = (tEnd - t) * length(d.xz);
+                    float pb = strandRamp(yHi, float(cs.y & 0xffffu), float(cs.y >> 16));
+                    float pt = 1.0 - strandRamp(yLo, float(cs.z & 0xffffu), float(cs.z >> 16));
+                    float lm = float(cs.x >> 16) * (2.0 * l + 4.0) / 1024.0 * pb * pt;
+                    lam += lm;
+                    tSum += lm * 0.5 * (t + tEnd);
+                    topSum += lm * 0.5 * float((cs.z & 0xffffu) + (cs.z >> 16));
+                    wSum += lm * w;
+                    if (lam > 4.6) break;
+                } else {
+                    // The cells of 8 holding strands in the ray's bands: each lies in two bands' words of its texel.
+                    uint occ = 0u;
+                    for (uint m = rb; m != 0u; m &= m - 1u) {
+                        uint k = ctz(m);
+                        uint word = bands.read(uint2(mc.x * 2 + int(k >> 3), mc.y), slice)[(k >> 1) & 3u];
+                        occ |= (k & 1u) ? word >> 16 : word & 0xffffu;
+                    }
+                    float2 sLo32 = org + float2(mc) * 32.0;
+                    for (uint m = occ; m != 0u; m &= m - 1u) {
+                        uint bit = ctz(m);
+                        int2 cc = int2(bit & 3u, bit >> 2);
+                        float2 cLo = sLo32 + float2(cc) * 8.0;
+                        float2 tA = (cLo - o.xz) * inv.xz, tB = (cLo + 8.0 - o.xz) * inv.xz;
+                        float2 tnn = min(tA, tB), tff = max(tA, tB);
+                        float tc0 = max(max(tnn.x, tnn.y), t), tc1 = min(min(tff.x, tff.y), tEnd);
+                        if (tc0 >= tc1 || tc0 >= r.t) continue;
+                        int2 c8 = mc * 4 + cc;
+                        uint4 cq = coarse.read(uint2(c8), slice);
+                        float yc0 = o.y + d.y * tc0, yc1 = o.y + d.y * tc1;
+                        float ycLo = min(yc0, yc1), ycHi = max(yc0, yc1);
+                        if (ycHi < float(cq.y & 0xffffu) || ycLo >= float(cq.z >> 16)) continue;
+                        // Each strand of the cell against the ray's run through it: the nearest wins.
+                        float tHit = r.t;
+                        for (uint ms = cq.x & 0xffffu; ms != 0u; ms &= ms - 1u) {
+                            uint sb = ctz(ms);
+                            int2 sc = int2(sb & 3u, sb >> 2);
+                            float2 sLo = cLo + float2(sc) * 2.0;
+                            float2 sA = (sLo - o.xz) * inv.xz, sB = (sLo + 2.0 - o.xz) * inv.xz;
+                            float2 snn = min(sA, sB), sff = max(sA, sB);
+                            float tN = max(max(snn.x, snn.y), t), tF = min(min(sff.x, sff.y), tEnd);
+                            if (tN >= tF || tN >= tHit) continue;
+                            float2 st = fine.read(uint2(c8 * 4 + sc), slice).rg;
+                            float ty0 = (st.x - o.y) * inv.y, ty1 = (st.y - o.y) * inv.y;
+                            float tN2 = max(tN, min(ty0, ty1)), tF2 = min(tF, max(ty0, ty1));
+                            if (tN2 >= tF2 || tN2 >= tHit) continue;
+                            tHit = tN2;
+                            r.hit = true;
+                            r.t = tN2;
+                            // The face: a cap where the ray came down (or up) onto it, else the side it entered by,
+                            // or the cell's own for a strand it started in.
+                            int side = tN > t ? (snn.x >= snn.y ? 0 : 1) : lastAxis;
+                            r.n = tN2 > tN ? int3(0, d.y > 0.0 ? -1 : 1, 0) : side == 0 ? int3(d.x > 0.0 ? -1 : 1, 0, 0) : int3(0, 0, d.z > 0.0 ? -1 : 1);
+                            r.cell = (v.d.xy >> 1) + c8 * 4 + sc;
+                            r.top = st.y;
+                            r.w = w;
+                        }
+                        if (w > 0.0) {
+                            float l = (min(tc1, r.t) - tc0) * length(d.xz);
+                            float pb = strandRamp(ycHi, float(cq.y & 0xffffu), float(cq.y >> 16));
+                            float pt = 1.0 - strandRamp(ycLo, float(cq.z & 0xffffu), float(cq.z >> 16));
+                            float lm = float(cq.x >> 16) * (2.0 * max(l, 0.0) + 4.0) / 64.0 * pb * pt;
+                            lam += lm;
+                            tSum += lm * 0.5 * (tc0 + tc1);
+                            topSum += lm * 0.5 * float((cq.z & 0xffffu) + (cq.z >> 16));
+                            wSum += lm * w;
+                        }
+                    }
+                    if (r.hit) break;
+                }
+            }
+            if (tEnd >= t1) break;
+            int axis = tMaxA.x < tMaxA.y ? 0 : 1;
+            lastAxis = axis;
+            t = tCell;
+            if (axis == 0) { mc.x += stp.x; tMaxA.x += tDelta.x; } else { mc.y += stp.y; tMaxA.y += tDelta.y; }
+            if (any(mc < 0) || any(mc >= VINE_SUPER)) break;
+        }
+    }
+    r.alpha = 1.0 - exp(-lam);
+    if (lam > 0.0) {
+        r.tm = tSum / lam;
+        r.topm = topSum / lam;
+        if (!r.hit) r.w = wSum / lam;
+    }
+    return r;
+}
+
+// A strand's shading: shade's terms for a giant's vine, with no column to read. p = o + d t; n its face (the cover: a
+// face turned to the eye); top the strand's top, draw its colour draw.
+static float3 shadeVine(thread const Ctx& x, thread const Light& L, float3 o, float3 d, float t, float3 n, float top,
+                        float draw, bool cover) {
+    float3 p = o + d * t;
+    float fp = t * x.pixelAngle;
+    float3 alb = float3(0.036, 0.050, 0.028) * (0.85 + 0.3 * draw);
+    float deep = L.night * smoothstep(0.32, 0.45, -L.sun.y);
+    alb = mix(alb, float3(dot(alb, float3(0.3, 0.59, 0.11))), 0.4 * L.night + 0.1 * deep);
+    float l = dot(alb, float3(0.3, 0.59, 0.11));
+    alb *= 1.0 + L.night * (clamp(0.17 / max(l, 1e-3), 1.0, 2.4) - 1.0);
+    float kn = 4.5 * L.night;
+    alb *= (1.0 + 0.1 * kn) / (1.0 + kn * dot(alb, float3(0.3, 0.59, 0.11)));
+    float dusk = L.gold * (1.0 - L.night) * mix(0.5, 1.0, L.sunAmt);
+    float3 albK = alb;
+    if (dusk > 0.0) {
+        float la = max(dot(alb, float3(0.3, 0.59, 0.11)), 1e-4);
+        alb *= mix(float3(1.0), clamp(1.5 * sqrt(alb / la), 0.7, 2.0), dusk);
+        albK = mix(albK, la * float3(1.5, 0.95, 0.55), 0.5 * dusk) * (1.0 + 0.3 * dusk);
+        albK = mix(alb, albK, smoothstep(-0.04, 0.0, L.sun.y) * (1.0 - L.sunAmt));
+    }
+    // As a column's strand shaded (shade): with the footprint its faces turn up to the sky (the risers' prefilter, from
+    // a strand's level neighbours) and its shadow lifts to the floor the far stairs keep; the cover is all footprint.
+    float wf = cover ? 1.0 : smoothstep(0.025, 0.20, fp);
+    float3 nl = normalize(mix(n, float3(0, 1, 0), wf));
+    float ndl = max(dot(nl, L.key), 0.0);
+    float hiSun = smoothstep(0.15, 0.45, L.key.y) * (1.0 - L.night);
+    float sh = 1.0;
+    if (ndl > 0.0 && L.shadows && x.shadowMode != 3.0) {
+        // Near strands trace the short ray that finds the crown over them; the rest, and the cover, take the maps.
+        bool maps = x.shadowMode == 1.0;
+        bool mapOnly = !maps || cover || t > 500.0;
+        float3 so = p + n * 0.02;
+        float mapLit = maps ? shadowMapLit(x, so, mapOnly) : 1.0;
+        if (!mapOnly && mapLit > 0.0) {
+            // Without the band skip (the strands' pass compiles it out) the ray needs the steps to clear the crown's air.
+            Hit sHit = trace(x.tr, so, L.key, SHADOW_NEAR, 64, 0);
+            // A column's strand found its own column first, a contact shadow: the light the user saw on them.
+            if (sHit.hit || sHit.iters >= 64) sh = 0.35;
+        }
+        sh = min(sh, mapLit);
+        float floorSh = mix(mix(0.5, 0.25, hiSun), 0.32, L.gold);
+        sh = mix(sh, floorSh + (1.0 - floorSh) * sh, wf);
+        sh = mix(sh, 1.0, 0.3 * L.night);
+    }
+    if (!(x.prof & 32) && L.sunAmt > 0.0) sh *= mix(1.0, cloudShadow(x, p, L.key), L.sunAmt);
+    float lowFill = mix(0.9, 1.0, smoothstep(0.1, 0.4, L.key.y));
+    float zw = mix(mix(0.55, 0.8, hiSun), 0.85, L.gold);
+    float3 skyFill = mix(L.horizon, L.zenith, saturate(zw + 0.15 * nl.y)) * 0.9 * lowFill * mix(1.0, 0.85, hiSun);
+    skyFill *= mix(float3(1.0), float3(0.62, 0.58, 0.85), L.gold * L.sunAmt);
+    int k = levelAt(x.tr, length(p.xz - x.tr.cam));
+    float sv = x.prof & 16 ? 1.0 : skyVisibility(x.tr, min(k, x.tr.levels - 1), p.xz, p.y, fp > 5.0 ? 2 : fp > 2.0 ? 1 : 0);
+    skyFill *= 1.0 - mix(0.55, 0.85, hiSun) * (1.0 - sv);
+    if (dusk > 0.0) skyFill *= mix(float3(1.0), mix(float3(0.52, 0.58, 0.8), float3(1.12, 1.08, 1.0), saturate(sv * sv * 0.4)), dusk);
+    skyFill *= 0.5 + 0.5 * saturate(nl.y);
+    // Under the crown: the ambient a column's vine kept by its depth under the crown's top, which stands some 30 over
+    // the strand's.
+    float ao = mix(1.0, 0.75, smoothstep(6.0, 80.0, top + 30.0 - p.y));
+    ao = mix(ao, 1.0, 0.25 * L.night);
+    skyFill += float3(0.09, 0.12, 0.25) * L.night;
+    float3 bounce = (1.0 - saturate(nl.y)) * 0.35 * alb * L.keyCol * max(L.key.y, 0.0);
+    float3 col = albK * L.keyCol * ndl * sh * mix(1.0, 1.1, L.night) * mix(float3(1.0), float3(0.40, 0.42, 0.47), deep)
+               + alb * (skyFill * ao + bounce) * mix(float3(1.0), float3(0.19, 0.23, 0.38), deep);
+    col += albK * L.keyCol * 0.07 * (1.0 - smoothstep(0.05, 0.35, L.key.y)) * saturate(nl.y) * (1.0 - L.night);
+    float back = pow(saturate(dot(d, L.key)), 4.0) * (1.0 - smoothstep(0.08, 0.45, L.key.y)) * (1.0 - L.night);
+    float graze = 1.0 - abs(dot(n, d));
+    col += alb * float3(0.9, 1.3, 0.3) * L.keyCol * back * (1.0 - ndl) * (1.0 - abs(n.y)) * graze * graze * sh;
+    if (dusk > 0.0) {
+        float face = saturate(dot(nl, normalize(float3(L.sun.x, 0.25, L.sun.z)))) * (1.0 - 0.6 * saturate(nl.y));
+        col += albK * L.skyHor * float3(1.0, 0.85, 0.7) * face * 0.1 * sv * 0.8 * L.gold * (1.0 - L.night) * (1.0 - 0.5 * L.sunAmt);
+    }
+    // Glowing specks (bioGlow's for a giant's vines): none deep in the jungle, where the skirts mass close to the eye.
+    float bio = bioLandRamp(L.sun.y) * (1.0 - smoothstep(0.5, 1.0, fp));
+    if (bio > 0.0 && !cover && all(p.xz >= 0.0) && all(p.xz < float(x.tr.size))) {
+        float3 wp = p + float3(float(x.origin.x), 0.0, float(x.origin.y));
+        int3 vw = int3(floor(wp));
+        int3 ni = int3(n);
+        float2 q = ni.y != 0 ? wp.xz : float2(ni.x != 0 ? wp.z : wp.x, wp.y);
+        int plane = ni.x != 0 ? vw.x * 2 + ni.x : ni.z != 0 ? vw.z * 2 + ni.z : ni.y;
+        float4 sp = bioSpot(q, plane, 5.0, ni.y < 0 ? 0.4 : 0.25, 0.45, fp, x.seed + 702u, x.time, float2(0.25, 0.6));
+        if (sp.w < 1.0) {
+            Climate c = climateAt(x.tr.clim, p.xz, x.tr.pv, x.origin);
+            float jw = smoothstep(0.65, 0.9, c.jungle);
+            float keep = 1.15 * (1.0 - smoothstep(0.25, 0.75, fp)) * (1.0 - jw);
+            col += sp.rgb * (1.0 - 0.25 * smoothstep(0.3, 0.75, fp)) * (1.0 - smoothstep(keep - 0.15, keep, sp.w)) * bio;
+        }
+    }
+    return col;
+}
+
+// The strands' pass, drawn over the scene while a giant stands within the world's edge: dst is the scene's pixel
+// (its distance in alpha, a bird's negative), and the strands in front of it replace it or cover it. Its own pass:
+// compiled into sceneFragment, the walk's registers cost every pixel of a giant scene a third of a millisecond unrun.
+fragment float4 vineFragment(VOut in [[stage_in]], float4 dst [[color(0)]], constant Frame& f [[buffer(0)]],
+                             texture2d<float> hm [[texture(0)]], texture2d<float> cloudTex [[texture(1)]],
+                             texture2d<float> clim [[texture(2)]], texture2d<uint> st [[texture(3)]],
+                             texture2d<float> lightMap [[texture(4)]], texture2d<float> lightDir [[texture(5)]],
+                             texture2d_array<float> coarse [[texture(6)]], texture2d_array<float> coarseClim [[texture(7)]],
+                             texture2d_array<float> coarseCover [[texture(8)]],
+                             texture2d<float> shadowNear [[texture(9)]], texture2d<float> shadowFar [[texture(10)]],
+                             texture2d<float> slowTex [[texture(11)]], texture2d<float> hx [[texture(12)]],
+                             texture2d<uint> gx [[texture(13)]], texture2d_array<float> cg [[texture(14)]],
+                             texture2d_array<float> cg2 [[texture(17)]],
+                             texture2d<float> hb [[texture(15)]], texture2d<float> pvTex [[texture(16)]],
+                             device const Site* sites [[buffer(1)]], device const float4* lampPos [[buffer(2)]],
+                             device const float4* lampState [[buffer(3)]], constant uint* tiles [[buffer(7)]],
+                             device const GiantRec* giants [[buffer(8)]], constant TowerTable* towers [[buffer(9)]],
+                             constant VineTable* vines [[buffer(10)]], texture2d_array<float> vineFine [[texture(18)]],
+                             texture2d_array<uint> vineCoarse [[texture(19)]], texture2d_array<uint> vineSuper [[texture(20)]],
+                             texture2d_array<uint> vineBands [[texture(21)]]) {
+    float2 ndc = in.uv * 2.0 - 1.0;
+    ndc.y = -ndc.y;
+    ndc += f.jitter.xy;
+    float tanH = f.camPos.w;
+    float3 d = normalize(f.camFwd.xyz + f.camRight.xyz * ndc.x * tanH * f.camFwd.w + f.camUp.xyz * ndc.y * tanH);
+    float3 o = f.camPos.xyz;
+    int levels = int(f.fade.z);
+    float gmax = f.misc.y;
+    for (int k = 1; k < levels; k++) gmax = max(gmax, coarse.read(uint2(0), uint(k - 1), coarse.get_num_mip_levels() - 1).r + 1.0);
+    if (int(f.shadow.y) & 2) gmax = min(gmax, 260.0);
+    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, cg2, hb, uint(f.mapInfo.w), giants, pvTex, towers, 0 };
+    Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
+            2.0 * tanH * f.resolution.z, f.misc.w, makeLight(f.sunDir.xyz),
+            fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
+            cloudTex, f.cloud.xyz, st, sites, lampPos, lampState, lightMap, lightDir, f.lights, shadowNear, shadowFar,
+            f.misc2.z == 14 ? 2.0 : f.shadow.x, (int(f.shadow.y) & 1) != 0, int(f.shadow.y), slowTex,
+            f.slowCloud.w == f.camRight.w ? f.slowCloud : float4(0), 0u };
+    x.towers = towers;
+    if (f.misc2.z >= 1 && f.misc2.z != 2) return dst;
+    float tSurf = abs(dst.a);
+    StrandHit vh = traceStrands(vineFine, vineCoarse, vineSuper, vineBands, vines, x.origin, o, d, tSurf, x.pixelAngle);
+    float vineA = mix(vh.hit ? 1.0 : 0.0, vh.alpha, vh.w);
+    if (vineA <= 0.0) return dst;
+    float tv = vh.hit ? vh.t : vh.tm;
+    // The cover over a bird in front of it is nothing of the bird's.
+    if (!vh.hit && dst.a < 0.0 && tv > tSurf) return dst;
+    float3 nv = vh.hit ? float3(vh.n) : normalize(float3(-d.x, 0.0, -d.z) + float3(1e-5, 0, 0));
+    float top = vh.hit ? vh.top : vh.topm;
+    float draw = vh.hit ? hashf(hash2i(vh.cell, x.seed + 602u)) : 0.5;
+    float3 col = shadeVine(x, x.L, o, d, tv, nv, top, draw, !vh.hit);
+    if (f.misc2.z != 2) col = applyFog(x, col, o, d, tv);
+    return float4(coverMix(dst.rgb, col, vineA), vh.hit && vh.w <= 0.0 ? vh.t : dst.a);
+}
+
 fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0)]],
                               texture2d<float> hm [[texture(0)]], texture2d<float> cloudTex [[texture(1)]],
                               texture2d<float> clim [[texture(2)]], texture2d<uint> st [[texture(3)]],
@@ -8069,8 +8527,6 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
 }
 
 
-static inline float3 tmap(float3 v) { return v / (1.0 + max(max(v.r, v.g), v.b)); }
-static inline float3 itmap(float3 v) { return v / max(1.0 - max(max(v.r, v.g), v.b), 1e-4); }
 
 // 9-tap Catmull-Rom via bilinear taps: bilinear history fetches blur edges a little more every frame the
 // camera moves, which TAA then accumulates.
