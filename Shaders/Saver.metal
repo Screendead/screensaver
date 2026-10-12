@@ -6949,10 +6949,12 @@ static inline float2 fishDart(float t, uint h, float period) {
     return float2(cos(a), sin(a)) * 4.5 * (smoothstep(0.0, 0.08, f) - smoothstep(0.3, 1.0, f));
 }
 
-// A fin flick: a brief pulse once every five to eight seconds, per fish (hash hi).
+// A fin flick: a quarter-second pulse every ten to sixteen seconds, from half the fish of a school (hash hi).
+constant float FLICK_W = 0.025;
+static inline float fishFlickRate(uint hi) { return 0.0625 + 0.0375 * byteOf(hi, 3); }
 static inline float fishFlick(float t, uint hi) {
-    float ph = fract(t * (0.13 + 0.08 * byteOf(hi, 3)) + byteOf(hi, 2));
-    float b = saturate(1.0 - abs(ph - 0.5) * 40.0);
+    float ph = fract(t * fishFlickRate(hi) + byteOf(hi, 2));
+    float b = saturate(1.0 - abs(ph - 0.5) / FLICK_W);
     return b * b * (3.0 - 2.0 * b);
 }
 
@@ -6969,16 +6971,30 @@ static inline FishSample fishAt(thread const Ctx& x, float2 q, float2 bs, bool s
     FishSample r = { 0, 0, 0, 0 };
     int2 cell = int2(floor(q / FISH_CELL));
     uint h = hash2i(cell, x.seed + 160u);
-    if (hashf(h) > 0.22) return r;
+    if (hashf(h) > 0.18) return r;
     float2 C = (float2(cell) + 0.5) * FISH_CELL;
     bool single = (h & 7u) < 3u;
     float t = x.time, per = single ? 3.4 : 5.5;
     float spread = single ? 0.0 : 3.2;
-    int n = single ? 1 : 5 + int((h >> 4) % 4u);
+    int n = single ? 1 : 4 + int((h >> 4) % 4u);
     float L = single ? 1.3 : 0.55;
     uint hs = pcg(h + 9u);
     float sa = byteOf(hs, 0) * 6.2831853;
     float2 rot = float2(cos(sa), sin(sa)) * spread;
+    if (wake) {
+        // Calm water stays dark: unless a dart began within the last second and a half, or some fish flicked within
+        // the last second, nothing is lit, and the track need not be worked out.
+        float u = t / per + hashf(pcg(h + 5u));
+        float k = floor(u);
+        bool lit = (u - k) * per < 0.08 * per + 1.0 && hashf(hash2i(int2(int(k), 7), h)) <= 0.65;
+        for (int i = 0; i < n && !lit; i++) {
+            uint hi = pcg(h + uint(i) * 31u + 11u);
+            float rate = fishFlickRate(hi);
+            float ph = fract(t * rate + byteOf(hi, 2));
+            lit = (single || (hi & 0x100000u) != 0u) && ph > 0.5 - FLICK_W && ph < 0.5 + FLICK_W + rate;
+        }
+        if (!lit) return r;
+    }
     float2 c0 = C + fishWander(t, h) + fishDart(t, h, per);
     if (wake) {
         // A dart runs out and back along one line, so the last second keeps within the school's spread, the glow's
@@ -7000,7 +7016,7 @@ static inline FishSample fishAt(thread const Ctx& x, float2 q, float2 bs, bool s
             float k = (single ? 1.4 : 0.6) * E * wv * wv / w2;
             for (int i = 0; i < n; i++) {
                 uint hi = pcg(h + uint(i) * 31u + 11u);
-                float I = Id + 0.6 * fishFlick(t - tm, hi);
+                float I = Id + ((single || (hi & 0x100000u) != 0u) ? 0.6 * fishFlick(t - tm, hi) : 0.0);
                 if (I * E < 0.01) continue;
                 float2 sp = FISH_SPOTS[i] * (0.75 + 0.5 * byteOf(hi, 0));
                 float2 a = q - ca - float2(sp.x * rot.x - sp.y * rot.y, sp.x * rot.y + sp.y * rot.x);
@@ -7094,7 +7110,7 @@ static inline SeaLife seaLife(thread const Ctx& x, float3 o, float3 d, Hit h, fl
         }
         FishSample fs = fishAt(x, q, bs, shadows, fpv, wakes);
         if (wakes) {
-            float wake = fs.wake * fishAmt * smoothstep(340.0, 160.0, tw) * smoothstep(0.3, 0.6, x.L.night);
+            float wake = fs.wake * fishAmt * smoothstep(300.0, 150.0, tw) * smoothstep(0.3, 0.6, x.L.night);
             if (wake > 0.002) {
                 float rip = perlin3(float3(ww * 4.5, x.time * 2.0), x.seed + 161u);
                 float spark = mix(0.3 + 2.4 * smoothstep(0.12, 0.32, rip), 0.6, saturate(fpv * 3.0));
@@ -7176,8 +7192,6 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         c = mix(c, float3(0.9, 0.5, 0.1), 0.45 * smoothstep(0.15, 0.6, pv.x));
         c = mix(c, float3(0.2, 0.4, 1.0), 0.45 * smoothstep(0.2, 0.6, pv.y));
         { Giant gm; if (giantAt(giants, wc, 0.0, gm)) c = float3(1); }
-        // Reefs coral-orange.
-        if (h0 < SEA) c = mix(c, float3(1.0, 0.45, 0.2), 0.7 * smoothstep(0.5, 0.7, reefRegion(wc + seedOffset(uint(f.mapInfo.w)), lagoonAmount(climate(wc, uint(f.mapInfo.w))), uint(f.mapInfo.w))));
         float px = 1300.0 * cs / f.resolution.y;
         float2 g1 = abs(wc - 2000.0 * floor(wc / 2000.0 + 0.5)), g2 = abs(wc - 10000.0 * floor(wc / 10000.0 + 0.5));
         if (any(g1 < px * 0.6)) c = mix(c, float3(0), 0.35);
@@ -7294,7 +7308,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         float fishAmt = warm * (0.4 + 0.6 * lagoon);
         bool wakes = x.L.night > 0.3;
         bool reefOn = lagRaw > 0.45 && h.hit && h.t - tw < 16.0 && (shadeHit || x.L.night > 0.0) && !(x.prof & 128);
-        bool fishOn = fishAmt > 0.0 && (wakes ? tw < 340.0 : tw < 200.0 && bedShows > 0.01 && x.L.night < 0.3) && !(x.prof & 256);
+        bool fishOn = fishAmt > 0.0 && (wakes ? tw < 300.0 : tw < 200.0 && bedShows > 0.01 && x.L.night < 0.3) && !(x.prof & 256);
         if (reefOn || fishOn) life = seaLife(x, o, d, h, tw, ww, lagRaw, lagoon, fishAmt, fres, bedShows, reefOn, fishOn);
         lit *= life.litMul;
         float3 deep = x.L.zenith * 0.18 + x.L.horizon * 0.06 + float3(0.004, 0.014, 0.018);
