@@ -1352,6 +1352,54 @@ static inline float3 isleRock(float y, float2 w, uint seed, float fp) {
     return c;
 }
 
+// The glow islands share with the land's and the sea's: deep blue, turquoise and pink (#2a6bff, #2fe3d0, #ff5fc8),
+// linear. (At merge: one constant with strata/forestglow's BIO_LAND.)
+constant float3 ISLE_GLOW[3] = { float3(0.023, 0.147, 1.0), float3(0.028, 0.768, 0.630), float3(1.0, 0.114, 0.578) };
+
+// A soft glowing spot in cell ci of face coordinates q (cell wide), present with chance pr, kept off the cell's edges;
+// once its core nears a pixel (fp) it widens and dims, keeping its light, so it never shrinks to a sparkling speck.
+static inline float isleSpot(float2 q, int plane, float cell, float pr, float r, float fp, uint salt, thread uint& hh) {
+    float2 ci = floor(q / cell);
+    hh = hash3i(int3(int2(ci), plane), salt);
+    if (hashf(hh) >= pr) return 0.0;
+    float m = 0.35 * cell;
+    float2 c = ci * cell + m + (cell - 2.0 * m) * float2(hashf(pcg(hh)), hashf(pcg(hh + 1u)));
+    float dd = length(q - c);
+    if (dd >= m) return 0.0;
+    float re = max(r, 0.8 * fp);
+    float e2 = dd * dd / (re * re);
+    return (2.0 * exp(-e2) + 0.5 * exp(-e2 / 9.0)) * (r * r) / (re * re) * (1.0 - smoothstep(0.6 * m, m, dd));
+}
+
+// An island's glow at night: sparse spots on the rock of its flanks and keel, blue and turquoise; the tips of its
+// roots and vines, pulsing slowly; faint turquoise in a fall's spray. Pink on about one island in six (by place).
+static float3 isleGlow(int3 v, int3 n, float2 wq, float wy, float3 col, bool root, bool water, bool rock, float fp, uint seed, float time) {
+    float far = 1.0 - smoothstep(0.5, 1.0, fp);
+    bool pinkHere = hashf(hash2i(int2(floor(wq / 700.0)), seed + 750u)) < 0.17;
+    if (root) {
+        float tip = 1.0 - smoothstep(1.0, 3.5, wy - col.z);
+        if (tip <= 0.0) return 0.0;
+        uint hr = hash2i(v.xz >> 1, seed + 751u);
+        if (hashf(hr) > 0.55) return 0.0;
+        float pulse = 0.7 + 0.3 * sin(time * 0.314 + 6.283 * hashf(pcg(hr)));
+        float3 hue = pinkHere && hashf(pcg(hr + 1u)) < 0.5 ? ISLE_GLOW[2] : hashf(pcg(hr + 2u)) < 0.4 ? ISLE_GLOW[0] : ISLE_GLOW[1];
+        return hue * 0.05 * tip * pulse * far;
+    }
+    if (water) {
+        float foot = 1.0 - saturate((wy - col.z) / 30.0);
+        return n.y == 0 ? ISLE_GLOW[1] * 0.02 * foot * far : 0.0;
+    }
+    if (!rock || n.y > 0) return 0.0;
+    float2 q = n.y != 0 ? wq : float2(n.x != 0 ? wq.y : wq.x, wy);
+    int plane = n.x != 0 ? v.x * 2 + n.x : n.z != 0 ? v.z * 2 + n.z : -7;
+    uint hh;
+    float g = isleSpot(q, plane, 4.0, 0.12, 0.6, fp, seed + 752u, hh);
+    if (g <= 0.0) return 0.0;
+    float hp = hashf(pcg(hh + 3u));
+    float3 hue = pinkHere && hp < 0.35 ? ISLE_GLOW[2] : hp < 0.6 ? ISLE_GLOW[0] : ISLE_GLOW[1];
+    return hue * g * 0.02 * (0.75 + 0.25 * sin(time * 0.5 + 6.283 * hp)) * far;
+}
+
 // The shading table (fragment buffer 10; towers hold 9, giants 8): the islands nearest the camera (Sources/Islands.swift).
 // a: centre xz, reach, the underside's mean height; b: radius, top, keel, the hash's low 16 bits; c: its fall's lip xz,
 // top and foot (zero: none).
@@ -5164,6 +5212,7 @@ struct Surface {
     float wall;     // megaWall: among the great walls
     float3 nrm;     // the plane a structure's roof voxel or a tower's wall shades as (zero: the face normal)
     float3 emit;    // fire, lanterns and lit windows
+    float3 glow;    // an island's glow, which shade() eases in after dusk
     bool isleUnder; // under an island: the sky it hides is isleSkyOcc's
     float gy;       // the height the ground round it is judged from (groundL): above any island for an island's own rock
 };
@@ -5493,6 +5542,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     s.face = 0;
     s.nrm = 0;
     s.emit = 0;
+    s.glow = 0;
     s.isleUnder = false;
     s.gy = p.y;
     int2 mapOrigin = tr.origin;
@@ -5803,6 +5853,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         s.tread = s.albedo;
         s.face = s.albedo;
     }
+    if (k == 0 && isleBody && fp < 1.0) s.glow = isleGlow(v, n, wq, wy, col, isleRoot, isleWater, float(v.y) < isleLo - 6.0, fp, seed, time);
     if ((tree && float(v.y) >= col4.a) || vegLeaf || isleLeaf) {
         float leafLo = vegLeaf ? vegLo : isleLeaf ? isleLo : col4.a;
         // Leaves: deep, low-chroma greens that drift slowly across a grove; conifers cooler and darker.
@@ -7098,6 +7149,8 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
             col += s.albedo * Lm * ((face * mix(1.0, ao, 0.5)) / (1.0 + dy * dy) + glow) * x.lights.w;
         }
     }
+    // An island's glow, from late dusk; gone before the 1-voxel ring's morph band, and not in rippled water.
+    if (SCENE_ISLES && shadows == 1 && any(s.glow > 0.0)) col += s.glow * smoothstep(0.04, -0.12, L.sun.y);
     return col + s.emit;
 }
 
@@ -7182,6 +7235,113 @@ static float3 applyFogT(thread const Ctx& x, float3 col, float3 o, float3 d, flo
 
 static float3 applyFog(thread const Ctx& x, float3 col, float3 o, float3 d, float t) {
     return applyFogT(x, col, o, d, fogTransmittance(x, o, d, t));
+}
+
+// Mist an island's puff (centre c, radii rad, density k per voxel at its core) lays along o + d t up to tEnd: the
+// closed-form integral of 1 - r^2 over the chord through the ellipsoid, taken about the ray's closest approach (about
+// the camera, at a kilometre, float cubes of t would cancel to noise); the chord's middle in mid.
+static inline float mistPuff(float3 o, float3 d, float tEnd, float3 c, float3 rad, float k, thread float3& mid) {
+    float3 A = (o - c) / rad, B = d / rad;
+    float a = dot(B, B);
+    float tm = -dot(A, B) / a;
+    float3 q = A + B * tm;
+    float e = 1.0 - dot(q, q);
+    if (e <= 0.0) return 0.0;
+    float hl = sqrt(e / a);
+    float t0 = max(tm - hl, 0.0), t1 = min(tm + hl, tEnd);
+    if (t1 <= t0) return 0.0;
+    mid = o + d * (0.5 * (t0 + t1));
+    float s0 = t0 - tm, s1 = t1 - tm;
+    return k * (e * (s1 - s0) - a * (s1 * s1 * s1 - s0 * s0 * s0) / 3.0);
+}
+
+// Banks of mist round the islands' keels (a ring of flattened puffs on most bigger islands) and the plume a fall
+// spills into: in-scatter in front of whatever the ray reaches by tEnd, drawn as opaque bodies with soft, lumpy edges,
+// never a thin veil over the land (which would read as terrain gone translucent). Lit as the cloud sheet is, in the
+// islands' shade. (colour, opacity); faded out before the islands' pipeline variant turns off. One noise per pixel, at
+// the chords' weighted middle.
+static float4 isleMist(thread const Ctx& x, float3 o, float3 d, float tEnd) {
+    int n = min(x.isles->n.x, ISLE_TABLE);
+    float2 og = float2(x.origin), cam = x.tr.cam + og;
+    float tau = 0.0, plume = 0.0;
+    float4 acc = 0.0;   // weighted chord middle (xyz) and puff size (w)
+    float hw = 0.0;
+    for (int i = 0; i < n; i++) {
+        IsleShade s = x.isles->r[i];
+        float R = s.b.x;
+        float fade = 1.0 - smoothstep(2400.0, 3000.0, length(s.a.xy - cam));
+        if (R < 60.0 || fade <= 0.0) continue;
+        uint h = uint(s.b.w);
+        float th = s.b.y - s.b.z;
+        float2 c = s.a.xy - og;
+        float an0 = hashf(pcg(h + 740u));
+        if (an0 < 0.7) {
+            // Bound: a sphere round the ring of puffs.
+            float3 oc = o - float3(c.x, s.b.y - 0.48 * th, c.y);
+            float Rb = 1.4 * R + 30.0;
+            float bb = dot(oc, d), cb = dot(oc, oc) - Rb * Rb;
+            if (bb * bb - cb > 0.0 && (cb < 0.0 || bb < 0.0)) {
+                for (int j = 0; j < 6; j++) {
+                    uint hj = pcg(h + 741u + uint(j) * 7u);
+                    float an = an0 * 8.9759 + float(j) * 1.0471976 + 0.5 * (hashf(hj) - 0.5);
+                    float rr = R * (0.6 + 0.35 * hashf(pcg(hj)));
+                    float3 pc = float3(c.x + cos(an) * rr, s.b.y - (0.4 + 0.16 * hashf(pcg(hj + 1u))) * th, c.y + sin(an) * rr);
+                    float rh = (0.3 + 0.14 * hashf(pcg(hj + 2u))) * R + 15.0;
+                    float3 mid;
+                    float t = mistPuff(o, d, tEnd, pc, float3(rh, 0.28 * rh, rh), 1.5 / rh, mid) * fade;
+                    if (t <= 0.0) continue;
+                    tau += t;
+                    acc += float4(mid, rh) * t;
+                    hw += saturate((mid.y - pc.y) / (0.28 * rh) * 0.5 + 0.5) * t;
+                }
+            }
+        }
+        if (s.c.w > 0.0) {
+            // The plume: spray billowing out round the fall's foot in three puffs, never down to the ground.
+            float2 u = normalize(s.c.xy - s.a.xy);
+            float L = s.c.z - s.c.w;
+            float rw = 8.0 + 0.03 * R;
+            for (int j = 0; j < 3; j++) {
+                float fj = float(j);
+                float3 pc = float3(s.c.x - og.x + u.x * (3.0 + 3.0 * fj), s.c.w + L * (0.18 - 0.16 * fj), s.c.y - og.y + u.y * (3.0 + 3.0 * fj));
+                float r = rw * (1.0 + 0.45 * fj);
+                float3 mid;
+                float t = mistPuff(o, d, tEnd, pc, float3(r, L * (0.3 - 0.07 * fj), r), 1.3 / r, mid) * fade;
+                if (t <= 0.0) continue;
+                tau += t;
+                plume += t;
+                acc += float4(mid, r) * t;
+                hw += 0.85 * t;
+            }
+        }
+    }
+    if (tau <= 0.0) return 0.0;
+    float3 mid = acc.xyz / tau;
+    float sz = acc.w / tau;
+    float3 mw = mid + float3(og.x, 0.0, og.y);
+    // The finer octave fades before its lumps near a pixel, or it rings.
+    float fpm = length(mid - o) * x.pixelAngle;
+    float s0 = max(0.25 * sz, 20.0), s1 = max(0.09 * sz, 7.0);
+    float lump = perlin3(mw / s0 + float3(x.time * 0.02, x.time * 0.015, x.time * 0.013), x.seed + 742u)
+               + 0.5 * perlin3(mw / s1 + float3(0.0, x.time * 0.05, 0.0), x.seed + 743u) * (1.0 - smoothstep(0.15, 0.4, fpm / s1));
+    float h01 = hw / tau;
+    tau *= saturate(0.45 + 1.1 * lump);
+    float a = smoothstep(0.1, 0.75, 1.0 - exp(-tau));
+    if (a <= 0.0) return 0.0;
+    float2 dh = normalize(d.xz + 1e-5), sh2 = normalize(x.L.sun.xz + 1e-5);
+    float toSun = 0.5 + 0.5 * dot(dh, sh2);
+    float3 ambient = x.L.zenith * 1.0 + x.L.horizon * 0.35;
+    // In the islands' shade: lit mostly from the side and below, by the sky and the bright land.
+    float shadow = 0.2 + 0.4 * saturate(h01);
+    float3 lit = x.L.keyCol * shadow * (0.6 + 0.4 * toSun) * max(x.L.key.y, 0.0) * 0.9 + ambient * (0.5 + 0.3 * h01);
+    float3 litG = x.L.keyCol * (0.04 + 0.7 * shadow * shadow) * (0.2 + 0.8 * toSun * toSun) + ambient * float3(0.62, 0.55, 0.85) * (0.5 + 0.5 * h01);
+    litG += x.L.keyCol * min(hg(dot(d, x.L.sun), 0.75), 1.5) * 0.5 * shadow;
+    lit = mix(lit, litG, x.L.gold);
+    lit = mix(lit, float3(0.020, 0.025, 0.040) * (0.5 + 0.7 * shadow) + x.L.skyHor * 0.7, x.L.night);
+    // At night the spray round a fall's foot carries a faint turquoise glow (the shared palette's #2fe3d0).
+    lit += float3(0.028, 0.768, 0.630) * 0.035 * x.L.night * saturate(plume / max(tau, 1e-4));
+    lit = applyFogT(x, lit, o, d, fogTransmittance(x, o, d, length(mid - o), 0));
+    return float4(lit, a);
 }
 
 // In-scatter of the nearest lamps' light along a ray to tEnd: the closed-form integral of 1/(r^2 + 4) - 1/(Rh^2 + 4)
@@ -7823,6 +7983,10 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         }
     } else {
         float4 sky = skyWithClouds(x, o, d);
+        if (SCENE_ISLES && x.isles->n.x > 0 && !(x.prof & 128)) {
+            float4 m = isleMist(x, o, d, 1e5);
+            sky.rgb = mix(sky.rgb, m.rgb, m.a);
+        }
         if (x.lights.w > 0.0 && f.refs.x > 0) sky.rgb += lampHaze(x, lampPos, lampState, refs, f.refs.x, o, d, 2500.0) * 0.05 * x.lights.w;
         if (f.refs.y > 0) {
             float4 sm = smoke(x, sites, lampPos, lampState, refs, f.refs.y, o, d, 1e9);
@@ -7856,6 +8020,10 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         // Thin cover would wash the whole wall evenly, which reads as terrain gone translucent rather than as cloud:
         // the veil is drawn only where the cloud in front is dense, as an opaque body with soft edges.
         col = mix(col, cl.col, smoothstep(0.35, 0.8, cl.a) * smoothstep(CLOUD_Y0, CLOUD_Y0 + 110.0, o.y + d.y * h.t));
+    }
+    if (SCENE_ISLES && x.isles->n.x > 0 && !(x.prof & 128)) {
+        float4 m = isleMist(x, o, d, tSurf);
+        col = mix(col, m.rgb, m.a);
     }
     col = hazeAndSmoke(x, col, sites, lampPos, lampState, refs, f.refs, o, d, tSurf);
     return float4(col, birdRefl ? -tSurf : tSurf);
