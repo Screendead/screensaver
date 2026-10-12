@@ -537,7 +537,7 @@ final class FlightCamera {
             steerGiant += (across >= 0 ? -1 : 1) * 0.09 * min(1, 2.5 * w)
         }
         // The nearest giant not yet reached, up to 12k off, draws the heading gently toward a point beside it; so does a
-        // big island, toward its middle, to pass beneath it.
+        // big island within 3k, toward its middle, to pass beneath it; farther off one steers the flight into trees.
         var steerPilgrim = 0.0
         if time >= nextPilgrim {
             nextPilgrim = time + 2
@@ -556,7 +556,7 @@ final class FlightCamera {
                 if visitedGiants.contains(key) { continue }
                 let d = simd_length(s.pos - p)
                 if d < 0.4 * s.reach { visitedGiants.insert(key); continue }
-                if d < best { best = d; pilgrim = s.pos; pilgrimIsle = true }
+                if d < min(best, 3000) { best = d; pilgrim = s.pos; pilgrimIsle = true }
             }
         }
         if let g = pilgrim {
