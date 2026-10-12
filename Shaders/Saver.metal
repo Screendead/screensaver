@@ -1406,7 +1406,7 @@ constant int CAVE_MAX_S = 8;
 // m: the mouth's centre (world xz), u: into the rock, yF: the floor, W: the mouth's half width, L: depth, Hc: height at
 // the mouth's middle. Must match World.CaveRec in Sources/Renderer.swift.
 struct CaveRec { int2 cell; float2 m; float2 u; float yF; float W; float L; float Hc; uint h; uint flags; };
-constant uint CV_ON = 1u, CV_HOME = 2u, CV_GROTTO = 4u;
+constant uint CV_ON = 1u, CV_HOME = 2u, CV_GROTTO = 4u, CV_LOW = 8u;
 
 static inline int caveSlot(int2 cell) {
     int2 m = ((cell % CAVE_WIN) + CAVE_WIN) % CAVE_WIN;
@@ -1419,23 +1419,27 @@ static inline bool caveFind(device const CaveRec* caves, float2 w, thread CaveRe
     return all(r.cell == cell) && (r.flags & CV_ON) != 0u;
 }
 
-// A cave's section at world column q: (floor, roof) of its hollow, or lo >= hi outside it. a: depth into the rock from
-// the mouth line, b: across it.
-static inline float2 caveSection(CaveRec r, float2 q, uint seed) {
+// A cave's section at world column q: (floor, roof) of its hollow, or lo >= hi outside it, and the arch's height there
+// as a share of its crown's. a: depth into the rock from the mouth line, b: across it.
+static inline float3 caveSection(CaveRec r, float2 q, uint seed) {
     float2 d = q - r.m;
     float a = dot(d, r.u), b = dot(d, float2(-r.u.y, r.u.x));
-    if (a < -4.0 || a > r.L + 2.0 || abs(b) > r.W * 1.5 + 3.0) return float2(0);
+    if (a < -4.0 || a > r.L + 2.0 || abs(b) > r.W * 1.5 + 3.0) return float3(0);
     float ta = saturate(a / r.L);
     // Full width at the mouth, swelling into a chamber, pinching out at the back; the edge wanders.
     float wa = r.W * (1.0 + 0.3 * sin(3.14159 * min(ta * 1.6, 1.0))) * sqrt(saturate(1.0 - pow(max(ta - 0.5, 0.0) / 0.5, 2.0)));
-    float x = abs(b) / max(wa, 0.5) + 0.2 * perlin2(q / 6.0, seed + 910u) + 0.08 * perlin2(q / 2.7, seed + 911u);
-    if (x >= 1.0) return float2(0);
+    // Each cave's crown sits off its axis by its own amount, wandering with depth, and its arch has its own profile
+    // (pointed to round shouldered), so no two mouths share a silhouette.
+    // A home's crown stays near its axis: its furnishing stands either side of it.
+    float bc = b - wa * ((r.flags & CV_HOME) != 0u ? 0.3 : 1.0) * (0.35 * (hashf(pcg(r.h + 11u)) - 0.5) + 0.2 * perlin2(float2(a / 9.0, 0.5), seed + 915u));
+    float x = abs(bc) / max(wa, 0.5) + 0.2 * perlin2(q / 6.0, seed + 910u) + 0.08 * perlin2(q / 2.7, seed + 911u);
+    if (x >= 1.0) return float3(0);
     // A rounded arch, its crown ragged.
-    float arch = pow(1.0 - x * x, 0.75);
+    float arch = pow(1.0 - x * x, 0.6 + 0.6 * hashf(pcg(r.h + 12u)));
     float hc = r.Hc * (1.0 - 0.45 * smoothstep(0.25, 1.0, ta)) * (0.88 + 0.24 * perlin2(q / 8.0, seed + 912u));
     float lo = r.yF + floor(1.8 * (1.0 - sqrt(1.0 - x * x)) * saturate(0.6 + perlin2(q / 3.3, seed + 913u)));
     float hi = r.yF + floor(hc * arch + 0.5 + 1.3 * perlin2(q / 3.5, seed + 914u) * arch);
-    return float2(lo, hi);
+    return float3(lo, hi, arch);
 }
 
 // A lived-in cave's hearth: its depth along the cave's axis; its gear stands to one side of it.
@@ -1462,12 +1466,15 @@ static inline int caveProp(CaveRec r, float a, float b, thread float& rise) {
 static inline Col caveColumn(Col c, int2 w, CaveRec r, uint seed, int s) {
     if (c.gh > c.gl) return c;
     float2 q = float2(w) + 0.5;
-    float2 g = caveSection(r, q, seed);
+    float3 g = caveSection(r, q, seed);
     float lo = g.x, hi = g.y;
-    if (hi - lo < 3.0 || c.h <= lo) return c;
+    float a = dot(q - r.m, r.u);
+    // In the mouth the arch's shoulders carry down to two voxels.
+    if (hi - lo < (a < 3.0 ? 2.0 : 3.0) || c.h <= lo) return c;
     c.cave = true;
     if (c.h < hi + 3.0) {
-        if (dot(q - r.m, r.u) < 3.0) { c.h = lo; return c; }
+        // Rock in the mouth with too little roof is cut away to a ragged sill toward the shoulders.
+        if (a < 3.0) { c.h = min(c.h, lo + floor(0.8 + 1.2 * perlin2(q / 2.5, seed + 916u)) * step(g.z, 0.8)); return c; }
         hi = c.h - 3.0;
         if (hi - lo < 3.0) return c;
     }
@@ -1530,11 +1537,19 @@ static bool caveTry(float2 P, uint h, uint seed, thread CaveRec& r) {
     if (yF < SEA + 1.5 || pr[j - 1] > yF + 1.0) return false;
     float tm = float(2 * j - 16) + 1.0;
     float2 m = floor(P + u * tm) + 0.5;
+    // The mouth's line: the first column up from the foot that stands well over it, so the face holds the arch.
+    for (int t = 0; t < 6; t++) {
+        float2 mt = floor(m + u * float(t)) + 0.5;
+        if (terrainColumnBase(int2(floor(mt)), seed).h >= yF + 8.0) { m = mt; break; }
+    }
     bool grotto = U > 250.0 && best > 30.0 && hashf(pcg(h + 4u)) < 0.3;
     float rr = hashf(pcg(h + 3u));
     float W = grotto ? 10.0 + 6.0 * rr : 4.0 + 7.0 * rr;
     float Hc = clamp(W * (1.1 + 0.6 * hashf(pcg(h + 5u))), 6.0, grotto ? 24.0 : 15.0);
-    Hc = min(Hc, best - 3.0);
+    // Under three voxels of roof at the mouth's crown, so its arch shows whole on the face.
+    float face = 1e9;
+    for (int t = 0; t < 3; t++) face = min(face, terrainColumnBase(int2(floor(m + u * float(t))), seed).h);
+    Hc = min(min(Hc, best - 3.0), face - yF - 3.0);
     if (Hc < 5.0) return false;
     float Lmax = grotto ? 56.0 : 18.0 + 26.0 * hashf(pcg(h + 6u));
     float L = 0.0;
@@ -1550,7 +1565,14 @@ static bool caveTry(float2 P, uint h, uint seed, thread CaveRec& r) {
         Col q = terrainColumnBase(int2(floor(m + u * 4.0 + v * (s2 * W * 0.8))), seed);
         if (q.h < yF + 0.6 * Hc + 3.0) { W *= 0.6; Hc = min(Hc, max(5.0, W * 1.2)); }
     }
-    if (W < 3.0) return false;
+    // Level ground before the mouth across its width: a ledge narrower than the mouth would roof the ground beside it.
+    for (int t = 0; t < 2; t++) {
+        float s2 = t == 0 ? 1.0 : -1.0;
+        Col q = terrainColumnBase(int2(floor(m - u * 2.0 + v * (s2 * W * 0.7))), seed);
+        if (q.h > yF + 2.0) { W *= 0.6; Hc = min(Hc, max(5.0, W * 1.2)); }
+    }
+    // Smaller mouths read as notches in the slope.
+    if (W < 4.5 || Hc < 6.0) return false;
     // Nothing of it may leave P's cell: columns ask their own cell only.
     int2 cell = int2(floor(P / CAVE_CELL));
     for (; L >= 10.0; L -= 4.0) {
@@ -1563,10 +1585,10 @@ static bool caveTry(float2 P, uint h, uint seed, thread CaveRec& r) {
     }
     if (L < 10.0) return false;
     r.m = m; r.u = u; r.yF = yF; r.W = W; r.L = L; r.Hc = Hc; r.h = h;
-    r.flags = CV_ON | (grotto && W >= 8.0 ? CV_GROTTO : 0u);
-    // Someone lives in about one cave in seven whose floor is level with the ground in front, below the snow.
+    r.flags = CV_ON | (grotto && W >= 8.0 ? CV_GROTTO : 0u) | (U > 30.0 ? 0u : CV_LOW);
+    // Someone lives in about one cave in three whose floor is level with the ground in front, below the snow.
     float snow = snowlineAt(altitudeTemp(cl.temp, yF));
-    if (W >= 4.0 && Hc >= 6.0 && L >= 14.0 && yF < snow - 10.0 && abs(pr[j - 1] - yF) <= 1.0 && hashf(pcg(h + 7u)) < 0.16)
+    if (W >= 4.0 && Hc >= 6.0 && L >= 14.0 && yF < snow - 10.0 && abs(pr[j - 1] - yF) <= 1.0 && hashf(pcg(h + 7u)) < 0.35)
         r.flags |= CV_HOME;
     return true;
 }
@@ -5576,7 +5598,7 @@ static void caveDress(thread const Terrain& tr, thread Surface& s, int3 n, float
     float y = wy - r.yF;
     bool inside = underGap || n.y < 0;
     // Light from the mouth fades over a mouth's width or two.
-    if (inside) s.cave = 0.95 * smoothstep(0.2 * r.W, 1.7 * r.W + 6.0, a);
+    if (inside) s.cave = mix(0.45, 0.95, smoothstep(0.2 * r.W, 1.7 * r.W + 6.0, a));
     // Leaf texels a quarter voxel wide, at their mean once one nears a pixel.
     float near = 1.0 - smoothstep(0.08, 0.3, fpA);
     float3 tq = float3(wq.x, wy, wq.y) * 4.0;
@@ -5637,8 +5659,8 @@ static void caveDress(thread const Terrain& tr, thread Surface& s, int3 n, float
             float fl = flicker(time, hashf(lh) * 40.0, seed);
             float flame = perlin3(float3(wq * 2.5, wy * 1.6 - time * 1.4), seed + 320u) * 0.5 + 0.5;
             flame = mix(flame, 0.5, smoothstep(0.05, 0.3, fpA));
-            s.emit += LAMP_COL[L_HEARTH] * LAMP_EMIT[L_HEARTH] * fl * tr.caveFire * float3(1.0, 0.7, 0.5)
-                    * (n.y > 0 ? mix(0.05, 0.24, flame) : mix(0.02, 0.17, flame)) * (1.0 - farW);
+            s.emit += LAMP_COL[L_HEARTH] * LAMP_EMIT[L_HEARTH] * fl * tr.caveFire * float3(1.0, 0.8, 0.6)
+                    * (n.y > 0 ? mix(0.1, 0.45, flame) : mix(0.04, 0.3, flame)) * (1.0 - farW);
         }
     }
     // Past the 1-voxel ring the fire's lamp is gone (updateLamps): its light in the mouth glows on, so a lived-in cave
@@ -5650,14 +5672,15 @@ static void caveDress(thread const Terrain& tr, thread Surface& s, int3 n, float
         s.emit += LAMP_COL[L_HEARTH] * LAMP_I[L_HEARTH] * 0.08 * g * farW * tr.caveFire;
     }
     // Deep in, a few mosses and fungi glow at night, in the land's glow hues, slow to swell.
-    if (inside && tr.caveNight > 0.0 && a > 0.3 * r.L && y < 0.6 * r.Hc) {
+    // Not in a lived-in cave: there the fire lights it.
+    if (inside && tr.caveNight > 0.0 && (r.flags & CV_HOME) == 0u && a > 0.3 * r.L && y < 0.6 * r.Hc) {
         // In clumps on the floor and the foot of the walls: specks a quarter voxel across.
         float clump = smoothstep(0.15, 0.45, perlin2(wq / 4.5 + wy * 0.13, seed + 930u))
                     * (n.y > 0 ? 1.0 : n.y == 0 ? 1.0 - smoothstep(0.0, 0.5 * r.Hc, y) : 0.25);
         uint gh = hash3i(int3(floor(tq)), seed + 927u);
-        float spot = clump * mix(step(hashf(gh), 0.2) * (0.5 + hashf(pcg(gh))), 0.2, smoothstep(0.08, 0.4, fpA));
+        float spot = clump * mix(step(hashf(gh), 0.3) * (0.5 + hashf(pcg(gh))), 0.3, smoothstep(0.08, 0.4, fpA));
         float pulse = bioPulse(wq, time, seed, 0.0);
-        s.emit += bioHue(r.m, seed) * 0.18 * spot * pulse * tr.caveNight * (0.4 + 0.6 * green) * smoothstep(0.3 * r.L, 0.55 * r.L, a);
+        s.emit += bioHue(r.m, seed) * 0.45 * spot * pulse * tr.caveNight * (0.4 + 0.6 * green) * smoothstep(0.3 * r.L, 0.55 * r.L, a);
     }
 }
 
@@ -7322,7 +7345,9 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // to a cool silver and the fill to a deep blue well under it, so slopes facing the moon still model. In
     // early night it is already dark and keeps its contours (darkening lost the dusk A/B).
     // Deep in a cave neither the sky nor the light bounced in at its mouth reaches.
-    skyFill *= 1.0 - s.cave;
+    // A cave's floor sees the sky only level through the mouth, off the horizon and the ground before it: grey, not the
+    // zenith's blue.
+    if (s.cave > 0.0) skyFill = mix(skyFill, float3(dot(skyFill, float3(0.3, 0.55, 0.15))), 0.75 * saturate(nl.y)) * (1.0 - s.cave);
     bounce *= 1.0 - s.cave;
     float3 col = albK * L.keyCol * ndl * sh * mix(1.0, 1.1, L.night) * mix(float3(1.0), float3(0.40, 0.42, 0.47), deep)
                + alb * (skyFill * ao * riserShade + bounce) * mix(float3(1.0), float3(0.19, 0.23, 0.38), deep);

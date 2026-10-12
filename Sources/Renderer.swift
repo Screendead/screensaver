@@ -663,10 +663,10 @@ final class World {
                 let mid = SIMD2<Float>(Float(o.x), Float(o.y)) + Float(World.size / 2)
                 let r = Float(e) ?? 1500
                 for c in buf.caveList.filter({ simd_length($0.m - mid) < r }).sorted(by: { simd_length($0.m - mid) < simd_length($1.m - mid) }) {
-                    print(String(format: "cave at (%.0f, %.0f) floor %.0f in (%.2f, %.2f) W %.1f L %.0f H %.0f%@%@", c.m.x, c.m.y, c.yF, c.u.x, c.u.y, c.w, c.l, c.hc,
-                                 c.flags & 2 != 0 ? " home" : "", c.flags & 4 != 0 ? " grotto" : ""))
+                    print(String(format: "cave at (%.0f, %.0f) floor %.0f in (%.2f, %.2f) W %.1f L %.0f H %.0f%@%@%@", c.m.x, c.m.y, c.yF, c.u.x, c.u.y, c.w, c.l, c.hc,
+                                 c.flags & 2 != 0 ? " home" : "", c.flags & 4 != 0 ? " grotto" : "", c.flags & 8 != 0 ? " lowland" : ""))
                 }
-                print("caves in table: \(buf.caveList.count), within \(Int(r)): \(buf.caveList.filter { simd_length($0.m - mid) < r }.count)")
+                print("caves in table: \(buf.caveList.count) (lowland \(buf.caveList.filter { $0.flags & 8 != 0 }.count)), within \(Int(r)): \(buf.caveList.filter { simd_length($0.m - mid) < r }.count)")
             }
             buf.jungleGrid = stride(from: 0, through: World.size, by: 64).flatMap { z in
                 stride(from: 0, through: World.size, by: 64).map { x in
