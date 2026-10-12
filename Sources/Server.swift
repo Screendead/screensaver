@@ -26,7 +26,7 @@ enum Server {
         while true {
             var p = pollfd(fd: listener, events: Int16(POLLIN), revents: 0)
             let n = poll(&p, 1, 30_000)
-            if n < 0 && errno != EINTR { break }
+            if n < 0 && errno != EINTR { log("poll: \(String(cString: strerror(errno)))"); break }
             if n <= 0 {
                 if CACurrentMediaTime() - last > idleLimit { log("idle, exiting"); break }
                 if buildStamps() != builds { log("binary or metallib changed, exiting"); break }

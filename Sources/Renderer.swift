@@ -99,25 +99,28 @@ final class GPU {
     // edit) creating them one by one takes ~17 s; the compiler service builds concurrent requests in parallel.
     func prewarm(output: MTLPixelFormat) {
         let group = DispatchGroup(), lock = NSLock()
-        for name in library.functionNames where !compute.keys.contains(name) {
-            guard let f = library.makeFunction(name: name), f.functionType == .kernel else { continue }
-            group.enter()
-            device.makeComputePipelineState(function: f) { p, _ in
-                lock.lock(); self.compute[name] = p; lock.unlock()
-                group.leave()
-            }
-        }
+        var kernels: [String: MTLComputePipelineState] = [:], renders: [String: MTLRenderPipelineState] = [:]
+        let functions = library.functionNames.filter { compute[$0] == nil }.compactMap { library.makeFunction(name: $0) }
         var descriptors = ["taa": fullscreen(library.makeFunction(name: "taaFragment"), .rgba16Float),
                            "post \(output.rawValue)": fullscreen(library.makeFunction(name: "postFragment"), output)]
         for t in [false, true] { for b in [false, true] { descriptors[GPU.sceneKey(t, b)] = sceneDescriptor(t, b) } }
+        for f in functions where f.functionType == .kernel {
+            group.enter()
+            device.makeComputePipelineState(function: f) { p, _ in
+                lock.lock(); kernels[f.name] = p; lock.unlock()
+                group.leave()
+            }
+        }
         for (key, d) in descriptors where render[key] == nil {
             group.enter()
             device.makeRenderPipelineState(descriptor: d) { p, _ in
-                lock.lock(); self.render[key] = p; lock.unlock()
+                lock.lock(); renders[key] = p; lock.unlock()
                 group.leave()
             }
         }
         group.wait()
+        compute.merge(kernels) { a, _ in a }
+        render.merge(renders) { a, _ in a }
     }
 }
 
