@@ -417,19 +417,38 @@ static inline float tableField(float2 p, float M, uint seed) {
     return fbm2((p + tw) / 6000.0, 3, seed + 224u) * 1.4 + 0.5 + 0.5 * (M - 0.5);
 }
 
+// The warped position the provinces are laid out on, and their field m there: they stand where it passes 0.5.
+static inline float megaField(float2 p, uint seed, thread float2& q) {
+    q = p + float2(fbm2(p / 7000.0, 2, seed + 200u), fbm2(p / 7000.0 + 71.3, 2, seed + 201u)) * 3000.0;
+    return fbm2(q / 16000.0, 3, seed + 202u) * 1.6 + 0.5;
+}
+
+// A province's alpine share (the rest is tableland and karst), at its warped position q.
+static inline float megaAlpine(float2 q, uint seed) { return smoothstep(-0.12, 0.12, perlin2(q / 22000.0, seed + 203u)); }
+
+// The tepui of p's 30k cell, if one stands there: its centre c, rim radius R and hash hc.
+static inline bool tepuiIn(float2 p, uint seed, thread float2& c, thread float& R, thread uint& hc) {
+    const float CELL = 30000.0;
+    int2 cell = int2(floor(p / CELL));
+    hc = hash2i(cell, seed + 240u);
+    if (hashf(hc) >= 0.35) return false;
+    c = (float2(cell) + 0.25 + 0.5 * float2(hashf(pcg(hc)), hashf(pcg(hc + 1u)))) * CELL;
+    R = 900.0 + 600.0 * hashf(pcg(hc + 2u));
+    return true;
+}
+
 static inline Mega megaLift(float2 p, float lagoon, uint seed) {
     Mega g;
     g.U = 0.0;
     g.wK = 0.0;
     g.lipU = 0.0; g.lipR = 0.0; g.lipU01 = 0.0; g.notchFoot = 0.0; g.notchH = 0.0;
     float lipU = 0.0, uT = 0.0;
-    float2 cw = float2(fbm2(p / 7000.0, 2, seed + 200u), fbm2(p / 7000.0 + 71.3, 2, seed + 201u)) * 3000.0;
-    float2 q = p + cw;
-    float m = fbm2(q / 16000.0, 3, seed + 202u) * 1.6 + 0.5;
+    float2 q;
+    float m = megaField(p, seed, q);
     float M = smoothstep(0.50, 0.80, m);
     if (M > 0.0) {
-        float a = perlin2(q / 22000.0, seed + 203u), b = perlin2(q / 22000.0 + 9.7, seed + 204u);
-        float wA = smoothstep(-0.12, 0.12, a);
+        float b = perlin2(q / 22000.0 + 9.7, seed + 204u);
+        float wA = megaAlpine(q, seed);
         float wT = (1.0 - wA) * smoothstep(-0.12, 0.12, b);
         float wK = (1.0 - wA) * (1.0 - wT);
         float core = smoothstep(0.55, 0.95, m);
@@ -540,12 +559,10 @@ static inline Mega megaLift(float2 p, float lagoon, uint seed) {
         g.lipU = lipU;
     }
     // Tepui: in about one 30k cell in three, a sheer-walled table mountain over a talus skirt.
-    const float CELL = 30000.0;
-    int2 cell = int2(floor(p / CELL));
-    uint hc = hash2i(cell, seed + 240u);
-    if (hashf(hc) < 0.35) {
-        float2 c = (float2(cell) + 0.25 + 0.5 * float2(hashf(pcg(hc)), hashf(pcg(hc + 1u)))) * CELL;
-        float R = 900.0 + 600.0 * hashf(pcg(hc + 2u));
+    float2 c;
+    float R;
+    uint hc;
+    if (tepuiIn(p, seed, c, R, hc)) {
         float dd = length(p - c);
         if (dd < R + 1600.0) {
             // Lobes and buttresses, so the rim reads as eroded rock, not a drum.
@@ -848,8 +865,20 @@ static inline Tower towerMember(TowerGroup g, int m) {
 // tepui stands within d of p: what a tower group asks instead of megaLift itself, which every column of the group would
 // otherwise evaluate many times over.
 static inline float towerProvinceField(float2 p, uint seed) {
-    float2 cw = float2(fbm2(p / 7000.0, 2, seed + 200u), fbm2(p / 7000.0 + 71.3, 2, seed + 201u)) * 3000.0;
-    return fbm2((p + cw) / 16000.0, 3, seed + 202u) * 1.6 + 0.5;
+    float2 q;
+    return megaField(p, seed, q);
+}
+
+// How far world column centre w lies in wall country: 1 where tableland, karst or a tepui stands at full height, 0 in the
+// lowland and the alpine ranges: the forest keeps off the aprons under those walls (wallClear).
+static inline float wallCountry(float2 w, uint seed) {
+    float2 p = w + seedOffset(seed), q, c;
+    float R, wall = 0.0;
+    uint hc;
+    float M = smoothstep(0.50, 0.80, megaField(p, seed, q));
+    if (M > 0.0) wall = smoothstep(0.0, 0.3, M) * (1.0 - megaAlpine(q, seed));
+    if (tepuiIn(p, seed, c, R, hc)) wall = max(wall, 1.0 - smoothstep(R + 1200.0, R + 1700.0, length(p - c)));
+    return wall;
 }
 
 static inline bool towerNearTepui(float2 p, float d, uint seed) {
@@ -2063,8 +2092,78 @@ static bool giantColumn(thread const Giant& g, float2 wq, float gl, thread GRuns
 // under it, so the coarse rings rebuild the same forest.
 constant float JUNGLE_CELL = 8.0;
 constant float EMERGENT_CELL = 26.0;
-// Ground range over a 10-voxel window (plantTrees' +-5) from which the roof steps down, and past which none stands.
-constant float JUNGLE_STEEP = 7.0, JUNGLE_CLIFF = 13.0;
+// Ground range over a 10-voxel window (jungleWindow's +-5) from which the roof steps down, and past which none stands.
+// Mountain flanks rise 1.3-3 voxels a voxel (range 17-42): the roof clings to them, lower on the steepest; faces of 5
+// and more and a massif's walls (range 60 to hundreds) are bare rock. Emergents stand only on gentle ground (range
+// under EMERGENT_STEEP), and the clearings' ferns under FERN_STEEP.
+constant float JUNGLE_STEEP = 28.0, JUNGLE_CLIFF = 60.0, EMERGENT_STEEP = 7.0, FERN_STEEP = 13.0;
+// In wall country the aprons and benches under a massif's walls are no steeper than a mountain flank, but stand within a
+// few voxels of a wall, and from below read as one face with it: no forest stands there where the ground's range over a
+// 20-voxel window (+-10) reaches WALL_AT. Mountain flanks of 2:1 and more range past it too, so only wall country asks.
+// The cut is whole: a roof thinned to bushes on terraced ground leaves one or two on each tread, a speckle.
+constant float WALL_AT = 40.0;
+
+// Ground heights at world columns, as each map judges a forest's site: the trees on level 0 and the coarse rings over
+// them must read the same ground, or the forest's edge moves with the ring.
+// The 1-voxel map (plantTrees), clamped to its edge.
+struct MapGround {
+    texture2d<float, access::read> map;
+    int2 origin;
+    float at(int2 w) const {
+        int n = int(map.get_width());
+        return map.read(uint2(clamp(w - origin, int2(0), int2(n - 1)))).r;
+    }
+};
+// Raw terrain (coarse rings).
+struct TerrainGround {
+    uint seed;
+    float at(int2 w) const { return terrainColumn(w, seed).h; }
+};
+// The 1-voxel map's raw columns where it has them: reduceMaxBase must judge level 1's forest exactly as the coarse
+// kernel does, or mip 1 would not bound the level-1 roof.
+struct RawGround {
+    texture2d<float, access::read> raw;
+    int2 origin;
+    uint seed;
+    float at(int2 w) const {
+        int2 q = w - origin;
+        int n = int(raw.get_width());
+        return all(q >= 0) && all(q < n) ? raw.read(uint2(q)).r : terrainColumn(w, seed).h;
+    }
+};
+
+// The jungle's ground round world column c: (range, mean) over a 3x3 window 5 apart.
+template <typename G>
+static float2 jungleWindow(int2 c, thread const G& ground) {
+    float lo = 1e9, hi = -1e9, sum = 0.0;
+    for (int k = 0; k < 9; k++) {
+        float h = ground.at(c + int2(k % 3 - 1, k / 3 - 1) * 5);
+        lo = min(lo, h); hi = max(hi, h); sum += h;
+    }
+    return float2(hi - lo, sum / 9.0);
+}
+
+// Whether a forest may stand at world column c for its nearness to a massif's wall.
+template <typename G>
+static bool wallClear(int2 c, thread const G& ground, uint seed) {
+    // Under a quarter (the alpine ranges' fringe of karst) the bar, 4 * WALL_AT, is past any apron's range.
+    float wall = wallCountry(float2(c) + 0.5, seed);
+    if (wall < 0.25) return true;
+    float lo = 1e9, hi = -1e9;
+    for (int k = 0; k < 9; k++) {
+        float h = ground.at(c + int2(k % 3 - 1, k / 3 - 1) * 10);
+        lo = min(lo, h); hi = max(hi, h);
+    }
+    return (hi - lo) * wall < WALL_AT;
+}
+
+// The share of the jungle's roof that stands at world column c, whose jungleWindow range is steep (0: none).
+template <typename G>
+static float jungleKeep(int2 c, float steep, thread const G& ground, uint seed) {
+    if (steep < EMERGENT_STEEP) return 1.0;
+    if (steep >= JUNGLE_CLIFF || !wallClear(c, ground, seed)) return 0.0;
+    return 1.0 - smoothstep(JUNGLE_STEEP, JUNGLE_CLIFF, steep);
+}
 
 struct JCan { float lo, hi; bool trunk; };
 
@@ -2198,6 +2297,20 @@ static inline bool oldTreeIn(int2 cc, uint seed, float O, thread float2& ctr, th
     R = (vet ? 7.5 : 4.5) + 0.03 * Ht * hashf(pcg(h + 5u));
     tr = vet ? 1.9 : Ht > 62.0 ? 1.2 : 0.8;
     return true;
+}
+
+// The ground's range over the four columns 3 from a trunk past which no old tree stands: they climb mountain flanks
+// (to 3 voxels a voxel), not a massif's face, nor (wallClear) the aprons under one. OLD_GENTLE: ground no wall test asks.
+constant float OLD_CLIFF = 18.0, OLD_GENTLE = 6.0;
+
+// Whether an old tree's trunk at world column c has a site (not on a cliff), and its ground gt.
+template <typename G>
+static bool oldSite(int2 c, thread const G& ground, uint seed, thread float& gt) {
+    gt = ground.at(c);
+    float s0 = ground.at(c + int2(3, 0)), s1 = ground.at(c - int2(3, 0));
+    float s2 = ground.at(c + int2(0, 3)), s3 = ground.at(c - int2(0, 3));
+    float r = max(max(s0, s1), max(s2, s3)) - min(min(s0, s1), min(s2, s3));
+    return r <= OLD_GENTLE || (r <= OLD_CLIFF && wallClear(c, ground, seed));
 }
 
 // The intervals old-growth tree (trunk ground gt) adds to world column centre w; lod >= 1: crowns only, as a top.
@@ -2467,15 +2580,11 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
     float J = col.r >= SEA + 2.0 ? provinces(w + seedOffset(seed), seed).x : 0.0;
     if (tg.y > tg.x && (J >= 0.15 || (col.r >= SEA + 2.0 && provinces(w + seedOffset(seed), seed).y >= 0.2)))
         gAdd(rr, float(tg.x), float(tg.y), GM_LEAF);
+    MapGround mg { src, info.xy };
     if (J >= 0.15) {
         // The roof follows the ground smoothed over a few columns, and keeps off cliffs.
-        float gs = 0.0, gmin = 1e9, gmax = -1e9;
-        for (int k = 0; k < 9; k++) {
-            int2 q = clamp(p + int2(k % 3 - 1, k / 3 - 1) * 5, int2(0), int2(int(n) - 1));
-            float h = src.read(uint2(q)).r;
-            gs += h; gmin = min(gmin, h); gmax = max(gmax, h);
-        }
-        gs /= 9.0;
+        float2 jw = jungleWindow(wc, mg);
+        float gs = jw.y;
         uint hc = hash2i(wc, seed + 326u);
         int2 e0 = int2(floor(w / EMERGENT_CELL));
         bool eTrunk = false;
@@ -2494,23 +2603,23 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
                 float t0 = src.read(uint2(tq + int2(5, 0))).r, t1 = src.read(uint2(tq - int2(5, 0))).r;
                 float t2 = src.read(uint2(tq + int2(0, 5))).r, t3 = src.read(uint2(tq - int2(0, 5))).r;
                 float tr = max(max(max(t0, t1), max(t2, t3)), tc.r) - min(min(min(t0, t1), min(t2, t3)), tc.r);
-                if (tc.r < SEA + 10.0 || tc.b > tc.g || tc.a < 0.0 || abs(tc.r - gs) > 6.0 || tr >= JUNGLE_STEEP) continue;
+                if (tc.r < SEA + 10.0 || tc.b > tc.g || tc.a < 0.0 || abs(tc.r - gs) > 6.0 || tr >= EMERGENT_STEEP) continue;
                 eTrunk = eTrunk || length(w - ec) < (R > 9.0 ? 1.2 : 0.75);
                 emergentIntervals(w, ec, tc.r, y0, R, pads, eh, seed, 0, rr);
             }
         // A trunk column is bark through the roof (merged with it, its leaves would start at the roof's underside).
         // Steep ground steps the roof down to bushes on each column's own ground; a cliff carries none.
-        float steep = gmax - gmin;
-        if (!cleared && !eTrunk && steep < JUNGLE_CLIFF) {
-            float keep = 1.0 - smoothstep(JUNGLE_STEEP, JUNGLE_CLIFF, steep);
+        float steep = jw.x;
+        float keep = jungleKeep(wc, steep, mg, seed);
+        if (!cleared && !eTrunk && keep > 0.0) {
             JCan cn = jungleCanopy(w, mix(G, gs, keep), J, seed, keep);
             if (cn.hi > max(cn.lo, G)) {
                 gAdd(rr, cn.lo, cn.hi, GM_LEAF);
                 // Its crowns stand on poles; lianas hang from it.
                 if (cn.trunk) gAdd(rr, G, cn.lo, GM_WOOD);
                 else if (hashf(hc) < 0.02) gAdd(rr, G, cn.lo, GM_VINE);
-            } else if (hashf(hc) < 0.3) {
-                // Ferns and saplings in the clearings.
+            } else if (hashf(hc) < 0.3 && steep < FERN_STEEP) {
+                // Ferns and saplings in the clearings, on gentle ground: strewn over a slope's treads they read as speckle.
                 gAdd(rr, G, G + 1.0 + floor(2.5 * hashf(pcg(hc))), GM_LEAF);
             }
         }
@@ -2528,11 +2637,9 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
                 int2 tq = int2(floor(tc)) - info.xy;
                 if (any(tq < 3) || any(tq >= int(n) - 3)) continue;
                 float4 t0 = src.read(uint2(tq));
-                // On level ground, clear of water, rock and buildings.
-                float s0 = src.read(uint2(tq + int2(3, 0))).r, s1 = src.read(uint2(tq - int2(3, 0))).r;
-                float s2 = src.read(uint2(tq + int2(0, 3))).r, s3 = src.read(uint2(tq - int2(0, 3))).r;
-                if (t0.r < SEA + 2.0 || t0.b > t0.g || t0.a < 0.0 ||
-                    max(max(s0, s1), max(s2, s3)) - min(min(s0, s1), min(s2, s3)) > 6.0) continue;
+                // Off cliffs, clear of water, rock and buildings.
+                float gt;
+                if (t0.r < SEA + 2.0 || t0.b > t0.g || t0.a < 0.0 || !oldSite(int2(floor(tc)), mg, seed, gt)) continue;
                 covered = oldTreeIntervals(w, tc, t0.r, Ht, R, tr, th, seed, true, rr) > G || covered;
             }
         // Ferns on the mossy floor.
@@ -4136,7 +4243,9 @@ static float emergentTop(float2 w, float2 ctr, float gt, float y0, float R, int 
 // emergents or the planted trees as plantTrees makes them (without the checks that need the map: ledges, carved
 // rock), and the column's top the mean of the samples' (leaves, else ground) rounded, as its ground is. Returns
 // (top, depth of leaves under it); H is the bare column's height. Grove density and climate are taken once per column.
-static float2 coarseVeg(int2 cw, int k, float4 hs4, float H, uint seed) {
+// ground: heights for the forest's site checks (jungleWindow, oldSite), as plantTrees reads them.
+template <typename G>
+static float2 coarseVeg(int2 cw, int k, float4 hs4, float H, uint seed, thread const G& ground) {
     int s = 1 << k, off = s >> 2, hs = s >> 1;
     int2 b = cw * s + off;
     float2 centre = float2(cw * s) + 0.5 * float(s);
@@ -4144,17 +4253,16 @@ static float2 coarseVeg(int2 cw, int k, float4 hs4, float H, uint seed) {
     float J = provinces(centre + so, seed).x;
     float sum = 0.0, leaves = 0.0;
     int2 o4[4] = { int2(0), int2(hs, 0), int2(0, hs), int2(hs, hs) };
-    // The roof steps down on steep ground and stands on no cliff, as plantTrees grows it.
-    float spread = max(max(hs4.x, hs4.y), max(hs4.z, hs4.w)) - min(min(hs4.x, hs4.y), min(hs4.z, hs4.w));
-    // The samples' slope over plantTrees' 10-voxel window (they are hs apart; neighbours a voxel apart differ by a
-    // whole step on gentle slopes, so the run counts as no shorter than 3).
-    float steep = spread * 10.0 / max(1.41 * float(hs), 3.0);
     if (J >= 0.15) {
+        // The roof steps down on steep ground and stands on no cliff, as plantTrees grows it, judged on its own window
+        // round the column's centre: samples a few voxels apart on terraced ground often share a tread and read level.
+        float steep = jungleWindow(cw * s + s / 2, ground).x;
+        float keep = jungleKeep(cw * s + s / 2, steep, ground, seed);
         for (int i = 0; i < 4; i++) {
             float2 wi = float2(b + o4[i]) + 0.5;
             float g = hs4[i], t = g;
-            if (g >= SEA + 2.0 && steep < JUNGLE_CLIFF) {
-                JCan cn = jungleCanopy(wi, g, J, seed, 1.0 - smoothstep(JUNGLE_STEEP, JUNGLE_CLIFF, steep));
+            if (g >= SEA + 2.0 && keep > 0.0) {
+                JCan cn = jungleCanopy(wi, g, J, seed, keep);
                 if (cn.hi > cn.lo) t = max(t, cn.hi);
                 int2 e0 = int2(floor(wi / EMERGENT_CELL));
                 for (int j = -1; j <= 1; j++)
@@ -4163,7 +4271,7 @@ static float2 coarseVeg(int2 cw, int k, float4 hs4, float H, uint seed) {
                         float y0, R;
                         int pads;
                         uint eh;
-                        if (steep >= JUNGLE_STEEP || g < SEA + 10.0 || !emergentIn(e0 + int2(ii, j), seed, J, ec, y0, R, pads, eh)) continue;
+                        if (steep >= EMERGENT_STEEP || g < SEA + 10.0 || !emergentIn(e0 + int2(ii, j), seed, J, ec, y0, R, pads, eh)) continue;
                         if (length_squared(wi - ec) > 4.4 * R * R) continue;
                         t = max(t, emergentTop(wi, ec, g, y0, R, pads, eh, seed));
                     }
@@ -4173,26 +4281,29 @@ static float2 coarseVeg(int2 cw, int k, float4 hs4, float H, uint seed) {
         }
     } else if (J < 0.15 && provinces(centre + so, seed).y >= 0.2) {
         float O = provinces(centre + so, seed).y;
-        if (spread >= max(10.0, 0.6 * float(s))) return float2(H, 0);
         GRuns none;
         none.n = 0;
-        for (int i = 0; i < 4; i++) {
-            float2 wi = float2(b + o4[i]) + 0.5;
-            float g = hs4[i], t = g;
-            if (g >= SEA + 2.0) {
-                int2 c0 = int2(floor(wi / OLD_CELL));
-                for (int j = -1; j <= 1; j++)
-                    for (int ii = -1; ii <= 1; ii++) {
-                        float2 tc;
-                        float Ht, R, tr;
-                        uint th;
-                        if (!oldTreeIn(c0 + int2(ii, j), seed, O, tc, Ht, R, tr, th)) continue;
-                        if (length_squared(wi - tc) > 1.3 * R * R) continue;
-                        t = max(t, oldTreeIntervals(wi, tc, g, Ht, R, tr, th, seed, false, none));
-                    }
+        float4 t4 = hs4;
+        // The trees of the cells round the four samples, each judged once: its site costs five terrain columns.
+        int2 cA = int2(floor((float2(b) + 0.5) / OLD_CELL)) - 1, cB = int2(floor((float2(b + hs) + 0.5) / OLD_CELL)) + 1;
+        for (int cy = cA.y; cy <= cB.y; cy++)
+            for (int cx = cA.x; cx <= cB.x; cx++) {
+                float2 tc;
+                float Ht, R, tr, gt;
+                uint th;
+                if (!oldTreeIn(int2(cx, cy), seed, O, tc, Ht, R, tr, th)) continue;
+                bool near = false;
+                for (int i = 0; i < 4; i++) near = near || (hs4[i] >= SEA + 2.0 && length_squared(float2(b + o4[i]) + 0.5 - tc) <= 1.3 * R * R);
+                if (!near || !oldSite(int2(floor(tc)), ground, seed, gt) || gt < SEA + 2.0) continue;
+                for (int i = 0; i < 4; i++) {
+                    float2 wi = float2(b + o4[i]) + 0.5;
+                    if (hs4[i] < SEA + 2.0 || length_squared(wi - tc) > 1.3 * R * R) continue;
+                    t4[i] = max(t4[i], oldTreeIntervals(wi, tc, gt, Ht, R, tr, th, seed, false, none));
+                }
             }
-            sum += t;
-            leaves += t > g ? 1.0 : 0.0;
+        for (int i = 0; i < 4; i++) {
+            sum += t4[i];
+            leaves += t4[i] > hs4[i] ? 1.0 : 0.0;
         }
     } else if (J < 0.15) {
         float dens = groveDensity(centre, H, seed);
@@ -4248,7 +4359,8 @@ kernel void reduceMaxBase(texture2d<float, access::read> src [[texture(0)]],
     float parent = coarseCombine(r4.x, r4.y, r4.z, r4.w, 2.0);
     int2 cw = (int2(s) + info.xy) >> 1;
     // The level-1 column's forest (coarseVeg from the same raw heights) as well.
-    parent = max(parent, coarseVeg(cw, 1, r4, parent, uint(info.w)).x);
+    RawGround rg { raw, info.xy, uint(info.w) };
+    parent = max(parent, coarseVeg(cw, 1, r4, parent, uint(info.w), rg).x);
     // A giant's level-1 column needs nothing more: its samples are these four columns, and its top their tops' mean
     // (coarseColumn), which m bounds (working it out cost several ms a band).
     dst.write(float4(max(m, parent), 0, 0, 0), gid);
@@ -4348,7 +4460,8 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
         }
     }
     // No trees take root in or beside a cave on the 1-voxel map (plantTrees keeps off carved rock): nor here.
-    float2 vg = c0.cave || c1.cave || c2.cave || c3.cave ? float2(H, 0) : coarseVeg(cw, k, float4(c0.h, c1.h, c2.h, c3.h), H, seed);
+    TerrainGround tg { seed };
+    float2 vg = c0.cave || c1.cave || c2.cave || c3.cave ? float2(H, 0) : coarseVeg(cw, k, float4(c0.h, c1.h, c2.h, c3.h), H, seed, tg);
     depth = vg.y;
     float Hv = vg.x;
     if (k > GAP_LEVELS || k > 3) return float3(Hv, 0, 0);
@@ -6440,6 +6553,8 @@ static inline bool hollowAt(thread const Terrain& tr, int k, int2 c, float y) {
 
 // The share of open shade's sky light reaching under a roof.
 constant float ROOF_SKY = 0.55;
+// A shelter's back wall by night: about open shade's share on a wall.
+constant float ROOF_SKY_NIGHT = 1.0;
 
 // hollowAt as the trace sees it: the column morphed toward the next level's.
 static inline bool hollowAtMorph(thread const Terrain& tr, int k, int2 c, float y) {
@@ -7104,8 +7219,22 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // Low structure faces (cairns, boats, deck edges, fallen stones) are steps too; uprights and house walls stay walls.
     if (h.normal.y == 0 && built && drop <= 2.0 && !any(s.nrm != 0.0)) ndl = mix(ndl, min(ndl, max(L.key.y, 0.0)), L.night);
     float hiSun = smoothstep(0.15, 0.45, L.key.y) * (1.0 - L.night);
-    float sh = 1.0;
-    if (shadows > 0 && ndl > 0.0 && L.shadows && x.shadowMode != 3.0) {
+    // Under the moon a shelter's back wall takes the moon where the shadow ray reaches it, lit as the cliff's direction
+    // (across the ground past the deepest lip, 40): its own faces' normals alternate light and dark along every jog of
+    // a back wall, and the ground a few columns round it is the lip's flat top. By day the roof shades it whole.
+    float ndlR = 0.0;
+    if (roofW > 0.0 && L.night > 0.0 && shadows > 0 && L.shadows && x.shadowMode != 3.0) {
+        float3 nR = nl;
+        if (h.normal.y == 0) {
+            float R = max(48.0, 2.0 * cs);
+            float2 gr = float2(groundSmoothL(x.tr, k, p.xz + float2(R, 0)) - groundSmoothL(x.tr, k, p.xz - float2(R, 0)),
+                               groundSmoothL(x.tr, k, p.xz + float2(0, R)) - groundSmoothL(x.tr, k, p.xz - float2(0, R))) / (2.0 * R);
+            nR = normalize(float3(-gr.x, 1.0, -gr.y));
+        }
+        ndlR = max(dot(nR, L.key), 0.0);
+    }
+    float sh = 1.0, shRay = 1.0;
+    if (shadows > 0 && (ndl > 0.0 || ndlR > 0.0) && L.shadows && x.shadowMode != 3.0) {
         // Keep the origin inside the hit voxel's footprint so boundary columns can't self-shadow. A planar wall's ray
         // starts out in front of its plane: from a jog's own face it would cross the next column and stripe the wall.
         float3 so = p + (planar ? s.nrm * 1.5 : float3(n) * 0.02);
@@ -7142,6 +7271,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         if (wf2 > 0.0 && !planar) sh = mix(sh, min(sh, stairShadow(x.tr, k, p.xz, L.key, d, contact, 0.35, fp > 3.0 || shadows == 2)), wf2);
         float floorSh = mix(mix(0.5, 0.25, hiSun), 0.32, L.gold);
         sh = mix(sh, floorSh + (1.0 - floorSh) * sh, wf);
+        shRay = sh;
         sh = mix(sh, 1.0, 0.3 * L.night);
         // After the lifts, which stand for light slipping between distant steps: none slips under a roof.
         sh = min(sh, 1.0 - roofW);
@@ -7162,7 +7292,14 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // Under a roof the sky comes only through the mouth, an even share well under open shade's: the visibility samples
     // only six voxels out, so in a shelter it reads the roof all round and varies column by column with the back wall's
     // jogs, striping it.
-    skyFill *= mix(1.0 - mix(0.55, 0.85, hiSun) * (1.0 - sv), ROOF_SKY, roofW);
+    // By night a shelter's back wall takes open shade's share: at the roof's it fell below the open wall beside it, a
+    // black band under every lip. Toward the roof it keeps the roof's share, the lip's shadow along the top; the roof is
+    // a level bedding plane, so its height reads alike for every jog of the wall.
+    float roofSky = ROOF_SKY;
+    // From well into dusk: before that the night fill the roof withholds is a sliver.
+    if (h.normal.y == 0 && roofW > 0.0 && L.night > 0.1)
+        roofSky = mix(ROOF_SKY, ROOF_SKY_NIGHT, smoothstep(0.1, 1.0, L.night) * smoothstep(0.0, max(8.0, 2.0 * cs), s.gapSpan.y - p.y));
+    skyFill *= mix(1.0 - mix(0.55, 0.85, hiSun) * (1.0 - sv), roofSky, roofW);
     // Dusk: a crown's top still holds the glow while its foot and the gaps between crowns sink deeper and cooler than
     // open shade, so the crowns stand apart.
     if (dusk > 0.0) skyFill *= mix(float3(1.0), mix(float3(0.52, 0.58, 0.8), float3(1.12, 1.08, 1.0), saturate(sv * sv * (0.4 + 0.75 * s.up))), dusk);
@@ -7180,7 +7317,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // Night: no pure-black riser feet; a faint indigo ambient keeps the steps readable as stone, not holes.
     ao = mix(ao, 1.0, 0.25 * L.night);
     // Night: a cave mouth stays a dark hole.
-    skyFill += float3(0.09, 0.12, 0.25) * L.night * mix(1.0, ROOF_SKY, roofW);
+    skyFill += float3(0.09, 0.12, 0.25) * L.night * mix(1.0, roofSky, roofW);
     // Deep in the night, land sits below the sky so night reads as night (won night A/B): moonlight is graded
     // to a cool silver and the fill to a deep blue well under it, so slopes facing the moon still model. In
     // early night it is already dark and keeps its contours (darkening lost the dusk A/B).
@@ -7189,6 +7326,11 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     bounce *= 1.0 - s.cave;
     float3 col = albK * L.keyCol * ndl * sh * mix(1.0, 1.1, L.night) * mix(float3(1.0), float3(0.40, 0.42, 0.47), deep)
                + alb * (skyFill * ao * riserShade + bounce) * mix(float3(1.0), float3(0.19, 0.23, 0.38), deep);
+    // Where the ray finds the lip, the night lift's share of the moon at the roof's sky share.
+    if (ndlR > 0.0) {
+        float top = ndlR * max(shRay, 0.3 * ROOF_SKY) * L.night * roofW - ndl * sh;
+        if (top > 0.0) col += albK * L.keyCol * top * mix(1.0, 1.1, L.night) * mix(float3(1.0), float3(0.40, 0.42, 0.47), deep);
+    }
     // Low sun: up-facing treads take a warm sky-dome tint instead of going to charcoal.
     col += albK * L.keyCol * 0.07 * (1.0 - smoothstep(0.05, 0.35, L.key.y)) * saturate(nl.y) * (1.0 - L.night);
     // Backlit leaves: a low sun glows through the canopy edges facing away from it.
