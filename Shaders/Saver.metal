@@ -6471,7 +6471,11 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         // Past the 1-voxel map a pixel spans columns: the maps alone, with occluders from two texels out.
         // Under the moon, whose shadows are soft and faint, only near ground keeps the traced ray.
         bool mapOnly = maps && (shadows == 2 || k >= 1 || h.t > (L.night > 0.5 ? 120.0 : 500.0));
-        if (!mapOnly) sHit = trace(x.tr, so, L.key, brute ? 6000.0 : maps ? SHADOW_NEAR : 700.0, shadowIters, k);
+        // Where the maps shade the point fully, the traced ray can only agree. Maps baked for a light on or under the
+        // horizon shade nothing: there the lookup waits until after the ray.
+        bool mapFirst = maps && !mapOnly && L.key.y > 0.0;
+        float mapLit = mapFirst ? shadowMapLit(x, so, false) : 1.0;
+        if (!mapOnly && mapLit > 0.0) sHit = trace(x.tr, so, L.key, brute ? 6000.0 : maps ? SHADOW_NEAR : 700.0, shadowIters, k);
         // A ray that runs out of steps is still threading terrain toward the sun: count it as blocked there, so a
         // shaded spot never comes out lit.
         sHit.hit = sHit.hit || sHit.iters >= shadowIters;
@@ -6481,7 +6485,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         float reach = wf2 / max(L.key.y, 0.05);
         // A roof overhead is never a contact shadow.
         sh = sHit.hit ? (sHit.normal.y < 0 && sHit.iters < shadowIters ? 0.0 : 0.35 * (1.0 - smoothstep(2.0 + reach, 8.0 + reach, sHit.t))) : 1.0;
-        if (maps) sh = min(sh, shadowMapLit(x, so, mapOnly));
+        if (maps) sh = min(sh, mapFirst ? mapLit : shadowMapLit(x, so, mapOnly));
         // Under a roof the roof stands in for the ray: the maps see an overhang only from two texels out, and a traced ray
         // that slips out under the edge on one row and not the next stripes the back wall with sun.
         if (wf2 > 0.0 && !planar) sh = mix(sh, min(sh, stairShadow(x.tr, k, p.xz, L.key, d, contact, 0.35, fp > 3.0 || shadows == 2)), wf2);
