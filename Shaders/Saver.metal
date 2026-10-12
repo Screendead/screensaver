@@ -1879,16 +1879,21 @@ constant uint GAP_GIANT = 2u;
 // every pipeline built without the constant.
 constant bool BAND_FC [[function_constant(0)]];
 constant bool BAND_SKIP = is_function_constant_defined(BAND_FC) && BAND_FC;
-// The islands' shade and sky occlusion: compiled in only while an island is near (Renderer picks the pipeline).
+// Renderer picks the pipeline per tile of the frame (Renderer.sceneTile) by what of the islands may show there.
+// The islands' shade and sky occlusion: compiled in only where an island within isleShadeReach casts them.
 constant bool ISLE_FC [[function_constant(3)]];
 constant bool SCENE_ISLES = is_function_constant_defined(ISLE_FC) && ISLE_FC;
-// The islands' surfaces (their rock, roots and vines, air that is no shelter's roof): compiled in only while an island at
-// any distance could show (Renderer picks the pipeline), and wherever their shade is.
+// Close by an island within isleShadeReach (its column of air), with its shade: the ground under it, its falls, streams,
+// canopies and glow.
+constant bool NEAR_FC [[function_constant(6)]];
+constant bool SCENE_NEAR = SCENE_ISLES && is_function_constant_defined(NEAR_FC) && NEAR_FC;
+// The islands' surfaces (their rock, roots and vines, air that is no shelter's roof): wherever an island at any distance
+// could show.
 constant bool SHAPE_FC [[function_constant(4)]];
-constant bool ISLE_SHAPE = SCENE_ISLES || (is_function_constant_defined(SHAPE_FC) && SHAPE_FC);
-// The islands' mist (isleMist), with their shade.
+constant bool ISLE_SHAPE = SCENE_NEAR || (is_function_constant_defined(SHAPE_FC) && SHAPE_FC);
+// The islands' mist (isleMist), close by them.
 constant bool MIST_FC [[function_constant(5)]];
-constant bool SCENE_MIST = SCENE_ISLES && is_function_constant_defined(MIST_FC) && MIST_FC;
+constant bool SCENE_MIST = SCENE_NEAR && is_function_constant_defined(MIST_FC) && MIST_FC;
 constant int GIANT_LIMBS = 12;
 constant int GIANT_FLANGES = 9;
 constant int GM_WOOD = 0, GM_LEAF = 1, GM_VINE = 2;
@@ -4984,7 +4989,6 @@ struct Terrain {
     constant TowerTable* towers; // the ruined towers nearest the camera (towerN of them; none outside the scene pass)
     int towerN;
     texture2d_array<float> cb;   // coarse band mips (reduceMaxParent): slice k - 1, mip m - 1 holds the air of max mip m's cells
-    bool isles;                  // an island stands in view
 };
 
 static inline int2 levelOrigin(thread const Terrain& tr, int k) { return k == 0 ? int2(0) : tr.origin >> k; }
@@ -5020,11 +5024,11 @@ static inline float groundL(thread const Terrain& tr, int k, int2 c, float y) {
     if (k == 0) {
         float4 col = tr.hm.read(uint2(clamp(c, int2(0), int2(tr.size - 1))), 0);
         // A select, not a branch: this sits in the shading's many-tap slope filters.
-        return (col.a > 0.0 || (SCENE_ISLES && y < col.b && col.a == 0.0 && col.b - col.g >= ISLE_AIR)) ? col.g : col.r;
+        return (col.a > 0.0 || (SCENE_NEAR && y < col.b && col.a == 0.0 && col.b - col.g >= ISLE_AIR)) ? col.g : col.r;
     }
     uint2 t = uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1));
     float H = tr.ch.read(t, uint(k - 1), 0).r;
-    if (SCENE_ISLES && tr.isles && k <= GAP_LEVELS && y < H - 3.0) {
+    if (SCENE_NEAR && k <= GAP_LEVELS && y < H - 3.0) {
         float2 g = tr.cg.read(t, uint(k - 1)).rg;
         if (g.x < 0.0 && y < g.y) return -g.x;
     }
@@ -5336,7 +5340,7 @@ kernel void bakeHorizon(device float* out [[buffer(0)]],
     uint gid = tid.y;
     int levels = int(f.fade.z);
     Terrain tr { hm, coarse, coarse, coarse, hm, f.lod, f.mapInfo.xy, f.mapInfo.z, levels,
-                 f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, 0.0, hx, gx, cg, cg2, hb, uint(f.mapInfo.w), giants, hx, nullptr, 0, cb, false };
+                 f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, 0.0, hx, gx, cg, cg2, hb, uint(f.mapInfo.w), giants, hx, nullptr, 0, cb };
     float a = (float(gid) + 0.5) * 6.2831853 / float(HORIZON_BINS);
     float2 dir = float2(sin(a), cos(a));
     float3 o = f.camPos.xyz;
@@ -6026,8 +6030,8 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     // Its canopy, stream, fall or vine: the column's ST_ISLE word on the 1-voxel map, its leaf depth further out.
     // Falls and streams run out to level 2 and the 1-voxel map holds the rest, all well inside the islands' pipeline
     // variant's reach: compiled out of the others.
-    uint isw = SCENE_ISLES && isleBody && k == 0 ? st.read(uint2(clamp(v.xz, int2(0), int2(tr.size - 1)))).r : 0u;
-    bool isleWaterCol = SCENE_ISLES && isleBody && (k == 0 ? (isw & ST_ISLE_WATER) != 0u : cdK.y == ISLE_WATER_DEPTH || cdK.y == ISLE_STREAM_DEPTH);
+    uint isw = SCENE_NEAR && isleBody && k == 0 ? st.read(uint2(clamp(v.xz, int2(0), int2(tr.size - 1)))).r : 0u;
+    bool isleWaterCol = SCENE_NEAR && isleBody && (k == 0 ? (isw & ST_ISLE_WATER) != 0u : cdK.y == ISLE_WATER_DEPTH || cdK.y == ISLE_STREAM_DEPTH);
     // A stream's water is its bed alone; the rock under it is the island's.
     bool isleWater = isleWaterCol && !(float(v.y) < col.x - 3.0 && (k == 0 ? (isw & 2047u) == 0u : cdK.y == ISLE_STREAM_DEPTH));
     float isleLo = (isw & (ST_ISLE | ST_ISLE_WATER | ST_ISLE_VINE)) == ST_ISLE ? float(isw & 2047u) : col.x;
@@ -7761,7 +7765,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     if (bio > 0.0 && k == 0 && shadows == 1 && s.mat < 4 && (s.isle.x == 0.0 || h.normal.y > 0))
         col += bioGlow(x.tr.hm, x.st, x.tr.clim, x.tr.pv, x.origin, x.seed, x.time, s.mat, s.vine, h.voxel, h.normal, p, fp) * bio;
     // An island's glow, from late dusk; gone before the 1-voxel ring's morph band, and not in rippled water.
-    if (SCENE_ISLES && shadows == 1 && s.isle.x > 0.0 && L.sun.y < 0.04 && fp < 1.0) {
+    if (SCENE_NEAR && shadows == 1 && s.isle.x > 0.0 && L.sun.y < 0.04 && fp < 1.0) {
         uint ib = uint(s.isle.x);
         col += isleGlow(h.voxel, h.normal, p.xz + float2(x.origin), p.y, s.isle.y, (ib & 1u) != 0u, (ib & 2u) != 0u, (ib & 4u) != 0u, fp, x.seed, x.time)
              * smoothstep(0.04, -0.12, L.sun.y);
@@ -8918,7 +8922,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     float gmax = f.misc.y;
     for (int k = 1; k < levels; k++) gmax = max(gmax, abs(coarse.read(uint2(0), uint(k - 1), coarse.get_num_mip_levels() - 1).r) + 1.0);
     if (int(f.shadow.y) & 2) gmax = min(gmax, 260.0);
-    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, cg2, hb, uint(f.mapInfo.w), giants, pvTex, towers, sceneTowers ? towers->n.x : 0, cbTex, f.shadow.w > 0.0 };
+    Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, cg2, hb, uint(f.mapInfo.w), giants, pvTex, towers, sceneTowers ? towers->n.x : 0, cbTex };
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
             2.0 * tanH * f.resolution.z, f.misc.w, makeLight(f.sunDir.xyz),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),

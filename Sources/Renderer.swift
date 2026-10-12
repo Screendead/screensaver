@@ -73,27 +73,31 @@ final class GPU {
         return d
     }
 
-    // The scene variants for one towers setting (bands, island surfaces, the islands' shade, their mist), as Renderer
-    // indexes them: none, bands, island surfaces, both, those with the islands' shade, and with their mist.
-    static let sceneVariants = [(false, false, false, false), (true, false, false, false), (false, true, false, false), (true, true, false, false),
-                                (true, true, true, false), (true, true, true, true)]
+    // A scene variant: the band test, the islands' surfaces, their shade and sky occlusion, the work close by them, their
+    // mist (function constants 0, 4, 3, 6, 5 of sceneFragment).
+    typealias SceneVariant = (bands: Bool, shape: Bool, isles: Bool, near: Bool, mist: Bool)
+    // The scene variants for one towers setting, as Renderer indexes them: none, bands, island surfaces, both, the
+    // islands' shade without and with bands, close by an island, and with its mist.
+    static let sceneVariants: [SceneVariant] = [(false, false, false, false, false), (true, false, false, false, false),
+                                                (false, true, false, false, false), (true, true, false, false, false),
+                                                (false, false, true, false, false), (true, false, true, false, false),
+                                                (true, true, true, true, false), (true, true, true, true, true)]
 
-    func scene(towers: Bool, bands: Bool, shape: Bool, isles: Bool, mist: Bool) -> MTLRenderPipelineState? {
-        pipeline(GPU.sceneKey(towers, bands, shape, isles, mist)) { sceneDescriptor(towers, bands, shape, isles, mist) }
+    func scene(towers: Bool, _ v: SceneVariant) -> MTLRenderPipelineState? {
+        pipeline(GPU.sceneKey(towers, v)) { sceneDescriptor(towers, v) }
     }
 
-    private static func sceneKey(_ towers: Bool, _ bands: Bool, _ shape: Bool, _ isles: Bool, _ mist: Bool) -> String {
-        "scene \(towers) \(bands) \(shape) \(isles) \(mist)"
-    }
+    private static func sceneKey(_ towers: Bool, _ v: SceneVariant) -> String { "scene \(towers) \(v.bands) \(v.shape) \(v.isles) \(v.near) \(v.mist)" }
 
-    private func sceneDescriptor(_ towers: Bool, _ bands: Bool, _ shape: Bool, _ isles: Bool, _ mist: Bool) -> MTLRenderPipelineDescriptor {
+    private func sceneDescriptor(_ towers: Bool, _ v: SceneVariant) -> MTLRenderPipelineDescriptor {
         let fc = MTLFunctionConstantValues()
-        var b = bands, t = towers, i = isles, sh = shape, m = mist
+        var b = v.bands, t = towers, i = v.isles, sh = v.shape, m = v.mist, n = v.near
         fc.setConstantValue(&b, type: .bool, index: 0)
         fc.setConstantValue(&t, type: .bool, index: 1)
         fc.setConstantValue(&i, type: .bool, index: 3)
         fc.setConstantValue(&sh, type: .bool, index: 4)
         fc.setConstantValue(&m, type: .bool, index: 5)
+        fc.setConstantValue(&n, type: .bool, index: 6)
         return fullscreen(try? library.makeFunction(name: "sceneFragment", constantValues: fc), .rgba16Float)
     }
 
@@ -134,7 +138,7 @@ final class GPU {
                            "bio": bioDescriptor(),
                            GPU.postKey(output, true): postDescriptor(output, true)]
         for t in [false, true] {
-            for v in GPU.sceneVariants { descriptors[GPU.sceneKey(t, v.0, v.1, v.2, v.3)] = sceneDescriptor(t, v.0, v.1, v.2, v.3) }
+            for v in GPU.sceneVariants { descriptors[GPU.sceneKey(t, v)] = sceneDescriptor(t, v) }
         }
         for f in functions where f.functionType == .kernel {
             group.enter()
@@ -1132,10 +1136,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     let queue: MTLCommandQueue
     // sceneFragment specialised by [towers][GPU.sceneVariants]: function constant 1 compiles the towers in (only frames
     // with one in view need them), constant 0 the band test in the DDA (BAND_FC, only while a giant or the jungle is near,
-    // or an island in view within isleShadeReach), constant 4 the islands' surfaces (SHAPE_FC, an island in view at any
-    // distance), constant 3 the islands' shade and sky occlusion (ISLE_FC, an island in view within isleShadeReach),
-    // constant 5 their mist (MIST_FC). Each costs every pixel a little even unused, so each tile of the scene pass takes
-    // the variant its pixels need.
+    // or close by an island), and the islands' constants (GPU.SceneVariant). Each costs every pixel a little even unused,
+    // so each tile of the scene pass takes the variant its pixels need.
     let scenePipelines: [[MTLRenderPipelineState]]
     let postPipeline: MTLRenderPipelineState
     let taaPipeline: MTLRenderPipelineState
@@ -1259,7 +1261,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         let device = gpu.device
         guard let queue = device.makeCommandQueue() else { return nil }
         let sceneStates = [false, true].map { t in
-            GPU.sceneVariants.compactMap { v in gpu.scene(towers: t, bands: v.0, shape: v.1, isles: v.2, mist: v.3) }
+            GPU.sceneVariants.compactMap { gpu.scene(towers: t, $0) }
         }
         guard sceneStates.allSatisfy({ $0.count == GPU.sceneVariants.count }),
               let tp = gpu.taa(),
@@ -1618,10 +1620,10 @@ final class Renderer: NSObject, MTKViewDelegate {
             // On while an island within the reach could show, off a little past it, so a camera hovering at the edge does
             // not flick it.
             let key = Renderer.keyLight(clock.sunDirection).0
-            let isleSpheres = Islands.spheres(world.isles, eye: camera.position, within: Renderer.isleShadeReach + (isleVariant ? 400 : 0), key: key, shade: true)
+            let isleSpheres = Islands.spheres(world.isles, eye: camera.position, within: Renderer.isleShadeReach + (isleVariant ? 400 : 0), key: key)
             isleVariant = Islands.inView(isleSpheres, eye: camera.position, fwd: tb.fwd, half: half, margin: isleVariant ? 0.12 : 0.06)
             let isles = isleVariant
-            isleShapeVariant = isles || Islands.inView(Islands.spheres(world.isles, eye: camera.position, within: edgeRadius + 1000, key: key, shade: true),
+            isleShapeVariant = isles || Islands.inView(Islands.spheres(world.isles, eye: camera.position, within: edgeRadius + 1000, key: key),
                                                        eye: camera.position, fwd: tb.fwd, half: half, margin: isleShapeVariant ? 0.12 : 0.06)
             let canopyBands = world.bandsNear(cam2, radius: Clipmap.handoff(0) + 40)
             let noband = Renderer.profile == "noband"
@@ -1629,33 +1631,34 @@ final class Renderer: NSObject, MTKViewDelegate {
             let isleTable = Islands.table(world.isles, near: cam2, within: 3000, view: (camera.position, tb.fwd, half))
             var isleBytes = isleTable.bytes
             towers.frameTable(eye: camera.position, fwd: tb.fwd, right: tb.right, up: tb.up, tanH: tanV * Double(aspect), tanV: tanV)
-            // Per tile: 1 an island's surfaces may show, 2 its shade or sky occlusion, 4 its mist.
+            // Per tile: 1 an island's surfaces may show, 2 its shade or sky occlusion, 8 close by one within isleShadeReach,
+            // 4 its mist.
             let T = Renderer.sceneTile, nx = (w + T - 1) / T, ny = (h + T - 1) / T
             tileNeed = [UInt8](repeating: 0, count: nx * ny)
-            func mark(_ list: [(c: SIMD3<Double>, r: Double)], _ bit: UInt8) {
-                for sp in list {
-                    let e = SIMD3(repeating: sp.r)
-                    guard let t = tileRange(box: sp.c - e, sp.c + e, nx: nx, ny: ny, tw: Double(T), th: Double(T), width: w, height: h, pad: 6) else { continue }
+            func mark(_ list: [Islands.Box], _ bit: UInt8) {
+                for b in list {
+                    guard let t = tileRange(box: b.lo, b.hi, nx: nx, ny: ny, tw: Double(T), th: Double(T), width: w, height: h, pad: 6) else { continue }
                     for ty in t.y0...t.y1 { for tx in t.x0...t.x1 { tileNeed[ty * nx + tx] |= bit } }
                 }
             }
-            if isleShapeVariant { mark(Islands.spheres(world.isles, eye: camera.position, within: edgeRadius + 1000, key: key, shade: false), 1) }
+            if isleShapeVariant {
+                mark(Islands.boxes(world.isles, eye: camera.position, within: edgeRadius + 1000, key: key, columns: true, shade: false), 1)
+            }
             if isles {
                 let within = Renderer.isleShadeReach + 400
-                mark(Islands.spheres(world.isles, eye: camera.position, within: within, key: key, shade: true, occlusion: false), 2)
-                mark(isleTable.mist, 6)
+                mark(Islands.boxes(world.isles, eye: camera.position, within: within, key: key, columns: true, shade: false), 8)
+                mark(Islands.boxes(world.isles, eye: camera.position, within: within, key: key, columns: false, shade: true), 2)
+                mark(isleTable.mist, 12)
                 // The sky occlusion reaches no farther than the shading table, which holds every island it darkens.
-                for s in world.isles where simd_length(s.pos - cam2) < 3000 + s.reach {
-                    let bx = Islands.occlusionBox(s)
-                    guard let t = tileRange(box: bx.lo, bx.hi, nx: nx, ny: ny, tw: Double(T), th: Double(T), width: w, height: h, pad: 6) else { continue }
-                    for ty in t.y0...t.y1 { for tx in t.x0...t.x1 { tileNeed[ty * nx + tx] |= 2 } }
-                }
+                mark(world.isles.filter { simd_length($0.pos - cam2) < 3000 + $0.reach }.map(Islands.occlusionBox), 2)
             }
             // Island bands only where an island's work does: elsewhere its air is walked as any rock gap's.
+            let bandsT = canopyBands && !noband
             let variant = tileNeed.map { need -> Int in
-                let isleT = isles && need & 2 != 0, shapeT = isleShapeVariant && need != 0
-                let bandsT = (isleT || canopyBands) && !noband
-                return isleT && bandsT ? (need & 4 != 0 ? 5 : 4) : (bandsT ? 1 : 0) + (shapeT ? 2 : 0)
+                let shapeT = isleShapeVariant && need & 1 != 0
+                if isles && (need & 8 != 0 || (need & 2 != 0 && shapeT)) { return need & 4 != 0 ? 7 : 6 }
+                if isles && need & 2 != 0 { return bandsT ? 5 : 4 }
+                return (bandsT ? 1 : 0) + (shapeT ? 2 : 0)
             }
             // Rectangles of tiles of one variant, each drawn as the whole frame's triangle scissored to it: a pair of
             // triangles per tile would shade the 2x2 quads along every diagonal twice.

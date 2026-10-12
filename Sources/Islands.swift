@@ -76,27 +76,51 @@ enum Islands {
     }
 
     // Spheres bounding where an island within d of the eye shows: its column of air down to the ground under it and its
-    // reflection in the sea; with `shade`, also the ground its sky occlusion darkens and its shade cast along the key light.
-    // occlusion: the ground its sky occlusion darkens as a sphere round its base (else see occlusionBox).
-    static func spheres(_ list: [IslandInfo], eye: SIMD3<Double>, within d: Double, key: SIMD3<Double>, shade: Bool,
-                        occlusion: Bool = true) -> [(c: SIMD3<Double>, r: Double)] {
+    // reflection in the sea (columns); the ground its sky occlusion darkens, as a sphere round its base (occlusion; else see
+    // occlusionBox); its shade cast along the key light (shade).
+    static func spheres(_ list: [IslandInfo], eye: SIMD3<Double>, within d: Double, key: SIMD3<Double>, columns: Bool = true,
+                        occlusion: Bool = true, shade: Bool = true) -> [(c: SIMD3<Double>, r: Double)] {
         var out: [(c: SIMD3<Double>, r: Double)] = []
         let e2 = SIMD2(eye.x, eye.z)
         for s in list where simd_length(s.pos - e2) < d + s.reach {
             let r = 1.2 * s.reach + 30
             let n = max(1, Int(((s.top - s.base) / s.reach).rounded(.up)))
-            for i in 0...n {
+            for i in 0...n where columns {
                 let y = s.base + (s.top - s.base) * Double(i) / Double(n)
                 out.append((SIMD3(s.pos.x, y, s.pos.y), r))
                 out.append((SIMD3(s.pos.x, 2 * Sight.sea - y, s.pos.y), r))
             }
-            guard shade else { continue }
             if occlusion { out.append((SIMD3(s.pos.x, s.base, s.pos.y), 3 * s.reach)) }
+            guard shade else { continue }
             guard key.y > 0.02 else { continue }
             let mid = 0.5 * (s.top + s.keel)
             let run = min((mid - s.base) / key.y, 4000)
             let m = max(1, Int((run / s.reach).rounded(.up)))
             for i in 1...m { out.append((SIMD3(s.pos.x, mid, s.pos.y) - key * (run * Double(i) / Double(m)), r)) }
+        }
+        return out
+    }
+
+    typealias Box = (lo: SIMD3<Double>, hi: SIMD3<Double>)
+
+    // Boxes bounding, for an island within d of the eye, its column (all of it lies within its reach of its centre) from
+    // the sea's floor to its top, and that column's reflection in the sea (columns); its shade cast along the key light
+    // (shade, Islands.spheres' spheres).
+    static func boxes(_ list: [IslandInfo], eye: SIMD3<Double>, within d: Double, key: SIMD3<Double>, columns: Bool, shade: Bool) -> [Box] {
+        var out: [Box] = []
+        let e2 = SIMD2(eye.x, eye.z)
+        for s in list where simd_length(s.pos - e2) < d + s.reach {
+            if columns {
+                // The slope and stair-shadow filters read a few columns round a point (16 voxels wide on the coarsest ring).
+                let r = s.reach + 96, lo = 0.0, hi = s.top + 8
+                out.append((SIMD3(s.pos.x - r, lo, s.pos.y - r), SIMD3(s.pos.x + r, hi, s.pos.y + r)))
+                out.append((SIMD3(s.pos.x - r, 2 * Sight.sea - hi, s.pos.y - r), SIMD3(s.pos.x + r, 2 * Sight.sea - lo, s.pos.y + r)))
+            }
+            if shade {
+                for sp in spheres([s], eye: eye, within: .infinity, key: key, columns: false, occlusion: false) {
+                    out.append((sp.c - sp.r, sp.c + sp.r))
+                }
+            }
         }
         return out
     }
@@ -138,10 +162,10 @@ enum Islands {
     // foot, or zeros; its mist bank's bounding sphere, radius 0 for none, and puffs (centre, radius), all in world
     // coordinates), as bytes for setFragmentBytes. view: the eye, its forward axis and the half angle of a cone round the
     // frame; mist that lies wholly outside it is left out (the scene pass draws mist on primary rays only).
-    // mist: spheres bounding the mist banks and plumes it holds.
+    // mist: boxes bounding the mist banks and plumes it holds (isleMistBound's ellipsoids).
     // Each entry ends with the square of its sky occlusion's reach (occlusionReach).
     static func table(_ list: [IslandInfo], near p: SIMD2<Double>, within d: Double,
-                      view: (eye: SIMD3<Double>, fwd: SIMD3<Double>, half: Double)? = nil) -> (bytes: [UInt8], mist: [(c: SIMD3<Double>, r: Double)]) {
+                      view: (eye: SIMD3<Double>, fwd: SIMD3<Double>, half: Double)? = nil) -> (bytes: [UInt8], mist: [Box]) {
         func seen(_ c: SIMD3<Double>, _ r: Double) -> Bool {
             guard let v = view else { return true }
             let w = c - v.eye, l = simd_length(w)
@@ -150,7 +174,7 @@ enum Islands {
         }
         let near = list.filter { simd_length($0.pos - p) < d + $0.reach }.sorted { simd_length($0.pos - p) < simd_length($1.pos - p) }
         var bytes = [UInt8](repeating: 0, count: tableBytes)
-        var mist: [(c: SIMD3<Double>, r: Double)] = []
+        var mist: [Box] = []
         let n = min(near.count, tableSize)
         bytes.withUnsafeMutableBytes { b in
             b.storeBytes(of: Int32(n), as: Int32.self)
@@ -164,17 +188,22 @@ enum Islands {
                 // fall's foot (bounds as isleMist takes them).
                 let ring = SIMD3(s.pos.x, s.top - 0.48 * th, s.pos.y), ringR = 1.4 * R + 30
                 let hasRing = R >= 60 && Provinces.hashf(Provinces.pcg(s.hash &+ 740)) < 0.85 && seen(ring, ringR)
-                let plume = s.fall.map { f -> (c: SIMD3<Double>, r: Double)? in
+                let plume = s.fall.map { f -> Box? in
                     let L = f.z - f.w, rw = 5 + 0.012 * R, lip = SIMD2(f.x, f.y)
                     let u = simd_normalize(lip - s.pos), q = lip + u * (fallOut(L, s.reach, simd_length(lip - s.pos)) + 0.6 * rw)
-                    let c = SIMD3(q.x, f.w + 0.06 * L, q.y), r = 0.36 * L + 3 * rw + 6
-                    return seen(c, r) ? (c, r) : nil
+                    let c = SIMD3(q.x, f.w + 0.06 * L, q.y)
+                    guard seen(c, 0.36 * L + 3 * rw + 6) else { return nil }
+                    let e = SIMD3(2.6 * rw + 2, 0.15 * L + rw + 2, 2.6 * rw + 2)
+                    return (c - e, c + e)
                 } ?? nil
                 b.storeBytes(of: SIMD4<Float>(Float(s.pos.x), Float(s.pos.y), Float(s.reach), Float(0.5 * (s.keel + s.top))), toByteOffset: o, as: SIMD4<Float>.self)
                 let misty = R >= 60 && (hasRing || plume != nil) && fade > 0
                 b.storeBytes(of: SIMD4<Float>(Float(R), Float(s.top), Float(s.keel), Float(misty ? fade : 0)), toByteOffset: o + 16, as: SIMD4<Float>.self)
                 if misty {
-                    if hasRing { mist.append((ring, ringR)) }
+                    if hasRing {
+                        let e = SIMD3(ringR, 0.08 * th + 0.28 * (0.44 * R + 15) + 2, ringR)
+                        mist.append((ring - e, ring + e))
+                    }
                     if let pl = plume { mist.append(pl) }
                 }
                 let f = s.fall.map { SIMD4<Float>(Float($0.x), Float($0.y), Float($0.z), Float($0.w)) } ?? SIMD4<Float>()
