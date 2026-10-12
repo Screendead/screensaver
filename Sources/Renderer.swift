@@ -73,18 +73,23 @@ final class GPU {
         return d
     }
 
-    func scene(towers: Bool, bands: Bool, isles: Bool) -> MTLRenderPipelineState? {
-        pipeline(GPU.sceneKey(towers, bands, isles)) { sceneDescriptor(towers, bands, isles) }
+    // The scene variants for one towers setting, as Renderer indexes them: none, bands, island surfaces, both, and those
+    // with the islands' shade.
+    static let sceneVariants = [(false, false, false), (true, false, false), (false, true, false), (true, true, false), (true, true, true)]
+
+    func scene(towers: Bool, bands: Bool, shape: Bool, isles: Bool) -> MTLRenderPipelineState? {
+        pipeline(GPU.sceneKey(towers, bands, shape, isles)) { sceneDescriptor(towers, bands, shape, isles) }
     }
 
-    private static func sceneKey(_ towers: Bool, _ bands: Bool, _ isles: Bool) -> String { "scene \(towers) \(bands) \(isles)" }
+    private static func sceneKey(_ towers: Bool, _ bands: Bool, _ shape: Bool, _ isles: Bool) -> String { "scene \(towers) \(bands) \(shape) \(isles)" }
 
-    private func sceneDescriptor(_ towers: Bool, _ bands: Bool, _ isles: Bool) -> MTLRenderPipelineDescriptor {
+    private func sceneDescriptor(_ towers: Bool, _ bands: Bool, _ shape: Bool, _ isles: Bool) -> MTLRenderPipelineDescriptor {
         let fc = MTLFunctionConstantValues()
-        var b = bands, t = towers, i = isles
+        var b = bands, t = towers, i = isles, sh = shape
         fc.setConstantValue(&b, type: .bool, index: 0)
         fc.setConstantValue(&t, type: .bool, index: 1)
         fc.setConstantValue(&i, type: .bool, index: 3)
+        fc.setConstantValue(&sh, type: .bool, index: 4)
         return fullscreen(try? library.makeFunction(name: "sceneFragment", constantValues: fc), .rgba16Float)
     }
 
@@ -125,7 +130,7 @@ final class GPU {
                            "bio": bioDescriptor(),
                            GPU.postKey(output, true): postDescriptor(output, true)]
         for t in [false, true] {
-            for v in [(false, false), (true, false), (true, true)] { descriptors[GPU.sceneKey(t, v.0, v.1)] = sceneDescriptor(t, v.0, v.1) }
+            for v in GPU.sceneVariants { descriptors[GPU.sceneKey(t, v.0, v.1, v.2)] = sceneDescriptor(t, v.0, v.1, v.2) }
         }
         for f in functions where f.functionType == .kernel {
             group.enter()
@@ -378,10 +383,6 @@ final class World {
     var lamps: [Int: SiteInfo.Lamp] { shown.lamps }
     var giants: [GiantInfo] { shown.giantList }
     var isles: [IslandInfo] { shown.isleList }
-    // Whether an island stands within r of world xz p.
-    func islesNear(_ p: SIMD2<Double>, radius r: Double) -> Bool {
-        shown.isleList.contains { simd_length($0.pos - p) < r + $0.reach }
-    }
     // Whether a flagged cell of the active map's band mips (under a giant's crown or the jungle's roof) may lie within r
     // of world xz p.
     func bandsNear(_ p: SIMD2<Double>, radius r: Double) -> Bool {
@@ -1125,10 +1126,11 @@ final class Clipmap {
 final class Renderer: NSObject, MTKViewDelegate {
     let device: MTLDevice
     let queue: MTLCommandQueue
-    // sceneFragment specialised by [towers][none, bands, bands and islands]: function constant 1 compiles the towers in
-    // (only frames with one in view need them), constant 0 the band test in the DDA (BAND_FC, only while a giant or the
-    // jungle is near, or an island in view), constant 3 the islands' shade and sky occlusion (ISLE_FC, an island within
-    // isleShadeReach). Each costs every pixel a little even unused.
+    // sceneFragment specialised by [towers][GPU.sceneVariants]: function constant 1 compiles the towers in (only frames
+    // with one in view need them), constant 0 the band test in the DDA (BAND_FC, only while a giant or the jungle is near,
+    // or an island in view within isleShadeReach), constant 4 the islands' surfaces (SHAPE_FC, an island in view at any
+    // distance), constant 3 the islands' shade and sky occlusion (ISLE_FC, an island in view within isleShadeReach).
+    // Each costs every pixel a little even unused.
     let scenePipelines: [[MTLRenderPipelineState]]
     let postPipeline: MTLRenderPipelineState
     let taaPipeline: MTLRenderPipelineState
@@ -1193,6 +1195,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     // them), shade without their sky occlusion and cast no island shade (only a long dusk shadow reaches back).
     static let isleShadeReach = 4000.0
     private var isleVariant = false
+    private var isleShapeVariant = false
     private var historyIndex = 0
     private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
     let world: World
@@ -1245,9 +1248,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         let device = gpu.device
         guard let queue = device.makeCommandQueue() else { return nil }
         let sceneStates = [false, true].map { t in
-            [(false, false), (true, false), (true, true)].compactMap { v in gpu.scene(towers: t, bands: v.0, isles: v.1) }
+            GPU.sceneVariants.compactMap { v in gpu.scene(towers: t, bands: v.0, shape: v.1, isles: v.2) }
         }
-        guard sceneStates.allSatisfy({ $0.count == 3 }),
+        guard sceneStates.allSatisfy({ $0.count == GPU.sceneVariants.count }),
               let tp = gpu.taa(),
               let bp = gpu.bio(),
               let pp = gpu.post(outputFormat, dither: dither),
@@ -1597,17 +1600,22 @@ final class Renderer: NSObject, MTKViewDelegate {
             // Shaders/Saver.metal), so it is compiled in only while bands lie that close; islands' bands hold on every
             // ring, needed out to isleShadeReach.
             let cam2 = SIMD2(camera.position.x, camera.position.z)
-            // On within the reach, off a little past it, so a camera hovering at the edge does not flick it.
-            isleVariant = world.islesNear(cam2, radius: Renderer.isleShadeReach + (isleVariant ? 400 : 0))
+            let tb = camera.basis, tanV = tan(25.0 * .pi / 180) * 1.05
+            let half = atan(tanV * (1 + Double(aspect) * Double(aspect)).squareRoot())
+            // On while an island within the reach could show, off a little past it, so a camera hovering at the edge does
+            // not flick it.
+            isleVariant = Islands.inView(world.isles, eye: camera.position, fwd: tb.fwd, half: half,
+                                         within: Renderer.isleShadeReach + (isleVariant ? 400 : 0),
+                                         key: Renderer.keyLight(clock.sunDirection).0, margin: isleVariant ? 0.12 : 0.06)
             let isles = isleVariant
+            isleShapeVariant = isles || Islands.inView(world.isles, eye: camera.position, fwd: tb.fwd, half: half, within: edgeRadius + 1000,
+                                                       key: Renderer.keyLight(clock.sunDirection).0, margin: isleShapeVariant ? 0.12 : 0.06)
             let bands = (isles || world.bandsNear(cam2, radius: Clipmap.handoff(0) + 40)) && Renderer.profile != "noband"
             let shade = bands && isles
             f.shadow.w = shade ? 1 : 0
-            let tb = camera.basis, tanV = tan(25.0 * .pi / 180) * 1.05
-            var isleTable = Islands.table(world.isles, near: cam2, within: 3000,
-                                          view: (camera.position, tb.fwd, atan(tanV * (1 + Double(aspect) * Double(aspect)).squareRoot())))
+            var isleTable = Islands.table(world.isles, near: cam2, within: 3000, view: (camera.position, tb.fwd, half))
             towers.frameTable(eye: camera.position, fwd: tb.fwd, right: tb.right, up: tb.up, tanH: tanV * Double(aspect), tanV: tanV)
-            enc.setRenderPipelineState(scenePipelines[towers.tableCount > 0 ? 1 : 0][shade ? 2 : bands ? 1 : 0])
+            enc.setRenderPipelineState(scenePipelines[towers.tableCount > 0 ? 1 : 0][shade ? 4 : (bands ? 1 : 0) + (isleShapeVariant ? 2 : 0)])
             enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
             enc.setFragmentBuffer(birdBuf, offset: 0, index: 5)
             enc.setFragmentBuffer(horizonBuf, offset: 0, index: 6)

@@ -57,7 +57,7 @@ enum Islands {
     // Its form (Shaders/Saver.metal isleForm) and the crag a spire carries over its top (isleCrag).
     static func form(_ r: Double, _ h: UInt32) -> Int {
         let c = Provinces.hashf(Provinces.pcg(h &+ 30))
-        return r >= 30 && r <= 130 && c < 0.4 ? 1 : c < 0.58 ? 2 : c < 0.76 ? 3 : 0
+        return r >= 30 && r <= 130 && c < 0.2 ? 1 : c < 0.45 ? 2 : c < 0.7 ? 3 : 0
     }
     static func crag(_ r: Double, _ h: UInt32) -> Double { form(r, h) == 1 ? 0.3 * r : 0 }
 
@@ -73,6 +73,37 @@ enum Islands {
                                   fall: r.f.w > 0 ? SIMD4(Double(r.f.x), Double(r.f.y), Double(r.f.z), Double(r.f.w)) : nil))
         }
         return out
+    }
+
+    // Whether anything the islands' pipeline variant draws could show in the view cone (eye, forward axis, half angle,
+    // widened by `margin`): an island within d of the eye, its column of air down to the ground under it, the ground its
+    // sky occlusion darkens, its reflection in the sea and its shade cast along the key light.
+    static func inView(_ list: [IslandInfo], eye: SIMD3<Double>, fwd: SIMD3<Double>, half: Double, within d: Double,
+                       key: SIMD3<Double>, margin: Double) -> Bool {
+        func seen(_ c: SIMD3<Double>, _ r: Double) -> Bool {
+            let w = c - eye, l = simd_length(w)
+            if l <= r { return true }
+            return acos(max(-1, min(1, simd_dot(w / l, fwd)))) < half + margin + asin(min(1, r / l))
+        }
+        let e2 = SIMD2(eye.x, eye.z)
+        for s in list where simd_length(s.pos - e2) < d + s.reach {
+            let r = 1.2 * s.reach + 30
+            let n = max(1, Int(((s.top - s.base) / s.reach).rounded(.up)))
+            for i in 0...n {
+                let y = s.base + (s.top - s.base) * Double(i) / Double(n)
+                if seen(SIMD3(s.pos.x, y, s.pos.y), r) || seen(SIMD3(s.pos.x, 2 * Sight.sea - y, s.pos.y), r) { return true }
+            }
+            if seen(SIMD3(s.pos.x, s.base, s.pos.y), 3 * s.reach) { return true }
+            guard key.y > 0.02 else { continue }
+            let mid = 0.5 * (s.top + s.keel)
+            let run = min((mid - s.base) / key.y, 4000)
+            let m = max(1, Int((run / s.reach).rounded(.up)))
+            for i in 1...m {
+                let t = run * Double(i) / Double(m)
+                if seen(SIMD3(s.pos.x, mid, s.pos.y) - key * t, r) { return true }
+            }
+        }
+        return false
     }
 
     // The shading table: the islands nearest p within reach of the view (count, then per island centre xz, reach and
