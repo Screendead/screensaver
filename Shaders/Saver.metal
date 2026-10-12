@@ -6848,22 +6848,22 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
                                      * smoothstep(-0.3, 0.6, sin(dot(ww, wd2b) * 0.09 - 0.6 * warp - t * 0.17));
             // Foam flecks a few voxels long along the crest, with gaps, each of its own brightness.
             float2 wd = sel < 0.5 ? wd1 : wd2;
-            float2 fq = float2(dot(ww, wd) * 0.55, (ww.x * wd.y - ww.y * wd.x) * 0.26);
+            float2 fq = float2(dot(ww, wd) * 0.35, (ww.x * wd.y - ww.y * wd.x) * 0.26);
             float fl = seaNoise(fq + float2(-t * 0.6, t * 0.25), x.seed + 82u);
             // Runs of a crest a dozen voxels long, the rest of it calm.
-            cr *= smoothstep(-0.15, 0.15, seaNoise(fq * float2(0.2, 0.3) + float2(t * 0.05, 7.3), x.seed + 83u));
+            cr *= smoothstep(-0.25, 0.1, seaNoise(fq * float2(0.3, 0.3) + float2(t * 0.05, 7.3), x.seed + 83u));
             // The surf breaks up again every few voxels whatever way the shore runs, so it never draws its outline.
             if (sh > 0.0) cr *= mix(1.0, smoothstep(-0.1, 0.2, seaNoise(ww * 0.16 + float2(0, t * 0.1), x.seed + 85u)), sh);
             float fleck = smoothstep(0.05 - 0.15 * sh, 0.28, fl) * (0.3 + 1.1 * smoothstep(0.05, 0.4, e0));
             // Close up the foam is a grain of sparks rather than smooth blobs.
             if (fa < 0.4) fleck *= mix(0.45 + 1.1 * smoothstep(0.0, 0.45, seaNoise(ww * 2.3 + float2(t * 0.3, -t * 0.2), x.seed + 84u)), 1.0, fa * 2.5);
-            fleck = mix(fleck, 0.25, saturate(fa * 1.5));
+            fleck = mix(fleck, 0.25, saturate(fa * 0.8));
             crest = mix(cr * fleck, crest, saturate(fpv * 0.45));
         }
         float glow = crest * (0.3 + 0.9 * surf) * shore * patch;
         float3 hue = mix(SEAGLOW_BLUE, SEAGLOW_TURQ, 0.15 + 0.3 * smoothstep(-0.15, 0.15, b2));
         hue = mix(hue, mix(SEAGLOW_BLUE, SEAGLOW_TURQ, 0.6) * 1.3, saturate(glow * 2.0 - 0.6));
-        c += hue * bloom * glow;
+        c += hue * bloom * glow * 1.4;
     }
     if (near > 0.0) {
         float3 g = 0;
