@@ -1679,12 +1679,13 @@ static float3 isleGlow(int3 v, int3 n, float2 wq, float wy, float gapTop, bool r
 
 // The shading table (fragment buffer 10; towers hold 9, giants 8): the islands nearest the camera (Sources/Islands.swift).
 // a: centre xz, reach, the underside's mean height; b: radius, top, keel, its mist's fade; c: its fall's lip xz, top and
-// foot (zero: none); mb: its mist bank's bounding sphere (radius 0: none), mp its puffs (centre, radius). World coordinates.
+// foot (zero: none); mb: its mist bank's bounding sphere (radius 0: none), mp its puffs (centre, radius); o.x the square of
+// how far its sky occlusion reaches (Islands.occlusionReach). World coordinates.
 constant int ISLE_TABLE = 16;
 constant int ISLE_MIST_PUFFS = 6;
 // The mist's depth where its bodies begin (isleMist): banks and plumes that cannot reach most of it alone are not worked out.
 constant float ISLE_MIST_TAU0 = 0.5;
-struct IsleShade { float4 a; float4 b; float4 c; float4 mb; float4 mp[ISLE_MIST_PUFFS]; };
+struct IsleShade { float4 a; float4 b; float4 c; float4 mb; float4 mp[ISLE_MIST_PUFFS]; float4 o; };
 struct IsleTable { int4 n; IsleShade r[ISLE_TABLE]; };
 
 static inline Col terrainColumnS(int2 w, uint seed, int s, device const IsleRec* T) {
@@ -1885,6 +1886,9 @@ constant bool SCENE_ISLES = is_function_constant_defined(ISLE_FC) && ISLE_FC;
 // any distance could show (Renderer picks the pipeline), and wherever their shade is.
 constant bool SHAPE_FC [[function_constant(4)]];
 constant bool ISLE_SHAPE = SCENE_ISLES || (is_function_constant_defined(SHAPE_FC) && SHAPE_FC);
+// The islands' mist (isleMist), with their shade.
+constant bool MIST_FC [[function_constant(5)]];
+constant bool SCENE_MIST = SCENE_ISLES && is_function_constant_defined(MIST_FC) && MIST_FC;
 constant int GIANT_LIMBS = 12;
 constant int GIANT_FLANGES = 9;
 constant int GM_WOOD = 0, GM_LEAF = 1, GM_VINE = 2;
@@ -7459,7 +7463,8 @@ static float3 bioGlow(texture2d<float> hm, texture2d<uint> st, texture2d<float> 
 // shadows: 0 none, 1 traced near ray and maps, 2 maps only (reflections: ripples hide contact shadows).
 // L: the light (the bed under water takes it refracted); inWater: seen in rippled water.
 // The share of the sky the islands overhead hide from a point at map-local p: each a disc of its radius at its
-// underside's mean height (the view factor of a disc to a level patch), out to 2-3k from the camera.
+// underside's mean height (the view factor of a disc to a level patch), out to 2-3k from the camera and to where it hides
+// a five-hundredth of the sky.
 static float isleSkyOcc(thread const Ctx& x, float3 p) {
     int n = min(x.isles->n.x, ISLE_TABLE);
     float2 w = p.xz + float2(x.origin), cam = x.tr.cam + float2(x.origin);
@@ -7469,7 +7474,7 @@ static float isleSkyOcc(thread const Ctx& x, float3 p) {
         float hh = s.a.w - p.y;
         float2 dv = w - s.a.xy;
         float r2 = dot(dv, dv);
-        if (hh < 4.0 || r2 > 9.0 * s.a.z * s.a.z) continue;
+        if (hh < 4.0 || r2 > s.o.x) continue;
         float R2 = s.b.x * s.b.x, h2 = hh * hh;
         float q = h2 + r2 + R2;
         float F = 0.5 * (1.0 - (h2 + r2 - R2) / sqrt(max(q * q - 4.0 * r2 * R2, 1e-3)));
@@ -8985,7 +8990,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         if (bh.t < tFront) {
             float3 bc = shadeBird(x, o + d * bh.t, bh);
             if (f.misc2.z != 2) bc = applyFog(x, bc, o, d, bh.t);
-            if (SCENE_ISLES && x.isles->n.x > 0 && !(x.prof & 128)) {
+            if (SCENE_MIST && x.isles->n.x > 0 && !(x.prof & 128)) {
                 float4 m = isleMist(x, o, d, bh.t);
                 bc = mix(bc, m.rgb, m.a);
             }
@@ -9170,7 +9175,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         }
     } else {
         float4 sky = skyWithClouds(x, o, d);
-        if (SCENE_ISLES && x.isles->n.x > 0 && !(x.prof & 128)) {
+        if (SCENE_MIST && x.isles->n.x > 0 && !(x.prof & 128)) {
             float4 m = isleMist(x, o, d, 1e5);
             sky.rgb = mix(sky.rgb, m.rgb, m.a);
         }
@@ -9208,7 +9213,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         // the veil is drawn only where the cloud in front is dense, as an opaque body with soft edges.
         col = mix(col, cl.col, smoothstep(0.35, 0.8, cl.a) * smoothstep(CLOUD_Y0, CLOUD_Y0 + 110.0, o.y + d.y * h.t));
     }
-    if (SCENE_ISLES && x.isles->n.x > 0 && !(x.prof & 128)) {
+    if (SCENE_MIST && x.isles->n.x > 0 && !(x.prof & 128)) {
         float4 m = isleMist(x, o, d, tSurf);
         col = mix(col, m.rgb, m.a);
     }

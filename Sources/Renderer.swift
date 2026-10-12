@@ -73,23 +73,27 @@ final class GPU {
         return d
     }
 
-    // The scene variants for one towers setting, as Renderer indexes them: none, bands, island surfaces, both, and those
-    // with the islands' shade.
-    static let sceneVariants = [(false, false, false), (true, false, false), (false, true, false), (true, true, false), (true, true, true)]
+    // The scene variants for one towers setting (bands, island surfaces, the islands' shade, their mist), as Renderer
+    // indexes them: none, bands, island surfaces, both, those with the islands' shade, and with their mist.
+    static let sceneVariants = [(false, false, false, false), (true, false, false, false), (false, true, false, false), (true, true, false, false),
+                                (true, true, true, false), (true, true, true, true)]
 
-    func scene(towers: Bool, bands: Bool, shape: Bool, isles: Bool) -> MTLRenderPipelineState? {
-        pipeline(GPU.sceneKey(towers, bands, shape, isles)) { sceneDescriptor(towers, bands, shape, isles) }
+    func scene(towers: Bool, bands: Bool, shape: Bool, isles: Bool, mist: Bool) -> MTLRenderPipelineState? {
+        pipeline(GPU.sceneKey(towers, bands, shape, isles, mist)) { sceneDescriptor(towers, bands, shape, isles, mist) }
     }
 
-    private static func sceneKey(_ towers: Bool, _ bands: Bool, _ shape: Bool, _ isles: Bool) -> String { "scene \(towers) \(bands) \(shape) \(isles)" }
+    private static func sceneKey(_ towers: Bool, _ bands: Bool, _ shape: Bool, _ isles: Bool, _ mist: Bool) -> String {
+        "scene \(towers) \(bands) \(shape) \(isles) \(mist)"
+    }
 
-    private func sceneDescriptor(_ towers: Bool, _ bands: Bool, _ shape: Bool, _ isles: Bool) -> MTLRenderPipelineDescriptor {
+    private func sceneDescriptor(_ towers: Bool, _ bands: Bool, _ shape: Bool, _ isles: Bool, _ mist: Bool) -> MTLRenderPipelineDescriptor {
         let fc = MTLFunctionConstantValues()
-        var b = bands, t = towers, i = isles, sh = shape
+        var b = bands, t = towers, i = isles, sh = shape, m = mist
         fc.setConstantValue(&b, type: .bool, index: 0)
         fc.setConstantValue(&t, type: .bool, index: 1)
         fc.setConstantValue(&i, type: .bool, index: 3)
         fc.setConstantValue(&sh, type: .bool, index: 4)
+        fc.setConstantValue(&m, type: .bool, index: 5)
         return fullscreen(try? library.makeFunction(name: "sceneFragment", constantValues: fc), .rgba16Float)
     }
 
@@ -130,7 +134,7 @@ final class GPU {
                            "bio": bioDescriptor(),
                            GPU.postKey(output, true): postDescriptor(output, true)]
         for t in [false, true] {
-            for v in GPU.sceneVariants { descriptors[GPU.sceneKey(t, v.0, v.1, v.2)] = sceneDescriptor(t, v.0, v.1, v.2) }
+            for v in GPU.sceneVariants { descriptors[GPU.sceneKey(t, v.0, v.1, v.2, v.3)] = sceneDescriptor(t, v.0, v.1, v.2, v.3) }
         }
         for f in functions where f.functionType == .kernel {
             group.enter()
@@ -1129,8 +1133,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     // sceneFragment specialised by [towers][GPU.sceneVariants]: function constant 1 compiles the towers in (only frames
     // with one in view need them), constant 0 the band test in the DDA (BAND_FC, only while a giant or the jungle is near,
     // or an island in view within isleShadeReach), constant 4 the islands' surfaces (SHAPE_FC, an island in view at any
-    // distance), constant 3 the islands' shade and sky occlusion (ISLE_FC, an island in view within isleShadeReach).
-    // Each costs every pixel a little even unused.
+    // distance), constant 3 the islands' shade and sky occlusion (ISLE_FC, an island in view within isleShadeReach),
+    // constant 5 their mist (MIST_FC). Each costs every pixel a little even unused, so each tile of the scene pass takes
+    // the variant its pixels need.
     let scenePipelines: [[MTLRenderPipelineState]]
     let postPipeline: MTLRenderPipelineState
     let taaPipeline: MTLRenderPipelineState
@@ -1197,6 +1202,11 @@ final class Renderer: NSObject, MTKViewDelegate {
     static let isleShadeReach = 4000.0
     private var isleVariant = false
     private var isleShapeVariant = false
+    // The scene pass is drawn in sceneTile-pixel squares, each with the cheapest variant its pixels need: the islands'
+    // surfaces only where an island's spheres (Islands.spheres) cover it, their shade, sky occlusion and mist only where
+    // those reach.
+    static let sceneTile = 16
+    private var tileNeed: [UInt8] = []
     private var historyIndex = 0
     private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
     let world: World
@@ -1249,7 +1259,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         let device = gpu.device
         guard let queue = device.makeCommandQueue() else { return nil }
         let sceneStates = [false, true].map { t in
-            GPU.sceneVariants.compactMap { v in gpu.scene(towers: t, bands: v.0, shape: v.1, isles: v.2) }
+            GPU.sceneVariants.compactMap { v in gpu.scene(towers: t, bands: v.0, shape: v.1, isles: v.2, mist: v.3) }
         }
         guard sceneStates.allSatisfy({ $0.count == GPU.sceneVariants.count }),
               let tp = gpu.taa(),
@@ -1607,18 +1617,68 @@ final class Renderer: NSObject, MTKViewDelegate {
             let half = atan(tanV * (1 + Double(aspect) * Double(aspect)).squareRoot())
             // On while an island within the reach could show, off a little past it, so a camera hovering at the edge does
             // not flick it.
-            isleVariant = Islands.inView(world.isles, eye: camera.position, fwd: tb.fwd, half: half,
-                                         within: Renderer.isleShadeReach + (isleVariant ? 400 : 0),
-                                         key: Renderer.keyLight(clock.sunDirection).0, margin: isleVariant ? 0.12 : 0.06)
+            let key = Renderer.keyLight(clock.sunDirection).0
+            let isleSpheres = Islands.spheres(world.isles, eye: camera.position, within: Renderer.isleShadeReach + (isleVariant ? 400 : 0), key: key, shade: true)
+            isleVariant = Islands.inView(isleSpheres, eye: camera.position, fwd: tb.fwd, half: half, margin: isleVariant ? 0.12 : 0.06)
             let isles = isleVariant
-            isleShapeVariant = isles || Islands.inView(world.isles, eye: camera.position, fwd: tb.fwd, half: half, within: edgeRadius + 1000,
-                                                       key: Renderer.keyLight(clock.sunDirection).0, margin: isleShapeVariant ? 0.12 : 0.06)
-            let bands = (isles || world.bandsNear(cam2, radius: Clipmap.handoff(0) + 40)) && Renderer.profile != "noband"
-            let shade = bands && isles
-            f.shadow.w = shade ? 1 : 0
-            var isleTable = Islands.table(world.isles, near: cam2, within: 3000, view: (camera.position, tb.fwd, half))
+            isleShapeVariant = isles || Islands.inView(Islands.spheres(world.isles, eye: camera.position, within: edgeRadius + 1000, key: key, shade: true),
+                                                       eye: camera.position, fwd: tb.fwd, half: half, margin: isleShapeVariant ? 0.12 : 0.06)
+            let canopyBands = world.bandsNear(cam2, radius: Clipmap.handoff(0) + 40)
+            let noband = Renderer.profile == "noband"
+            f.shadow.w = isles && !noband ? 1 : 0
+            let isleTable = Islands.table(world.isles, near: cam2, within: 3000, view: (camera.position, tb.fwd, half))
+            var isleBytes = isleTable.bytes
             towers.frameTable(eye: camera.position, fwd: tb.fwd, right: tb.right, up: tb.up, tanH: tanV * Double(aspect), tanV: tanV)
-            enc.setRenderPipelineState(scenePipelines[towers.tableCount > 0 ? 1 : 0][shade ? 4 : (bands ? 1 : 0) + (isleShapeVariant ? 2 : 0)])
+            // Per tile: 1 an island's surfaces may show, 2 its shade or sky occlusion, 4 its mist.
+            let T = Renderer.sceneTile, nx = (w + T - 1) / T, ny = (h + T - 1) / T
+            tileNeed = [UInt8](repeating: 0, count: nx * ny)
+            func mark(_ list: [(c: SIMD3<Double>, r: Double)], _ bit: UInt8) {
+                for sp in list {
+                    let e = SIMD3(repeating: sp.r)
+                    guard let t = tileRange(box: sp.c - e, sp.c + e, nx: nx, ny: ny, tw: Double(T), th: Double(T), width: w, height: h, pad: 6) else { continue }
+                    for ty in t.y0...t.y1 { for tx in t.x0...t.x1 { tileNeed[ty * nx + tx] |= bit } }
+                }
+            }
+            if isleShapeVariant { mark(Islands.spheres(world.isles, eye: camera.position, within: edgeRadius + 1000, key: key, shade: false), 1) }
+            if isles {
+                let within = Renderer.isleShadeReach + 400
+                mark(Islands.spheres(world.isles, eye: camera.position, within: within, key: key, shade: true, occlusion: false), 2)
+                mark(isleTable.mist, 6)
+                // The sky occlusion reaches no farther than the shading table, which holds every island it darkens.
+                for s in world.isles where simd_length(s.pos - cam2) < 3000 + s.reach {
+                    let bx = Islands.occlusionBox(s)
+                    guard let t = tileRange(box: bx.lo, bx.hi, nx: nx, ny: ny, tw: Double(T), th: Double(T), width: w, height: h, pad: 6) else { continue }
+                    for ty in t.y0...t.y1 { for tx in t.x0...t.x1 { tileNeed[ty * nx + tx] |= 2 } }
+                }
+            }
+            // Island bands only where an island's work does: elsewhere its air is walked as any rock gap's.
+            let variant = tileNeed.map { need -> Int in
+                let isleT = isles && need & 2 != 0, shapeT = isleShapeVariant && need != 0
+                let bandsT = (isleT || canopyBands) && !noband
+                return isleT && bandsT ? (need & 4 != 0 ? 5 : 4) : (bandsT ? 1 : 0) + (shapeT ? 2 : 0)
+            }
+            // Rectangles of tiles of one variant, each drawn as the whole frame's triangle scissored to it: a pair of
+            // triangles per tile would shade the 2x2 quads along every diagonal twice.
+            var rects: [(v: Int, x0: Int, x1: Int, y0: Int, y1: Int)] = []
+            var open: [Int: Int] = [:]
+            for ty in 0..<ny {
+                var next: [Int: Int] = [:]
+                var tx = 0
+                while tx < nx {
+                    let v = variant[ty * nx + tx]
+                    var x1 = tx
+                    while x1 + 1 < nx && variant[ty * nx + x1 + 1] == v { x1 += 1 }
+                    if let i = open[tx], rects[i].x1 == x1, rects[i].v == v {
+                        rects[i].y1 = ty
+                        next[tx] = i
+                    } else {
+                        rects.append((v, tx, x1, ty, ty))
+                        next[tx] = rects.count - 1
+                    }
+                    tx = x1 + 1
+                }
+                open = next
+            }
             enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
             enc.setFragmentBuffer(birdBuf, offset: 0, index: 5)
             enc.setFragmentBuffer(horizonBuf, offset: 0, index: 6)
@@ -1648,8 +1708,17 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentBytes(&tileMasks, length: tileMasks.count * 4, index: 7)
             enc.setFragmentBuffer(world.giantBuffer, offset: 0, index: 8)
             enc.setFragmentBytes(towers.table, length: Towers.tableBytes, index: 9)
-            enc.setFragmentBytes(&isleTable, length: Islands.tableBytes, index: 10)
-            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            enc.setFragmentBytes(&isleBytes, length: Islands.tableBytes, index: 10)
+            for v in 0..<GPU.sceneVariants.count {
+                let mine = rects.filter { $0.v == v }
+                guard !mine.isEmpty else { continue }
+                enc.setRenderPipelineState(scenePipelines[towers.tableCount > 0 ? 1 : 0][v])
+                for r in mine {
+                    let x0 = r.x0 * T, y0 = r.y0 * T
+                    enc.setScissorRect(MTLScissorRect(x: x0, y: y0, width: min((r.x1 + 1) * T, w) - x0, height: min((r.y1 + 1) * T, h) - y0))
+                    enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                }
+            }
             enc.endEncoding()
         }
         // In its own pass: drawn after the scene in the scene's pass, even a draw doing nothing cost a twilight scene ~0.4 ms.
@@ -1731,29 +1800,65 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     // Marks the tiles a sphere's projection may touch: its bounding box's corners bound the projection, padded by a few
     // pixels for the subpixel jitter. A sphere reaching behind the near plane marks every tile.
+    // The tiles (nx x ny of tw x th pixels over a width x height frame, rows down the screen) whose rays may cross the
+    // sphere (centre c, radius r), padded by pad pixels; nil: none.
+    private func tileRange(_ c: SIMD3<Double>, _ r: Double, nx: Int, ny: Int, tw: Double, th: Double, width: Int, height: Int,
+                           pad: Double) -> (x0: Int, x1: Int, y0: Int, y1: Int)? {
+        let b = camera.basis
+        let tanV = tan(25.0 * .pi / 180), aspect = Double(width) / Double(height)
+        let v = c - camera.position
+        let x = simd_dot(v, b.right), y = simd_dot(v, b.up), z = simd_dot(v, b.fwd)
+        guard z - r > 0.5 else { return (0, nx - 1, 0, ny - 1) }
+        var nx0 = Double.infinity, nx1 = -Double.infinity, ny0 = Double.infinity, ny1 = -Double.infinity
+        for zz in [z - r, z + r] {
+            for xx in [x - r, x + r] { let q = xx / (zz * tanV * aspect); nx0 = min(nx0, q); nx1 = max(nx1, q) }
+            for yy in [y - r, y + r] { let q = yy / (zz * tanV); ny0 = min(ny0, q); ny1 = max(ny1, q) }
+        }
+        let padX = 2 * pad / Double(width), padY = 2 * pad / Double(height)
+        nx0 -= padX; nx1 += padX; ny0 -= padY; ny1 += padY
+        if nx1 < -1 || nx0 > 1 || ny1 < -1 || ny0 > 1 { return nil }
+        let W = Double(width), H = Double(height)
+        // Tile rows run down the screen, NDC y up.
+        return (max(0, Int(floor((nx0 + 1) / 2 * W / tw))), min(nx - 1, Int(floor((nx1 + 1) / 2 * W / tw))),
+                max(0, Int(floor((1 - ny1) / 2 * H / th))), min(ny - 1, Int(floor((1 - ny0) / 2 * H / th))))
+    }
+
+    // tileRange for the box lo...hi: the part of it in front of the eye, by its corners and where its edges cross the near
+    // plane.
+    private func tileRange(box lo: SIMD3<Double>, _ hi: SIMD3<Double>, nx: Int, ny: Int, tw: Double, th: Double, width: Int, height: Int,
+                           pad: Double) -> (x0: Int, x1: Int, y0: Int, y1: Int)? {
+        let b = camera.basis
+        let tanV = tan(25.0 * .pi / 180), aspect = Double(width) / Double(height), near = 0.5
+        let cs = (0..<8).map { i -> SIMD3<Double> in
+            let v = SIMD3(i & 1 == 0 ? lo.x : hi.x, i & 2 == 0 ? lo.y : hi.y, i & 4 == 0 ? lo.z : hi.z) - camera.position
+            return SIMD3(simd_dot(v, b.right), simd_dot(v, b.up), simd_dot(v, b.fwd))
+        }
+        var pts = cs.filter { $0.z > near }
+        for i in 0..<8 { for bit in [1, 2, 4] where i & bit == 0 {
+            let a = cs[i], c = cs[i | bit]
+            if (a.z > near) != (c.z > near) { pts.append(a + (c - a) * ((near - a.z) / (c.z - a.z))) }
+        } }
+        guard !pts.isEmpty else { return nil }
+        var nx0 = Double.infinity, nx1 = -Double.infinity, ny0 = Double.infinity, ny1 = -Double.infinity
+        for q in pts {
+            let u = q.x / (q.z * tanV * aspect), v = q.y / (q.z * tanV)
+            nx0 = min(nx0, u); nx1 = max(nx1, u); ny0 = min(ny0, v); ny1 = max(ny1, v)
+        }
+        let padX = 2 * pad / Double(width), padY = 2 * pad / Double(height)
+        nx0 -= padX; nx1 += padX; ny0 -= padY; ny1 += padY
+        if nx1 < -1 || nx0 > 1 || ny1 < -1 || ny0 > 1 { return nil }
+        let W = Double(width), H = Double(height)
+        return (max(0, Int(floor((nx0 + 1) / 2 * W / tw))), min(nx - 1, Int(floor((nx1 + 1) / 2 * W / tw))),
+                max(0, Int(floor((1 - ny1) / 2 * H / th))), min(ny - 1, Int(floor((1 - ny0) / 2 * H / th))))
+    }
+
     private func fillLampTiles(frame f: Frame, width: Int, height: Int) {
         let n = Renderer.lampTiles
         for i in 0..<tileMasks.count { tileMasks[i] = 0 }
-        let b = camera.basis, cam = camera.position
-        let tanV = tan(25.0 * .pi / 180), aspect = Double(width) / Double(height)
-        let padX = 6.0 / Double(width), padY = 6.0 / Double(height)
         func mark(_ c: SIMD3<Double>, _ r: Double, _ bit: UInt32) {
-            let v = c - cam
-            let x = simd_dot(v, b.right), y = simd_dot(v, b.up), z = simd_dot(v, b.fwd)
-            var x0 = 0, x1 = n - 1, y0 = 0, y1 = n - 1
-            if z - r > 0.5 {
-                var nx0 = Double.infinity, nx1 = -Double.infinity, ny0 = Double.infinity, ny1 = -Double.infinity
-                for zz in [z - r, z + r] {
-                    for xx in [x - r, x + r] { let q = xx / (zz * tanV * aspect); nx0 = min(nx0, q); nx1 = max(nx1, q) }
-                    for yy in [y - r, y + r] { let q = yy / (zz * tanV); ny0 = min(ny0, q); ny1 = max(ny1, q) }
-                }
-                nx0 -= padX; nx1 += padX; ny0 -= padY; ny1 += padY
-                if nx1 < -1 || nx0 > 1 || ny1 < -1 || ny0 > 1 { return }
-                x0 = max(0, Int(floor((nx0 + 1) / 2 * Double(n)))); x1 = min(n - 1, Int(floor((nx1 + 1) / 2 * Double(n))))
-                // Tile rows run down the screen, NDC y up.
-                y0 = max(0, Int(floor((1 - ny1) / 2 * Double(n)))); y1 = min(n - 1, Int(floor((1 - ny0) / 2 * Double(n))))
-            }
-            for ty in y0...y1 { for tx in x0...x1 { tileMasks[ty * n + tx] |= bit } }
+            guard let t = tileRange(c, r, nx: n, ny: n, tw: Double(width) / Double(n), th: Double(height) / Double(n),
+                                    width: width, height: height, pad: 3) else { return }
+            for ty in t.y0...t.y1 { for tx in t.x0...t.x1 { tileMasks[ty * n + tx] |= bit } }
         }
         let lamps = world.lamps
         for i in 0..<Int(f.refs.x) {
