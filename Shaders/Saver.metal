@@ -5081,14 +5081,21 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     if (gWood) return giantSurface(tr, s, k, v, n, uv, fp, wq, wy, col, gsb, gLoc, gi, cs, mapOrigin, seed);
     Climate c = climateL(tr, k, (float2(v.xz) + 0.5) * cs);
     float desert = desertAmount(c);
+    // Beaches and beds take sand or crust, faces included, so they need none of the ground and rock tones.
+    bool beach = H <= SEA + 1.2;
+    // Bark and leaves take their own colours below: of the ground's tones they keep only a salt pan's level, and on a top
+    // face the sand's ripples, which the snowline can rule out.
     // Painted-hill beds belong to low mounds; on the great walls their 11-voxel bands would read as stripes.
-    float wallM = megaWall(tr, w);
+    float wallM = vegVox && paintedAmount(c) <= 0.0 ? 0.0 : megaWall(tr, w);
     s.wall = wallM;
     float painted = smoothstep(0.0, 0.6, paintedAmount(c)) * (1.0 - wallM);
-    float snowline = snowlineAt(c.temp) + 5.0 * perlin2(w / 160.0, seed + 21u);
-    // On the ranges rock breaks through the lower snowfields in drifts, so a massif is not one white sheet.
-    if (H > 150.0) snowline += 60.0 * perlin2(w / 700.0, seed + 28u) * smoothstep(150.0, 400.0, H)
-                             + 260.0 * saturate(perlin2(w / 90.0, seed + 33u) * 0.9 + 0.45) * smoothstep(150.0, 450.0, H);
+    float snowline = 1e9;
+    if (!vegVox || (n.y > 0 && (beach || desert > 0.35))) {
+        snowline = snowlineAt(c.temp) + 5.0 * perlin2(w / 160.0, seed + 21u);
+        // On the ranges rock breaks through the lower snowfields in drifts, so a massif is not one white sheet.
+        if (H > 150.0) snowline += 60.0 * perlin2(w / 700.0, seed + 28u) * smoothstep(150.0, 400.0, H)
+                                 + 260.0 * saturate(perlin2(w / 90.0, seed + 33u) * 0.9 + 0.45) * smoothstep(150.0, 450.0, H);
+    }
     c.temp = altitudeTemp(c.temp, H);
     float cold = smoothstep(0.42, 0.18, c.temp);
     float autumn = autumnAmount(c);
@@ -5107,19 +5114,17 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     float salt = saltAmount(c);
     float rimW = smoothstep(0.05, 0.4, salt);
 
-    // Beaches and beds take sand or crust, faces included, so they need none of the ground and rock tones.
-    bool beach = H <= SEA + 1.2;
     // Rock tone shows on side and under faces, and on high treads; a low tread never reads it.
     bool needStone = !beach && !vegVox && (!(n.y > 0 && !underGap) || H - SEA > 0.55 * 110.0);
     float3 stone = needStone ? strataTone(wy, wq, seed, max(desert, rimW), fpA, wallM, lite) : float3(0);
 
     float lagoon = smoothstep(0.0, 0.35, lagoonAmount(c));
     // Pale ground (sand, salt, snow) sits well below the clouds, and drifts in tone so open flats never read as one sheet.
-    float drift = 1.0 + 0.12 * perlin2(wq / 110.0, seed + 32u);
+    float drift = vegVox ? 1.0 : 1.0 + 0.12 * perlin2(wq / 110.0, seed + 32u);
     float3 sand = mix(float3(0.33, 0.29, 0.21), float3(0.37, 0.33, 0.245), lagoon) * drift;
     float3 snow = float3(0.31, 0.325, 0.35) * drift;
     float3 tread = sand;
-    if (!beach) {
+    if (!beach && !vegVox) {
         float3 grassWet = float3(0.12, 0.20, 0.13), grassDry = float3(0.40, 0.34, 0.16), grassCold = float3(0.20, 0.23, 0.17);
         float3 grass = mix(mix(grassDry, grassWet, smoothstep(0.3, 0.7, c.moist)), grassCold, cold);
         // Autumn ground: tawny grass, with fallen leaves drifting out from the groves in the canopy's own hues.
@@ -5159,7 +5164,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     // Salt crust: cream with slow Perlin drifts, and a faint polygon net from two crossing sets of
     // Perlin zero-lines that fades long before it could alias.
     float crustW = beach ? smoothstep(0.3, 0.6, salt) : 0.0;
-    if (crustW > 0.0) {
+    if (crustW > 0.0 && !vegVox) {
         float3 crust = mix(float3(0.32, 0.305, 0.27), float3(0.33, 0.29, 0.27), saturate(perlin2(wq / 210.0, seed + 23u) + 0.5))
                      * (drift + 0.07 * perlin2(wq / 60.0, seed + 19u) + 0.04 * perlin2(wq / 17.0, seed + 20u));
         if (fpA < 0.2) {
@@ -5178,12 +5183,12 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         float damp = H < PAN ? 1.0 : smoothstep(lvl - 0.14, lvl, poolNoise(wq + seedOffset(seed), seed));
         crust *= mix(float3(1.0), float3(0.80, 0.82, 0.85), damp);
         tread = mix(tread, crust, crustW);
-        // The pan is dead level: lit by the smoothed heightfield, or with the lip and pool floor lit as
-        // walls and corners, every pool would be outlined.
-        s.level = crustW;
     }
+    // The pan is dead level: lit by the smoothed heightfield, or with the lip and pool floor lit as walls and corners,
+    // every pool would be outlined.
+    s.level = crustW;
     // Coarse levels carry no trees: the share of a column under canopy tints its ground with their leaves.
-    if (k > 0) {
+    if (k > 0 && !vegVox) {
         float2 cd = cdK;
         float cov = saturate(cd.x * COVER_GAIN);
         if (cov > 0.0) {
