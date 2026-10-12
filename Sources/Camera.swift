@@ -22,11 +22,11 @@ final class FlightCamera {
     // A fixed pose for showcase snapshots; step() leaves it alone.
     private(set) var frozen = false
 
-    func freeze(position p: SIMD3<Double>, yaw y: Double, pitch pt: Double) {
+    func freeze(position p: SIMD3<Double>, yaw y: Double, pitch pt: Double, roll rl: Double = 0) {
         position = p
         yaw = y
         pitch = pt
-        roll = 0
+        roll = rl
         frozen = true
     }
 

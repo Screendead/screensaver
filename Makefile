@@ -7,7 +7,7 @@ all: $(BIN) $(RES)/Saver.metallib $(APP)/Contents/Info.plist
 
 $(BIN): $(SOURCES)
 	@mkdir -p "$(dir $@)"
-	swiftc -O -target arm64-apple-macos14 -framework AppKit -framework Metal -framework MetalKit -framework IOKit $(SOURCES) -o "$@"
+	swiftc -O -target arm64-apple-macos14 -framework AppKit -framework Metal -framework MetalKit -framework IOKit -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework VideoToolbox $(SOURCES) -o "$@"
 
 $(RES)/Saver.metallib: Shaders/Saver.metal
 	@mkdir -p "$(RES)"

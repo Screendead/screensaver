@@ -88,6 +88,8 @@ final class MenuController: NSObject, NSMenuDelegate {
         menu.addItem(after)
         add("Dithering", #selector(toggleDither), on: Prefs.dither)
         menu.addItem(.separator())
+        add("Bug Reports…", #selector(openBugReports))
+        menu.addItem(.separator())
         add("Quit Menu Item", #selector(quit))
     }
 
@@ -99,5 +101,9 @@ final class MenuController: NSObject, NSMenuDelegate {
     @objc private func resume() { Prefs.set("pauseUntil", nil); refreshIcon() }
     @objc private func pause(_ sender: NSMenuItem) { Prefs.set("pauseUntil", sender.representedObject as? Date); refreshIcon() }
     @objc private func setDelay(_ sender: NSMenuItem) { Prefs.set("idleDelay", sender.representedObject as? Double) }
+    @objc private func openBugReports() {
+        try? FileManager.default.createDirectory(at: BugReport.folder, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(BugReport.folder)
+    }
     @objc private func quit() { NSApp.terminate(nil) }
 }

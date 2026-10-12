@@ -12,6 +12,7 @@ Everything is procedural, including terrain, mesas and arches, rock strata, wate
 - It doesn't start while something holds a display-sleep assertion. Video players, calls and presentations all do that.
 - It doesn't start while the screen is locked or the displays are asleep.
 - Any mouse or keyboard input dismisses it within a frame or two.
+- B instead files a bug report: the last 6 to 8 s of the first screen as video, the camera, clock and GPU time for the last 10 s, and replay commands, in `~/Library/Application Support/STRATA/Bug Reports/<date>/`. A window then asks what you saw (Return saves `note.txt`, Esc skips). The menu bar item's "Bug Reports…" opens the folder.
 - It never keeps the display awake. Your normal display-sleep and lock settings still apply, and it gets out of the way when the display sleeps or the system screensaver starts.
 - On battery or in Low Power Mode it renders at a lower scale and 30 fps.
 - On EDR-capable displays, highlights extend into HDR headroom: lit step lips, sun glitter on water, the sun, the moon and bright stars. Headroom is capped at 4x.
@@ -42,11 +43,14 @@ Environment: `VR_TIMING=1` logs GPU frame times and world regeneration, and `VR_
 Snapshot test switches: `VR_MOTION=1` (with `VR_MOTION_FRAMES=n`, `VR_FRAMES=n`) advances the camera between frames and dumps them,
 `VR_CHUNKED=1` updates the LOD rings a piece per frame as live, `VR_COARSE_FULL=1` rebuilds them whole every frame,
 `VR_LODSHIFT=v` moves the rings' centre v voxels ahead of the camera, and `VR_POWER_FLIP=i` switches power source at frame i.
+`VR_EXPOSURE=e` holds a bug report's recorded exposure, and `VR_BUGTEST=s` flies s seconds recording as the saver does, then
+writes a report into `<screenshot>_reports/`.
 Live frame times are measured at `--size 3456x2234 --scale 1`: the scene renders on the 864-cell dither grid, so scale 1 is the AC live size.
 
 ## Layout
 
 - `Sources/main.swift`: idle agent, power and lock probes, fullscreen windows, dismissal.
+- `Sources/BugReport.swift`: the B-key bug report: hardware-encoded rolling capture, per-frame state, report files, note window.
 - `Sources/Renderer.swift`: world (2048² column map with max mips, async double-buffered regeneration), day clock, frame setup, TAA, snapshots.
 - `Sources/Camera.swift`: valley- and ridge-following autopilot with a pitch cycle, so the horizon sweeps the whole screen.
 - `Shaders/Saver.metal`: noise, terrain generation, the quadtree voxel DDA, shading, sky, clouds, fog, water, and the temporal and EDR post passes.
