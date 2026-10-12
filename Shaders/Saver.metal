@@ -6096,6 +6096,8 @@ static inline bool hollowAt(thread const Terrain& tr, int k, int2 c, float y) {
 
 // The share of open shade's sky light reaching under a roof.
 constant float ROOF_SKY = 0.55;
+// A shelter's back wall by night: about open shade's share on a wall.
+constant float ROOF_SKY_NIGHT = 1.0;
 
 // hollowAt as the trace sees it: the column morphed toward the next level's.
 static inline bool hollowAtMorph(thread const Terrain& tr, int k, int2 c, float y) {
@@ -6833,7 +6835,14 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // Under a roof the sky comes only through the mouth, an even share well under open shade's: the visibility samples
     // only six voxels out, so in a shelter it reads the roof all round and varies column by column with the back wall's
     // jogs, striping it.
-    skyFill *= mix(1.0 - mix(0.55, 0.85, hiSun) * (1.0 - sv), ROOF_SKY, roofW);
+    // By night a shelter's back wall takes open shade's share: at the roof's it fell below the open wall beside it, a
+    // black band under every lip. Toward the roof it keeps the roof's share, the lip's shadow along the top; the roof is
+    // a level bedding plane, so its height reads alike for every jog of the wall.
+    float roofSky = ROOF_SKY;
+    // From well into dusk: before that the night fill the roof withholds is a sliver.
+    if (h.normal.y == 0 && roofW > 0.0 && L.night > 0.1)
+        roofSky = mix(ROOF_SKY, ROOF_SKY_NIGHT, smoothstep(0.1, 1.0, L.night) * smoothstep(0.0, max(8.0, 2.0 * cs), s.gapSpan.y - p.y));
+    skyFill *= mix(1.0 - mix(0.55, 0.85, hiSun) * (1.0 - sv), roofSky, roofW);
     // Dusk: a crown's top still holds the glow while its foot and the gaps between crowns sink deeper and cooler than
     // open shade, so the crowns stand apart.
     if (dusk > 0.0) skyFill *= mix(float3(1.0), mix(float3(0.52, 0.58, 0.8), float3(1.12, 1.08, 1.0), saturate(sv * sv * (0.4 + 0.75 * s.up))), dusk);
@@ -6851,7 +6860,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // Night: no pure-black riser feet; a faint indigo ambient keeps the steps readable as stone, not holes.
     ao = mix(ao, 1.0, 0.25 * L.night);
     // Night: a cave mouth stays a dark hole.
-    skyFill += float3(0.09, 0.12, 0.25) * L.night * mix(1.0, ROOF_SKY, roofW);
+    skyFill += float3(0.09, 0.12, 0.25) * L.night * mix(1.0, roofSky, roofW);
     // Deep in the night, land sits below the sky so night reads as night (won night A/B): moonlight is graded
     // to a cool silver and the fill to a deep blue well under it, so slopes facing the moon still model. In
     // early night it is already dark and keeps its contours (darkening lost the dusk A/B).
