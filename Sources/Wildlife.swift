@@ -85,6 +85,9 @@ final class Wildlife {
         let seedPhase: Double
         var serial = 0
         var misses = 0 // murmuration: tries in a row to gather again ahead that found no place
+        // Circling an island: its centre (x, z), the ring's radius and height, and which way round.
+        var orbit: SIMD4<Double>?
+        var orbitSense = 1.0
 
         init(kind: Kind, slot: Int, anchor: SIMD3<Double>, heading: Double, speed: Double, altitude: Double, life: Double, seedPhase: Double) {
             self.kind = kind
@@ -181,12 +184,13 @@ final class Wildlife {
     }
 
     // Which flocks the hour calls for, one per slot. Gull slots fall back to songbirds away from water.
-    private static func roster(sunY: Double, phase: Double) -> [Kind] {
+    // Among floating islands raptors take a songbird's slot: they circle the islands.
+    private static func roster(sunY: Double, phase: Double, isles: Bool = false) -> [Kind] {
         if sunY < -0.16 { return [.bat, .bat, .bat] }
         let dusk = phase > 0.25 && phase < 0.75
         // Flocks spend a while flying in out of sight, so the hour keeps more of them on the wing.
         if sunY < 0.14 { return dusk ? [.starling, .songbird, .gull, .goose, .songbird, .songbird] : [.goose, .songbird, .gull, .songbird, .songbird, .goose] }
-        return [.songbird, .raptor, .gull, .songbird, .songbird, .gull, .songbird]
+        return [.songbird, .raptor, .gull, isles ? .raptor : .songbird, .songbird, .gull, .songbird]
     }
 
     private func nearWater(_ p: SIMD2<Double>) -> SIMD2<Double>? {
@@ -210,8 +214,9 @@ final class Wildlife {
         let shown = self.sight ?? sight
         self.sight = sight
         hiddenFrames = []
-        let roster = Wildlife.roster(sunY: sunY, phase: phase)
         let cam = camera.position
+        let cam2 = SIMD2(cam.x, cam.z)
+        let roster = Wildlife.roster(sunY: sunY, phase: phase, isles: islesAt().contains { $0.radius >= 40 && simd_length($0.pos - cam2) < $0.reach + 1500 })
         let fwd = camera.forward
         let camYaw = atan2(fwd.x, fwd.z), camPitch = asin(max(-1, min(1, fwd.y)))
         if let l = lastCam, dt > 0 { camVel += ((cam - l) / dt - camVel) * min(1, dt) }
@@ -663,8 +668,31 @@ final class Wildlife {
                 f.anchor.z += away.y * 12 * w * dt
             }
         }
-        // Islands: flown round where the flock is level with one, flown under or over otherwise.
-        for s in islesAt() where f.anchor.y > s.keel - 40 && f.anchor.y < s.top + 20 {
+        // Raptors and gulls near an island circle it, on a ring clear of its reach at the height of its flanks, rising to it
+        // slowly; a ring for a smaller island keeps them in sight of a camera passing it.
+        if !f.leaving && arrived && (f.kind == .raptor || f.kind == .gull) && f.orbit == nil {
+            var best: IslandInfo?, bd = Double.infinity
+            for s in islesAt() where s.radius >= 40 && s.radius <= 320 {
+                let l = simd_length(ap - s.pos)
+                if l < s.reach + 450 && l < bd { bd = l; best = s }
+            }
+            if let s = best {
+                let d = ap - s.pos, fd = SIMD2(sin(f.heading), cos(f.heading))
+                f.orbitSense = simd_dot(fd, SIMD2(-d.y, d.x)) >= 0 ? 1 : -1
+                f.orbit = SIMD4(s.pos.x, s.pos.y, s.reach + (f.kind == .gull ? 70 : 45), s.keel + 0.55 * (s.top - s.keel))
+                // Round in a few minutes, about 0.04 rad/s.
+                f.hold = min(max(f.hold ?? 0, 0.04 * (s.reach + 45)), fl.maxSpeed * 0.8)
+            }
+        }
+        if let o = f.orbit, !f.leaving {
+            let d = ap - SIMD2(o.x, o.y), l = max(simd_length(d), 1)
+            let want = SIMD2(-d.y, d.x) / l * f.orbitSense + d / l * max(-1, min(1, (o.z - l) / 60))
+            let off = atan2(want.x, want.y) - f.heading
+            f.heading += max(-0.5 * dt, min(0.5 * dt, atan2(sin(off), cos(off))))
+            f.altitude += max(-3 * dt, min(3 * dt, o.w - f.altitude))
+        }
+        // Islands: flown round where the flock is level with one, flown under or over otherwise (the one it circles aside).
+        for s in islesAt() where f.anchor.y > s.keel - 40 && f.anchor.y < s.top + 20 && !(f.orbit.map { simd_length(SIMD2($0.x, $0.y) - s.pos) < 1 } ?? false) {
             let d = SIMD2(f.anchor.x - s.pos.x, f.anchor.z - s.pos.y), l = simd_length(d)
             let near = s.reach + 140
             guard l < near, l > 1 else { continue }
@@ -714,7 +742,7 @@ final class Wildlife {
         gAhead = max(gAhead, ground(f.anchor.x + sideV.x, f.anchor.z + sideV.y, at: ay), ground(f.anchor.x - sideV.x, f.anchor.z - sideV.y, at: ay))
         // Ground-relative: flocks rise with the land (over a wall, before it) and otherwise keep under the clouds.
         let lift = gAhead + fl.clearance * (f.kind == .raptor ? 2 : 1.5)
-        var yT = max(min(f.altitude, FlightCamera.ceiling - 20), lift)
+        var yT = max(f.orbit != nil && !f.leaving ? f.altitude : min(f.altitude, FlightCamera.ceiling - 20), lift)
         // Under an island the flock keeps below its underside.
         if let c = columnAt(f.anchor.x, f.anchor.z), let u = c.under, ay < u - 12 { yT = min(yT, max(u - 20 - fl.clearance, c.ground + fl.clearance)) }
         f.anchor.y += (yT - f.anchor.y) * min(1, dt * (yT > f.anchor.y && lift > f.anchor.y - 5 ? 1.5 : 0.4))
@@ -803,7 +831,7 @@ final class Wildlife {
             let g = max(ground(b.pos.x, b.pos.z, at: by), ground(look.x, look.z, at: by), ground(look2.x, look2.z, at: by) - 3)
             let clear = fl.clearance
             if b.pos.y < g + clear { acc.y += (g + clear - b.pos.y) * 4 }
-            let roof = max(215, g + clear + 10)
+            let roof = max(215, g + clear + 10, f.orbit != nil ? f.anchor.y + 40 : 0)
             if b.pos.y > roof { acc.y -= (b.pos.y - roof) * 2 }
             if let c = columnAt(look.x, look.z), let u = c.under, by < u - 12, by > u - 12 - clear { acc.y -= (by - (u - 12 - clear)) * 4 }
 

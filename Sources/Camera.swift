@@ -315,16 +315,27 @@ final class FlightCamera {
     }
 
     // A big island 0.3-3 km ahead is a subject, framed head on: the flight goes on to pass beneath it.
+    // So is a way between two islands, or beneath one, within the next 1.8 km.
     private func isleInterest(_ heading: Double) -> Double {
         let p = SIMD2(position.x, position.z)
-        var best = 0.0
-        for s in islesAt() where s.radius > 60 {
+        let fd = SIMD2(sin(heading), cos(heading)), side = SIMD2(fd.y, -fd.x)
+        var best = 0.0, left = Double.infinity, right = Double.infinity, under = 0.0
+        for s in islesAt() where s.radius > 40 {
             let v = s.pos - p, d = simd_length(v)
-            guard d > 300, d < 3000 else { continue }
-            let off = abs(FlightCamera.angleDiff(atan2(v.x, v.y), heading))
-            best = max(best, 0.8 * max(0, 1 - off / 0.35) * min(1, (3000 - d) / 1000) * (s.passable ? 1 : 0.4))
+            guard d > 200, d < 3000 else { continue }
+            if s.radius > 60 {
+                let off = abs(FlightCamera.angleDiff(atan2(v.x, v.y), heading))
+                best = max(best, 0.8 * max(0, 1 - off / 0.35) * min(1, (3000 - d) / 1000) * (s.passable ? 1 : 0.4))
+            }
+            let along = simd_dot(v, fd), across = simd_dot(v, side)
+            guard along > 150, along < 1800 else { continue }
+            // Clear of the island's rock by its reach either side, or under it where it is passable.
+            let gap = abs(across) - s.reach
+            if gap > 0 { if across > 0 { right = min(right, gap) } else { left = min(left, gap) } }
+            else if s.passable && abs(across) < 0.5 * s.reach { under = max(under, 0.5) }
         }
-        return best
+        let between = left < 350 && right < 350 ? 0.6 * (1 - max(left, right) / 350) + 0.2 : 0
+        return best + max(between, under)
     }
 
     // A giant tree is a landmark: a heading that frames one 0.4-3 km ahead scores, and one far off draws the flight

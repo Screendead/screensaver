@@ -1908,6 +1908,9 @@ enum Snapshot {
             // than 25, the seconds it spent beneath one, and the islands it passed under.
             var isleClear = Double.infinity, isleScrape = 0, isleUnder = 0, birdsInRock = 0, birdChecks = 0
             var islesUnder = Set<SIMD2<Int>>()
+            // Seconds with an island's reach within 400 on either side, and flocks circling an island (by serial).
+            var isleBetween = 0, circlingSeconds = 0
+            var circlers = Set<Int>()
             for i in 1...Int(mins * 60) {
                 for _ in 0..<4 { r.simulate(0.25) }
                 let p = r.camera.position
@@ -1931,6 +1934,18 @@ enum Snapshot {
                     }
                 }
                 if near < 25 { isleScrape += 1; print(String(format: "flight island scrape t=%d pos=(%.0f,%.0f) y=%.0f clearance %.0f", i, p.x, p.z, p.y, near)) }
+                do {
+                    let side = SIMD2(cos(r.camera.yaw), -sin(r.camera.yaw))
+                    var l = false, rt = false
+                    for s in r.world.isles where s.radius > 40 {
+                        let v = s.pos - SIMD2(p.x, p.z), across = simd_dot(v, side)
+                        if simd_length(v) < s.reach + 400, abs(across) > s.reach * 0.5 { if across > 0 { rt = true } else { l = true } }
+                    }
+                    if l && rt { isleBetween += 1 }
+                    let circ = r.wildlife.flocks.filter { $0.orbit != nil && !$0.leaving }
+                    if !circ.isEmpty { circlingSeconds += 1 }
+                    for f in circ { circlers.insert(f.serial) }
+                }
                 if let u = col?.under, p.y < u {
                     isleUnder += 1
                     if let s = r.world.isles.first(where: { simd_length($0.pos - SIMD2(p.x, p.z)) < $0.reach }) { islesUnder.insert(SIMD2(Int(s.pos.x), Int(s.pos.y))) }
@@ -1985,6 +2000,7 @@ enum Snapshot {
             print(String(format: "flight towers: closest plinth edge %.0f, seconds with a tower ahead within 9k %d, tower-seconds within 1.5k %d", towerEdge, towerSeen, towerClose))
             print(String(format: "flight islands: closest %.0f, seconds nearer than 25 %d, seconds beneath one %d, islands passed under %d, on the table %d, bird-seconds in island cells %d of %d",
                          isleClear, isleScrape, isleUnder, islesUnder.count, r.world.isles.count, birdsInRock, birdChecks))
+            print(String(format: "flight islands 2: seconds between two %d, seconds with a flock circling one %d, flocks that circled %d", isleBetween, circlingSeconds, circlers.count))
             print(String(format: "flight done: max climb %.2f/s, min clearance %.1f, max y %.0f (ceiling %.0f), low seconds %d, walled seconds %d (longest %d), seconds climbing over 6/s %d, seconds under a crown %d, giants passed within 1500 %d", maxClimb, minClear, maxY, FlightCamera.ceiling, lows, walled, maxWalledRun, fastClimb, underCrown, giantsSeen.count))
             if let log = r.popLog { print(log.summary(r.wildlife)) }
             return
