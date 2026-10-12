@@ -1775,7 +1775,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         let levels = (1...Clipmap.levels).prefix { clipmap.ready($0) }.count
         // VR_PROFILE (tests): "noshadow" drops terrain shadows, "nobake" keeps the maps but skips their rebaking.
         // "bitsN" sets profiling flags directly: 8 reflections unshaded, 16 no sky visibility, 32 no cloud shadow or veil,
-        // 64 primary hits unshaded.
+        // 64 primary hits unshaded, 4096 no glow on the land, 8192 the land's glow at its far means only.
         f.shadow.y = Renderer.profile == "nearclouds" ? 1 : Renderer.profile == "lowmax" ? 2 : Renderer.profile == "norefl" ? 4 : Float(Renderer.profile.hasPrefix("bits") ? Int(Renderer.profile.dropFirst(4)) ?? 0 : 0)
         if Renderer.profile == "noshadow" { f.shadow.x = 3; return }
         if Renderer.profile == "oldshadow" { f.shadow.x = 0; return }
