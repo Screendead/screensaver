@@ -4587,6 +4587,7 @@ struct Surface {
     float3 nrm;     // the plane a structure's roof voxel or a tower's wall shades as (zero: the face normal)
     float3 emit;    // fire, lanterns and lit windows
     float up;       // leaves: height up the crown, 0 at its foot, 1 at its top
+    bool vine;      // a giant's hanging vines
 };
 
 // Autumn foliage: a slow Perlin hue field runs lingering green, gold, orange, scarlet to crimson;
@@ -4877,6 +4878,7 @@ static Surface giantSurface(thread const Terrain& tr, Surface s, int k, int3 v, 
     } else if (gm == GM_VINE) {
         a = float3(0.036, 0.050, 0.028) * (0.85 + 0.3 * hashf(hash2i(v.xz, seed + 602u)));
         s.mat = 1;
+        s.vine = true;
         s.canopy = mix(1.0, 0.75, smoothstep(6.0, 80.0, col.x - y));
     } else {
         // Bark in vertical ridges, mossed where it faces up and low down.
@@ -4989,6 +4991,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     if (lite) { fp = max(fp, 4.0); fpA = max(fpA, 4.0); }
     Surface s;
     s.up = 1.0;
+    s.vine = false;
     s.slope = 0;
     s.mat = 0;
     s.level = 0;
@@ -6214,6 +6217,8 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
 // start).
 constant float BIO_SUN = 0.07;
 static inline float bioRamp(float sunY) { return smoothstep(BIO_SUN, -0.12, sunY); }
+// The specks on the land's surfaces come in later than the bugs: against a still bright sky they look stuck on.
+static inline float bioLandRamp(float sunY) { return smoothstep(0.02, -0.12, sunY); }
 
 // Shared with the sea's glow: deep blue, turquoise and pink (#2a6bff, #2fe3d0, #ff5fc8), linear.
 constant float3 BIO_LAND[3] = { float3(0.023, 0.147, 1.0), float3(0.028, 0.768, 0.630), float3(1.0, 0.114, 0.578) };
@@ -6245,7 +6250,7 @@ static float4 bioSpot(float2 q, int plane, float cell, float pr, float r, float 
 // in the forest provinces and on giants, thinly in other damp woods, in patches. Whether a spot is there is fixed by
 // place; distance only dims it.
 static float3 bioGlow(texture2d<float> hm, texture2d<uint> st, texture2d<float> clim, texture2d<float> pv,
-                      int2 origin, uint seed, float time, int mat, int3 v, int3 n, float3 p, float fp) {
+                      int2 origin, uint seed, float time, int mat, bool vine, int3 v, int3 n, float3 p, float fp) {
     int size = int(hm.get_width());
     float4 col4 = hm.read(uint2(clamp(v.xz, int2(0), int2(size - 1))), 0);
     // Multi-run columns are emergents and old-growth trees as well as giants; only giants carry a palette.
@@ -6261,12 +6266,13 @@ static float3 bioGlow(texture2d<float> hm, texture2d<uint> st, texture2d<float> 
     float2 q = n.y != 0 ? wp.xz : float2(n.x != 0 ? wp.z : wp.x, wp.y);
     int plane = n.x != 0 ? vw.x * 2 + n.x : n.z != 0 ? vw.z * 2 + n.z : n.y;
     float fade = far;
+    float hb = p.y - (multi ? float(gsb & 2047u) : col4.g);
     // Per kind: cell, chance, radius, hue chances (blue, turquoise; pink the rest).
     float4 k4;
     float2 hues;
     if (mat == 2 || mat == 3) {
         if (n.y != 0) return 0;
-        float top = giant ? 16.0 : 4.0, hb = p.y - (multi ? float(gsb & 2047u) : col4.g);
+        float top = giant ? 16.0 : 4.0;
         if (hb > top) return 0;
         fade *= 1.0 - smoothstep(0.4 * top, top, hb);
         k4 = giant ? float4(3.0, 0.6, 0.5, 0) : float4(2.0, 0.45, 0.3, 0);
@@ -6281,14 +6287,17 @@ static float3 bioGlow(texture2d<float> hm, texture2d<uint> st, texture2d<float> 
     } else return 0;
     float4 sp = bioSpot(q, plane, k4.x, k4.y, k4.z, fp, seed + 701u + uint(k4.w), time, hues);
     if (sp.w >= 1.0) return 0;
+    Climate c = climateAt(clim, float2(v.xz) + 0.5, pv, origin);
+    // Deep in the jungle, where crowns and giants' skirts mass close to the eye, the specks thin to the broadleaf woods'
+    // spacing (low skirts more), and none ride the vines, which hang against the sky.
+    float jw = smoothstep(0.65, 0.9, c.jungle);
     if (giant) {
-        float keep = 1.15 * (1.0 - smoothstep(0.25, 0.75, fp));
+        float keep = 1.15 * (1.0 - smoothstep(0.25, 0.75, fp)) * (1.0 - jw * (vine ? 1.0 : hb < 30.0 ? 0.75 : 0.6));
         return sp.rgb * fade * (1.0 - smoothstep(keep - 0.15, keep, sp.w));
     }
-    Climate c = climateAt(clim, float2(v.xz) + 0.5, pv, origin);
     float prov = smoothstep(0.1, 0.5, provinceAmount(c));
     float wet = k4.w == 2.0 ? prov : max(prov, 0.3 * smoothstep(0.4, 0.65, c.moist));
-    wet *= (1.0 - smoothstep(0.42, 0.18, c.temp)) * smoothstep(0.05, 0.4, perlin2(float2(vw.xz) / 70.0, seed + 704u));
+    wet *= (1.0 - smoothstep(0.42, 0.18, c.temp)) * smoothstep(0.05, 0.4, perlin2(float2(vw.xz) / 70.0, seed + 704u)) * (1.0 - 0.6 * jw);
     return sp.w < wet ? sp.rgb * fade : float3(0);
 }
 
@@ -6553,10 +6562,10 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
             col += s.albedo * Lm * ((face * mix(1.0, ao, 0.5)) / (1.0 + dy * dy) + glow) * x.lights.w;
         }
     }
-    // Faintly from sunset; gone before the 1-voxel ring's morph band. Not in reflections, whose ripples would sparkle it.
-    float bio = bioRamp(L.sun.y) * (1.0 - smoothstep(0.5, 1.0, fp));
+    // From early twilight; gone before the 1-voxel ring's morph band. Not in reflections, whose ripples would sparkle it.
+    float bio = bioLandRamp(L.sun.y) * (1.0 - smoothstep(0.5, 1.0, fp));
     if (bio > 0.0 && k == 0 && shadows == 1 && s.mat < 4)
-        col += bioGlow(x.tr.hm, x.st, x.tr.clim, x.tr.pv, x.origin, x.seed, x.time, s.mat, h.voxel, h.normal, p, fp) * bio;
+        col += bioGlow(x.tr.hm, x.st, x.tr.clim, x.tr.pv, x.origin, x.seed, x.time, s.mat, s.vine, h.voxel, h.normal, p, fp) * bio;
     return col + s.emit;
 }
 
