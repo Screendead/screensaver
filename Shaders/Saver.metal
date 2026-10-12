@@ -1373,11 +1373,11 @@ static inline float isleSpot(float2 q, int plane, float cell, float pr, float r,
 
 // An island's glow at night: sparse spots on the rock of its flanks and keel, blue and turquoise; the tips of its
 // roots and vines, pulsing slowly; faint turquoise in a fall's spray. Pink on about one island in six (by place).
-static float3 isleGlow(int3 v, int3 n, float2 wq, float wy, float3 col, bool root, bool water, bool rock, float fp, uint seed, float time) {
+static float3 isleGlow(int3 v, int3 n, float2 wq, float wy, float gapTop, bool root, bool water, bool rock, float fp, uint seed, float time) {
     float far = 1.0 - smoothstep(0.5, 1.0, fp);
     bool pinkHere = hashf(hash2i(int2(floor(wq / 700.0)), seed + 750u)) < 0.17;
     if (root) {
-        float tip = 1.0 - smoothstep(1.0, 3.5, wy - col.z);
+        float tip = 1.0 - smoothstep(1.0, 3.5, wy - gapTop);
         if (tip <= 0.0) return 0.0;
         uint hr = hash2i(v.xz >> 1, seed + 751u);
         if (hashf(hr) > 0.55) return 0.0;
@@ -1386,7 +1386,7 @@ static float3 isleGlow(int3 v, int3 n, float2 wq, float wy, float3 col, bool roo
         return hue * 0.05 * tip * pulse * far;
     }
     if (water) {
-        float foot = 1.0 - saturate((wy - col.z) / 30.0);
+        float foot = 1.0 - saturate((wy - gapTop) / 30.0);
         return n.y == 0 ? ISLE_GLOW[1] * 0.02 * foot * far : 0.0;
     }
     if (!rock || n.y > 0) return 0.0;
@@ -1401,10 +1401,11 @@ static float3 isleGlow(int3 v, int3 n, float2 wq, float wy, float3 col, bool roo
 }
 
 // The shading table (fragment buffer 10; towers hold 9, giants 8): the islands nearest the camera (Sources/Islands.swift).
-// a: centre xz, reach, the underside's mean height; b: radius, top, keel, the hash's low 16 bits; c: its fall's lip xz,
-// top and foot (zero: none).
+// a: centre xz, reach, the underside's mean height; b: radius, top, keel, its mist's fade; c: its fall's lip xz, top and
+// foot (zero: none); mb: its mist bank's bounding sphere (radius 0: none), mp its puffs (centre, radius). World coordinates.
 constant int ISLE_TABLE = 16;
-struct IsleShade { float4 a; float4 b; float4 c; };
+constant int ISLE_MIST_PUFFS = 6;
+struct IsleShade { float4 a; float4 b; float4 c; float4 mb; float4 mp[ISLE_MIST_PUFFS]; };
 struct IsleTable { int4 n; IsleShade r[ISLE_TABLE]; };
 
 static inline Col terrainColumnS(int2 w, uint seed, int s, device const IsleRec* T) {
@@ -5212,7 +5213,7 @@ struct Surface {
     float wall;     // megaWall: among the great walls
     float3 nrm;     // the plane a structure's roof voxel or a tower's wall shades as (zero: the face normal)
     float3 emit;    // fire, lanterns and lit windows
-    float3 glow;    // an island's glow, which shade() eases in after dusk
+    float2 isle;    // on the 1-voxel map an island's body: (1 root, 2 water, 4 rock under its lip, 8 any; its gap's top), for its glow
     bool isleUnder; // under an island: the sky it hides is isleSkyOcc's
     float gy;       // the height the ground round it is judged from (groundL): above any island for an island's own rock
 };
@@ -5542,7 +5543,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     s.face = 0;
     s.nrm = 0;
     s.emit = 0;
-    s.glow = 0;
+    s.isle = 0;
     s.isleUnder = false;
     s.gy = p.y;
     int2 mapOrigin = tr.origin;
@@ -5853,7 +5854,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         s.tread = s.albedo;
         s.face = s.albedo;
     }
-    if (k == 0 && isleBody && fp < 1.0) s.glow = isleGlow(v, n, wq, wy, col, isleRoot, isleWater, float(v.y) < isleLo - 6.0, fp, seed, time);
+    if (k == 0 && isleBody) s.isle = float2(float((isleRoot ? 1 : 0) | (isleWater ? 2 : 0) | (float(v.y) < isleLo - 6.0 ? 4 : 0) | 8), col.z);
     if ((tree && float(v.y) >= col4.a) || vegLeaf || isleLeaf) {
         float leafLo = vegLeaf ? vegLo : isleLeaf ? isleLo : col4.a;
         // Leaves: deep, low-chroma greens that drift slowly across a grove; conifers cooler and darker.
@@ -6905,7 +6906,7 @@ static float isleSkyOcc(thread const Ctx& x, float3 p) {
     float2 w = p.xz + float2(x.origin), cam = x.tr.cam + float2(x.origin);
     float occ = 0.0;
     for (int i = 0; i < n; i++) {
-        IsleShade s = x.isles->r[i];
+        constant IsleShade& s = x.isles->r[i];
         float hh = s.a.w - p.y;
         float2 dv = w - s.a.xy;
         float r2 = dot(dv, dv);
@@ -7150,7 +7151,11 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         }
     }
     // An island's glow, from late dusk; gone before the 1-voxel ring's morph band, and not in rippled water.
-    if (SCENE_ISLES && shadows == 1 && any(s.glow > 0.0)) col += s.glow * smoothstep(0.04, -0.12, L.sun.y);
+    if (SCENE_ISLES && shadows == 1 && s.isle.x > 0.0 && L.sun.y < 0.04 && fp < 1.0) {
+        uint ib = uint(s.isle.x);
+        col += isleGlow(h.voxel, h.normal, p.xz + float2(x.origin), p.y, s.isle.y, (ib & 1u) != 0u, (ib & 2u) != 0u, (ib & 4u) != 0u, fp, x.seed, x.time)
+             * smoothstep(0.04, -0.12, L.sun.y);
+    }
     return col + s.emit;
 }
 
@@ -7239,7 +7244,8 @@ static float3 applyFog(thread const Ctx& x, float3 col, float3 o, float3 d, floa
 
 // Mist an island's puff (centre c, radii rad, density k per voxel at its core) lays along o + d t up to tEnd: the
 // closed-form integral of 1 - r^2 over the chord through the ellipsoid, taken about the ray's closest approach (about
-// the camera, at a kilometre, float cubes of t would cancel to noise); the chord's middle in mid.
+// the camera, at a kilometre, float cubes of t would cancel to noise). mid: the point of the puff's centre plane facing
+// the ray that the ray passes nearest (noise taken along the chord would streak a puff seen edge on).
 static inline float mistPuff(float3 o, float3 d, float tEnd, float3 c, float3 rad, float k, thread float3& mid) {
     float3 A = (o - c) / rad, B = d / rad;
     float a = dot(B, B);
@@ -7250,49 +7256,38 @@ static inline float mistPuff(float3 o, float3 d, float tEnd, float3 c, float3 ra
     float hl = sqrt(e / a);
     float t0 = max(tm - hl, 0.0), t1 = min(tm + hl, tEnd);
     if (t1 <= t0) return 0.0;
-    mid = o + d * (0.5 * (t0 + t1));
+    mid = c + q * rad;
     float s0 = t0 - tm, s1 = t1 - tm;
     return k * (e * (s1 - s0) - a * (s1 * s1 * s1 - s0 * s0 * s0) / 3.0);
 }
 
-// Banks of mist round the islands' keels (a ring of flattened puffs on most bigger islands) and the plume a fall
-// spills into: in-scatter in front of whatever the ray reaches by tEnd, drawn as opaque bodies with soft, lumpy edges,
-// never a thin veil over the land (which would read as terrain gone translucent). Lit as the cloud sheet is, in the
-// islands' shade. (colour, opacity); faded out before the islands' pipeline variant turns off. One noise per pixel, at
-// the chords' weighted middle.
+// Banks of mist round the islands' keels (a ring of flattened puffs on most bigger islands, laid out in the table) and the
+// plume a fall spills into: in-scatter in front of whatever the ray reaches by tEnd, drawn as opaque bodies with soft,
+// lumpy edges, never a thin veil over the land (which would read as terrain gone translucent). Lit as the cloud sheet
+// is, in the islands' shade. (colour, opacity); faded out (by the table) before the islands' pipeline variant turns off.
+// One noise per pixel, at the chords' weighted middle.
 static float4 isleMist(thread const Ctx& x, float3 o, float3 d, float tEnd) {
     int n = min(x.isles->n.x, ISLE_TABLE);
-    float2 og = float2(x.origin), cam = x.tr.cam + og;
-    float tau = 0.0, plume = 0.0;
+    float3 og = float3(float(x.origin.x), 0.0, float(x.origin.y));
+    float tau = 0.0, plume = 0.0, hw = 0.0;
     float4 acc = 0.0;   // weighted chord middle (xyz) and puff size (w)
-    float hw = 0.0;
     for (int i = 0; i < n; i++) {
-        IsleShade s = x.isles->r[i];
-        float R = s.b.x;
-        float fade = 1.0 - smoothstep(2400.0, 3000.0, length(s.a.xy - cam));
-        if (R < 60.0 || fade <= 0.0) continue;
-        uint h = uint(s.b.w);
-        float th = s.b.y - s.b.z;
-        float2 c = s.a.xy - og;
-        float an0 = hashf(pcg(h + 740u));
-        if (an0 < 0.7) {
-            // Bound: a sphere round the ring of puffs.
-            float3 oc = o - float3(c.x, s.b.y - 0.48 * th, c.y);
-            float Rb = 1.4 * R + 30.0;
-            float bb = dot(oc, d), cb = dot(oc, oc) - Rb * Rb;
+        constant IsleShade& s = x.isles->r[i];
+        float fade = s.b.w;
+        if (fade <= 0.0) continue;
+        if (s.mb.w > 0.0) {
+            float3 oc = o - (s.mb.xyz - og);
+            float bb = dot(oc, d), cb = dot(oc, oc) - s.mb.w * s.mb.w;
             if (bb * bb - cb > 0.0 && (cb < 0.0 || bb < 0.0)) {
-                for (int j = 0; j < 6; j++) {
-                    uint hj = pcg(h + 741u + uint(j) * 7u);
-                    float an = an0 * 8.9759 + float(j) * 1.0471976 + 0.5 * (hashf(hj) - 0.5);
-                    float rr = R * (0.6 + 0.35 * hashf(pcg(hj)));
-                    float3 pc = float3(c.x + cos(an) * rr, s.b.y - (0.4 + 0.16 * hashf(pcg(hj + 1u))) * th, c.y + sin(an) * rr);
-                    float rh = (0.3 + 0.14 * hashf(pcg(hj + 2u))) * R + 15.0;
+                for (int j = 0; j < ISLE_MIST_PUFFS; j++) {
+                    float4 m = s.mp[j];
+                    float3 pc = m.xyz - og;
                     float3 mid;
-                    float t = mistPuff(o, d, tEnd, pc, float3(rh, 0.28 * rh, rh), 1.5 / rh, mid) * fade;
+                    float t = mistPuff(o, d, tEnd, pc, float3(m.w, 0.28 * m.w, m.w), 1.5 / m.w, mid) * fade;
                     if (t <= 0.0) continue;
                     tau += t;
-                    acc += float4(mid, rh) * t;
-                    hw += saturate((mid.y - pc.y) / (0.28 * rh) * 0.5 + 0.5) * t;
+                    acc += float4(mid, m.w) * t;
+                    hw += saturate((mid.y - pc.y) / (0.28 * m.w) * 0.5 + 0.5) * t;
                 }
             }
         }
@@ -7300,32 +7295,38 @@ static float4 isleMist(thread const Ctx& x, float3 o, float3 d, float tEnd) {
             // The plume: spray billowing out round the fall's foot in three puffs, never down to the ground.
             float2 u = normalize(s.c.xy - s.a.xy);
             float L = s.c.z - s.c.w;
-            float rw = 8.0 + 0.03 * R;
-            for (int j = 0; j < 3; j++) {
-                float fj = float(j);
-                float3 pc = float3(s.c.x - og.x + u.x * (3.0 + 3.0 * fj), s.c.w + L * (0.18 - 0.16 * fj), s.c.y - og.y + u.y * (3.0 + 3.0 * fj));
-                float r = rw * (1.0 + 0.45 * fj);
-                float3 mid;
-                float t = mistPuff(o, d, tEnd, pc, float3(r, L * (0.3 - 0.07 * fj), r), 1.3 / r, mid) * fade;
-                if (t <= 0.0) continue;
-                tau += t;
-                plume += t;
-                acc += float4(mid, r) * t;
-                hw += 0.85 * t;
+            float rw = 8.0 + 0.03 * s.b.x;
+            float3 lip = float3(s.c.x, s.c.w, s.c.y) - og;
+            float3 oc = o - (lip - float3(0.0, 0.05 * L, 0.0));
+            float Rb = 0.45 * L + 2.0 * rw + 6.0;
+            float bb = dot(oc, d), cb = dot(oc, oc) - Rb * Rb;
+            if (bb * bb - cb > 0.0 && (cb < 0.0 || bb < 0.0)) {
+                for (int j = 0; j < 3; j++) {
+                    float fj = float(j);
+                    float3 pc = lip + float3(u.x * (3.0 + 3.0 * fj), L * (0.18 - 0.16 * fj), u.y * (3.0 + 3.0 * fj));
+                    float r = rw * (1.0 + 0.45 * fj);
+                    float3 mid;
+                    float t = mistPuff(o, d, tEnd, pc, float3(r, L * (0.3 - 0.07 * fj), r), 1.3 / r, mid) * fade;
+                    if (t <= 0.0) continue;
+                    tau += t;
+                    plume += t;
+                    acc += float4(mid, r) * t;
+                    hw += 0.85 * t;
+                }
             }
         }
     }
     if (tau <= 0.0) return 0.0;
     float3 mid = acc.xyz / tau;
     float sz = acc.w / tau;
-    float3 mw = mid + float3(og.x, 0.0, og.y);
+    float3 mw = mid + og;
     // The finer octave fades before its lumps near a pixel, or it rings.
     float fpm = length(mid - o) * x.pixelAngle;
-    float s0 = max(0.25 * sz, 20.0), s1 = max(0.09 * sz, 7.0);
+    float s0 = max(0.35 * sz, 24.0), s1 = max(0.1 * sz, 8.0);
     float lump = perlin3(mw / s0 + float3(x.time * 0.02, x.time * 0.015, x.time * 0.013), x.seed + 742u)
-               + 0.5 * perlin3(mw / s1 + float3(0.0, x.time * 0.05, 0.0), x.seed + 743u) * (1.0 - smoothstep(0.15, 0.4, fpm / s1));
+               + 0.4 * perlin3(mw / s1 + float3(0.0, x.time * 0.05, 0.0), x.seed + 743u) * (1.0 - smoothstep(0.15, 0.4, fpm / s1));
     float h01 = hw / tau;
-    tau *= saturate(0.45 + 1.1 * lump);
+    tau *= saturate(0.55 + 0.9 * lump);
     float a = smoothstep(0.1, 0.75, 1.0 - exp(-tau));
     if (a <= 0.0) return 0.0;
     float2 dh = normalize(d.xz + 1e-5), sh2 = normalize(x.L.sun.xz + 1e-5);
@@ -7339,7 +7340,7 @@ static float4 isleMist(thread const Ctx& x, float3 o, float3 d, float tEnd) {
     lit = mix(lit, litG, x.L.gold);
     lit = mix(lit, float3(0.020, 0.025, 0.040) * (0.5 + 0.7 * shadow) + x.L.skyHor * 0.7, x.L.night);
     // At night the spray round a fall's foot carries a faint turquoise glow (the shared palette's #2fe3d0).
-    lit += float3(0.028, 0.768, 0.630) * 0.035 * x.L.night * saturate(plume / max(tau, 1e-4));
+    lit += ISLE_GLOW[1] * 0.035 * x.L.night * saturate(plume / max(tau, 1e-4));
     lit = applyFogT(x, lit, o, d, fogTransmittance(x, o, d, length(mid - o), 0));
     return float4(lit, a);
 }

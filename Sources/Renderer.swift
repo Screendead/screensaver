@@ -1470,8 +1470,9 @@ final class Renderer: NSObject, MTKViewDelegate {
             let bands = (isles || world.bandsNear(cam2, radius: Clipmap.handoff(0) + 40)) && Renderer.profile != "noband"
             let shade = bands && isles
             f.shadow.w = shade ? 1 : 0
-            var isleTable = Islands.table(world.isles, near: cam2, within: 3000)
             let tb = camera.basis, tanV = tan(25.0 * .pi / 180) * 1.05
+            var isleTable = Islands.table(world.isles, near: cam2, within: 3000,
+                                          view: (camera.position, tb.fwd, atan(tanV * (1 + Double(aspect) * Double(aspect)).squareRoot())))
             towers.frameTable(eye: camera.position, fwd: tb.fwd, right: tb.right, up: tb.up, tanH: tanV * Double(aspect), tanV: tanV)
             enc.setRenderPipelineState(scenePipelines[towers.tableCount > 0 ? 1 : 0][shade ? 2 : bands ? 1 : 0])
             enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)

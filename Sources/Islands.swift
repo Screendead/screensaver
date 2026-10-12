@@ -41,7 +41,9 @@ enum Islands {
     static let recordSize = 64
     // Must match ISLE_TABLE and IsleShade in Shaders/Saver.metal: the islands the shading reads, nearest the camera first.
     static let tableSize = 16
-    static let tableBytes = 16 + tableSize * 48
+    static let mistPuffs = 6
+    static let entryBytes = 64 + mistPuffs * 16
+    static let tableBytes = 16 + tableSize * entryBytes
     // VR_ISLE_FIELD=1: the test field round (-3500, -2500) in place of island country; 2: no islands (tests).
     static let field = Int32(ProcessInfo.processInfo.environment["VR_ISLE_FIELD"] ?? "") ?? 0
 
@@ -64,9 +66,18 @@ enum Islands {
     }
 
     // The shading table: the islands nearest p within reach of the view (count, then per island centre xz, reach and
-    // underside's mean height; radius, top, keel and the hash's low bits; its fall's lip xz, top and foot, or zeros), as
-    // bytes for setFragmentBytes.
-    static func table(_ list: [IslandInfo], near p: SIMD2<Double>, within d: Double) -> [UInt8] {
+    // underside's mean height; radius, top, keel and its mist's fade with distance from p; its fall's lip xz, top and
+    // foot, or zeros; its mist bank's bounding sphere, radius 0 for none, and puffs (centre, radius), all in world
+    // coordinates), as bytes for setFragmentBytes. view: the eye, its forward axis and the half angle of a cone round the
+    // frame; mist that lies wholly outside it is left out (the scene pass draws mist on primary rays only).
+    static func table(_ list: [IslandInfo], near p: SIMD2<Double>, within d: Double,
+                      view: (eye: SIMD3<Double>, fwd: SIMD3<Double>, half: Double)? = nil) -> [UInt8] {
+        func seen(_ c: SIMD3<Double>, _ r: Double) -> Bool {
+            guard let v = view else { return true }
+            let w = c - v.eye, l = simd_length(w)
+            if l <= r { return true }
+            return acos(max(-1, min(1, simd_dot(w / l, v.fwd)))) < v.half + asin(min(1, r / l))
+        }
         let near = list.filter { simd_length($0.pos - p) < d + $0.reach }.sorted { simd_length($0.pos - p) < simd_length($1.pos - p) }
         var bytes = [UInt8](repeating: 0, count: tableBytes)
         let n = min(near.count, tableSize)
@@ -74,11 +85,31 @@ enum Islands {
             b.storeBytes(of: Int32(n), as: Int32.self)
             for i in 0..<n {
                 let s = near[i]
-                let o = 16 + i * 48
+                let o = 16 + i * entryBytes
+                let d = simd_length(s.pos - p)
+                let fade = 1 - Provinces.smoothstep(2400, 3000, d)
+                let R = s.radius, th = s.top - s.keel
+                // A ring of flattened puffs round the keel, on most bigger islands, at its flanks' lower half; the plume at a
+                // fall's foot (bounds as isleMist takes them).
+                let ring = SIMD3(s.pos.x, s.top - 0.48 * th, s.pos.y), ringR = 1.4 * R + 30
+                let hasRing = R >= 60 && Provinces.hashf(Provinces.pcg(s.hash &+ 740)) < 0.85 && seen(ring, ringR)
+                let plume = s.fall.map { seen(SIMD3($0.x, $0.w - 0.05 * ($0.z - $0.w), $0.y), 0.45 * ($0.z - $0.w) + 2 * (8 + 0.03 * R) + 6) } ?? false
                 b.storeBytes(of: SIMD4<Float>(Float(s.pos.x), Float(s.pos.y), Float(s.reach), Float(0.5 * (s.keel + s.top))), toByteOffset: o, as: SIMD4<Float>.self)
-                b.storeBytes(of: SIMD4<Float>(Float(s.radius), Float(s.top), Float(s.keel), Float(s.hash & 0xffff)), toByteOffset: o + 16, as: SIMD4<Float>.self)
+                b.storeBytes(of: SIMD4<Float>(Float(R), Float(s.top), Float(s.keel), Float(R >= 60 && (hasRing || plume) ? fade : 0)), toByteOffset: o + 16, as: SIMD4<Float>.self)
                 let f = s.fall.map { SIMD4<Float>(Float($0.x), Float($0.y), Float($0.z), Float($0.w)) } ?? SIMD4<Float>()
                 b.storeBytes(of: f, toByteOffset: o + 32, as: SIMD4<Float>.self)
+                let an0 = Provinces.hashf(Provinces.pcg(s.hash &+ 740))
+                guard hasRing, fade > 0 else { continue }
+                b.storeBytes(of: SIMD4<Float>(Float(ring.x), Float(ring.y), Float(ring.z), Float(ringR)), toByteOffset: o + 48, as: SIMD4<Float>.self)
+                for j in 0..<mistPuffs {
+                    let hj = Provinces.pcg(s.hash &+ 741 &+ UInt32(j) &* 7)
+                    let an = an0 * 8.9759 + Double(j) * 2 * .pi / Double(mistPuffs) + 0.5 * (Provinces.hashf(hj) - 0.5)
+                    let rr = R * (0.6 + 0.35 * Provinces.hashf(Provinces.pcg(hj)))
+                    let y = s.top - (0.4 + 0.16 * Provinces.hashf(Provinces.pcg(hj &+ 1))) * th
+                    let rh = (0.3 + 0.14 * Provinces.hashf(Provinces.pcg(hj &+ 2))) * R + 15
+                    b.storeBytes(of: SIMD4<Float>(Float(s.pos.x + cos(an) * rr), Float(y), Float(s.pos.y + sin(an) * rr), Float(rh)),
+                                 toByteOffset: o + 64 + 16 * j, as: SIMD4<Float>.self)
+                }
             }
         }
         return bytes
