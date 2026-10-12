@@ -1934,8 +1934,9 @@ static float2 jungleWindow(int2 c, thread const G& ground) {
 // Whether a forest may stand at world column c for its nearness to a massif's wall.
 template <typename G>
 static bool wallClear(int2 c, thread const G& ground, uint seed) {
+    // Under a quarter (the alpine ranges' fringe of karst) the bar, 4 * WALL_AT, is past any apron's range.
     float wall = wallCountry(float2(c) + 0.5, seed);
-    if (wall <= 0.0) return true;
+    if (wall < 0.25) return true;
     float lo = 1e9, hi = -1e9;
     for (int k = 0; k < 9; k++) {
         float h = ground.at(c + int2(k % 3 - 1, k / 3 - 1) * 10);
