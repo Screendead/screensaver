@@ -1501,7 +1501,7 @@ static bool caveTry(float2 P, uint h, uint seed, thread CaveRec& r) {
     if (yF < SEA + 1.5 || pr[j - 1] > yF + 1.0) return false;
     float tm = float(2 * j - 16) + 1.0;
     float2 m = floor(P + u * tm) + 0.5;
-    bool grotto = U > 250.0 && best > 30.0 && hashf(pcg(h + 4u)) < 0.15;
+    bool grotto = U > 250.0 && best > 30.0 && hashf(pcg(h + 4u)) < 0.3;
     float rr = hashf(pcg(h + 3u));
     float W = grotto ? 10.0 + 6.0 * rr : 4.0 + 7.0 * rr;
     float Hc = clamp(W * (1.1 + 0.6 * hashf(pcg(h + 5u))), 6.0, grotto ? 24.0 : 15.0);
@@ -1534,7 +1534,7 @@ static bool caveTry(float2 P, uint h, uint seed, thread CaveRec& r) {
     }
     if (L < 10.0) return false;
     r.m = m; r.u = u; r.yF = yF; r.W = W; r.L = L; r.Hc = Hc; r.h = h;
-    r.flags = CV_ON | (grotto ? CV_GROTTO : 0u);
+    r.flags = CV_ON | (grotto && W >= 8.0 ? CV_GROTTO : 0u);
     // Someone lives in about one cave in seven whose floor is level with the ground in front, below the snow.
     float snow = snowlineAt(altitudeTemp(cl.temp, yF));
     if (W >= 4.0 && Hc >= 6.0 && L >= 14.0 && yF < snow - 10.0 && abs(pr[j - 1] - yF) <= 1.0 && hashf(pcg(h + 7u)) < 0.16)
@@ -5532,6 +5532,8 @@ static void caveDress(thread const Terrain& tr, thread Surface& s, int3 n, float
     // stays a warm spark in the mountainside at night out to the haze.
     if ((r.flags & CV_HOME) != 0u && farW > 0.0 && tr.caveFire > 0.03 && a > -2.0 && a < caveHearthA(r) + 2.0 && y < r.Hc + 1.0) {
         float g = (1.0 - smoothstep(0.6 * r.W, 1.2 * r.W, abs(b))) * (1.0 - smoothstep(0.5 * r.Hc, r.Hc + 1.0, y));
+        // Gone with the mouth itself across level 3's morph band (its gap closes from the top there).
+        g *= 1.0 - smoothstep(tr.lod[3].x, tr.lod[3].z, length(wq - float2(tr.origin) - tr.cam));
         s.emit += LAMP_COL[L_HEARTH] * LAMP_I[L_HEARTH] * 0.08 * g * farW * tr.caveFire;
     }
     // Deep in, a few mosses and fungi glow at night, in the land's glow hues, slow to swell.
@@ -5840,7 +5842,8 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     } else {
         s.albedo = stone * 0.9;
     }
-    if (tr.caves > 0.0 && !tree && !built && !vegLeaf) {
+    // Only beside a rock gap: every face a cave dresses is one of its columns' or their neighbours'.
+    if (tr.caves > 0.0 && s.gapNear && !tree && !built && !vegLeaf) {
         float green = smoothstep(0.25, 0.5, c.moist) * smoothstep(0.18, 0.32, c.temp) * (1.0 - smoothstep(0.15, 0.45, desert))
                     * (1.0 - smoothstep(snowline - 20.0, snowline, H));
         caveDress(tr, s, n, w, wq, wy, cs, fpA, underGap, green, seed, time);

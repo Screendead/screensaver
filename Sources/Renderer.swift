@@ -2070,7 +2070,7 @@ enum Snapshot {
             let v = spec.split(separator: ",").compactMap { Double($0) }
             if v.count >= 3 {
                 let here = SIMD2<Float>(Float(r.camera.position.x), Float(r.camera.position.z))
-                // homes: 1 lived-in caves only; 2 any cave of a good size seen clear across `distance` (by the CPU heights).
+                // homes: 1 lived-in caves only; 2 any cave of a good size seen clear across `distance` (by the CPU heights); 3 grottoes.
                 let b0 = v[2] * .pi / 180
                 func clear(_ c: CaveRec) -> Bool {
                     let m = SIMD2(Double(c.m.x), Double(c.m.y)), u = SIMD2(Double(c.u.x), Double(c.u.y))
@@ -2085,7 +2085,7 @@ enum Snapshot {
                     return true
                 }
                 let mode = v.count > 4 ? Int(v[4]) : 0
-                let pick = r.world.caves.filter { mode == 0 || (mode == 1 && $0.flags & 2 != 0) || (mode == 2 && clear($0)) }
+                let pick = r.world.caves.filter { mode == 0 || (mode == 1 && $0.flags & 2 != 0) || (mode == 2 && clear($0)) || (mode == 3 && $0.flags & 4 != 0) }
                     .sorted { simd_length($0.m - here) < simd_length($1.m - here) }
                 let rank = v.count > 3 ? Int(v[3]) : 0
                 if rank < pick.count {
