@@ -7259,8 +7259,10 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     }
     float ndl = mix(max(dot(nl, L.key), 0.0), max(L.key.y, 0.0), lone);
     // A low moon lights a step's riser several times brighter than its tread, drawing a highlight line along
-    // every step; under the moon only cliffs outshine the ground they stand in.
+    // every step; under the moon only cliffs outshine the ground they stand in. A canopy's steps are steps too: no
+    // strata to keep, and its moon-facing risers would rule a pale line along every crest.
     if (h.normal.y == 0 && s.mat == 0) ndl = mix(ndl, min(ndl, max(L.key.y, 0.0)), L.night * (1.0 - keep));
+    if (h.normal.y == 0 && s.mat == 1) ndl = mix(ndl, min(ndl, max(L.key.y, 0.0)), L.night);
     // Low structure faces (cairns, boats, deck edges, fallen stones) are steps too; uprights and house walls stay walls.
     if (h.normal.y == 0 && built && drop <= 2.0 && !any(s.nrm != 0.0)) ndl = mix(ndl, min(ndl, max(L.key.y, 0.0)), L.night);
     float hiSun = smoothstep(0.15, 0.45, L.key.y) * (1.0 - L.night);
