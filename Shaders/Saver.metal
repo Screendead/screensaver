@@ -1253,6 +1253,15 @@ static inline Col islandColumn(Col col, int2 w, uint seed, int s, device const I
     return col;
 }
 
+// An island's rock: dark basalt and umber in soft courses that drift sideways, so no bed reads as a line across a keel.
+static inline float3 isleRock(float y, float2 w, uint seed, float fp) {
+    float yd = y + 4.0 * perlin2(w / 70.0, seed + 713u);
+    float k = saturate(0.5 + 0.7 * perlin2(float2(yd / 11.0, 0.37) + w / 500.0, seed + 714u));
+    float3 c = mix(float3(0.105, 0.098, 0.11), float3(0.165, 0.122, 0.088), smoothstep(0.25, 0.75, k));
+    if (fp < 3.0) c *= 1.0 + 0.14 * perlin2(float2(w.x + w.y, yd) / 19.0, seed + 715u) * (1.0 - smoothstep(1.0, 3.0, fp));
+    return c;
+}
+
 // The shading table (fragment buffer 10; towers hold 9, giants 8): the islands nearest the camera (Sources/Islands.swift).
 // a: centre xz, reach, the underside's mean height; b: radius, top, keel.
 constant int ISLE_TABLE = 16;
@@ -5478,7 +5487,8 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     bool beach = H <= SEA + 1.2;
     // Rock tone shows on side and under faces, and on high treads; a low tread never reads it.
     bool needStone = !beach && !vegVox && (!(n.y > 0 && !underGap) || Hc - SEA > 0.55 * 110.0);
-    float3 stone = needStone ? strataTone(wy, wq, seed, max(desert, rimW), fpA, wallM, lite) : float3(0);
+    float3 stone = !needStone ? float3(0) : isleCol && float(v.y) >= col.z ? isleRock(wy, wq, seed, fpA)
+                 : strataTone(wy, wq, seed, max(desert, rimW), fpA, wallM, lite);
 
     float lagoon = smoothstep(0.0, 0.35, lagoonAmount(c));
     // Pale ground (sand, salt, snow) sits well below the clouds, and drifts in tone so open flats never read as one sheet.
@@ -5610,6 +5620,12 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         }
     } else {
         s.albedo = stone * 0.9;
+    }
+    // An island's flanks and keel are rock below a lip of earth: far off, their risers prefilter to it, not the meadow.
+    if (isleCol && float(v.y) >= col.z && float(v.y) < col.x - 6.0 && n.y <= 0) {
+        s.albedo = stone * 0.9;
+        s.tread = s.albedo;
+        s.face = s.albedo;
     }
     // Roots and vines under an island: umber and olive, a clump at a time.
     if (isleRoot) {
