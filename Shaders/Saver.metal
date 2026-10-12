@@ -1851,8 +1851,51 @@ static bool giantColumn(thread const Giant& g, float2 wq, float gl, thread GRuns
 // under it, so the coarse rings rebuild the same forest.
 constant float JUNGLE_CELL = 8.0;
 constant float EMERGENT_CELL = 26.0;
-// Ground range over a 10-voxel window (plantTrees' +-5) from which the roof steps down, and past which none stands.
-constant float JUNGLE_STEEP = 7.0, JUNGLE_CLIFF = 13.0;
+// Ground range over a 10-voxel window (jungleWindow's +-5) from which the roof steps down, and past which none stands.
+// Mountain flanks rise 1.3-3 voxels a voxel (range 17-42): the roof clings to them, lower on the steepest; faces of 5
+// and more and a massif's walls (range 60 to hundreds) are bare rock. Emergents stand only on gentle ground (range
+// under EMERGENT_STEEP).
+constant float JUNGLE_STEEP = 28.0, JUNGLE_CLIFF = 60.0, EMERGENT_STEEP = 7.0;
+
+// Ground heights at world columns, as each map judges a forest's site: the trees on level 0 and the coarse rings over
+// them must read the same ground, or the forest's edge moves with the ring.
+// The 1-voxel map (plantTrees), clamped to its edge.
+struct MapGround {
+    texture2d<float, access::read> map;
+    int2 origin;
+    float at(int2 w) const {
+        int n = int(map.get_width());
+        return map.read(uint2(clamp(w - origin, int2(0), int2(n - 1)))).r;
+    }
+};
+// Raw terrain (coarse rings).
+struct TerrainGround {
+    uint seed;
+    float at(int2 w) const { return terrainColumn(w, seed).h; }
+};
+// The 1-voxel map's raw columns where it has them: reduceMaxBase must judge level 1's forest exactly as the coarse
+// kernel does, or mip 1 would not bound the level-1 roof.
+struct RawGround {
+    texture2d<float, access::read> raw;
+    int2 origin;
+    uint seed;
+    float at(int2 w) const {
+        int2 q = w - origin;
+        int n = int(raw.get_width());
+        return all(q >= 0) && all(q < n) ? raw.read(uint2(q)).r : terrainColumn(w, seed).h;
+    }
+};
+
+// The jungle's ground round world column c: (range, mean) over a 3x3 window 5 apart.
+template <typename G>
+static float2 jungleWindow(int2 c, thread const G& ground) {
+    float lo = 1e9, hi = -1e9, sum = 0.0;
+    for (int k = 0; k < 9; k++) {
+        float h = ground.at(c + int2(k % 3 - 1, k / 3 - 1) * 5);
+        lo = min(lo, h); hi = max(hi, h); sum += h;
+    }
+    return float2(hi - lo, sum / 9.0);
+}
 
 struct JCan { float lo, hi; bool trunk; };
 
@@ -1986,6 +2029,19 @@ static inline bool oldTreeIn(int2 cc, uint seed, float O, thread float2& ctr, th
     R = (vet ? 7.5 : 4.5) + 0.03 * Ht * hashf(pcg(h + 5u));
     tr = vet ? 1.9 : Ht > 62.0 ? 1.2 : 0.8;
     return true;
+}
+
+// The ground's range over the four columns 3 from a trunk past which no old tree stands: they climb mountain flanks
+// (to 3 voxels a voxel), not a massif's face.
+constant float OLD_CLIFF = 18.0;
+
+// Whether an old tree's trunk at world column c has a site (not on a cliff), and its ground gt.
+template <typename G>
+static bool oldSite(int2 c, thread const G& ground, thread float& gt) {
+    gt = ground.at(c);
+    float s0 = ground.at(c + int2(3, 0)), s1 = ground.at(c - int2(3, 0));
+    float s2 = ground.at(c + int2(0, 3)), s3 = ground.at(c - int2(0, 3));
+    return max(max(s0, s1), max(s2, s3)) - min(min(s0, s1), min(s2, s3)) <= OLD_CLIFF;
 }
 
 // The intervals old-growth tree (trunk ground gt) adds to world column centre w; lod >= 1: crowns only, as a top.
@@ -2255,15 +2311,11 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
     float J = col.r >= SEA + 2.0 ? provinces(w + seedOffset(seed), seed).x : 0.0;
     if (tg.y > tg.x && (J >= 0.15 || (col.r >= SEA + 2.0 && provinces(w + seedOffset(seed), seed).y >= 0.2)))
         gAdd(rr, float(tg.x), float(tg.y), GM_LEAF);
+    MapGround mg { src, info.xy };
     if (J >= 0.15) {
         // The roof follows the ground smoothed over a few columns, and keeps off cliffs.
-        float gs = 0.0, gmin = 1e9, gmax = -1e9;
-        for (int k = 0; k < 9; k++) {
-            int2 q = clamp(p + int2(k % 3 - 1, k / 3 - 1) * 5, int2(0), int2(int(n) - 1));
-            float h = src.read(uint2(q)).r;
-            gs += h; gmin = min(gmin, h); gmax = max(gmax, h);
-        }
-        gs /= 9.0;
+        float2 jw = jungleWindow(wc, mg);
+        float gs = jw.y;
         uint hc = hash2i(wc, seed + 326u);
         int2 e0 = int2(floor(w / EMERGENT_CELL));
         bool eTrunk = false;
@@ -2282,13 +2334,13 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
                 float t0 = src.read(uint2(tq + int2(5, 0))).r, t1 = src.read(uint2(tq - int2(5, 0))).r;
                 float t2 = src.read(uint2(tq + int2(0, 5))).r, t3 = src.read(uint2(tq - int2(0, 5))).r;
                 float tr = max(max(max(t0, t1), max(t2, t3)), tc.r) - min(min(min(t0, t1), min(t2, t3)), tc.r);
-                if (tc.r < SEA + 10.0 || tc.b > tc.g || tc.a < 0.0 || abs(tc.r - gs) > 6.0 || tr >= JUNGLE_STEEP) continue;
+                if (tc.r < SEA + 10.0 || tc.b > tc.g || tc.a < 0.0 || abs(tc.r - gs) > 6.0 || tr >= EMERGENT_STEEP) continue;
                 eTrunk = eTrunk || length(w - ec) < (R > 9.0 ? 1.2 : 0.75);
                 emergentIntervals(w, ec, tc.r, y0, R, pads, eh, seed, 0, rr);
             }
         // A trunk column is bark through the roof (merged with it, its leaves would start at the roof's underside).
         // Steep ground steps the roof down to bushes on each column's own ground; a cliff carries none.
-        float steep = gmax - gmin;
+        float steep = jw.x;
         if (!cleared && !eTrunk && steep < JUNGLE_CLIFF) {
             float keep = 1.0 - smoothstep(JUNGLE_STEEP, JUNGLE_CLIFF, steep);
             JCan cn = jungleCanopy(w, mix(G, gs, keep), J, seed, keep);
@@ -2316,11 +2368,9 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
                 int2 tq = int2(floor(tc)) - info.xy;
                 if (any(tq < 3) || any(tq >= int(n) - 3)) continue;
                 float4 t0 = src.read(uint2(tq));
-                // On level ground, clear of water, rock and buildings.
-                float s0 = src.read(uint2(tq + int2(3, 0))).r, s1 = src.read(uint2(tq - int2(3, 0))).r;
-                float s2 = src.read(uint2(tq + int2(0, 3))).r, s3 = src.read(uint2(tq - int2(0, 3))).r;
-                if (t0.r < SEA + 2.0 || t0.b > t0.g || t0.a < 0.0 ||
-                    max(max(s0, s1), max(s2, s3)) - min(min(s0, s1), min(s2, s3)) > 6.0) continue;
+                // Off cliffs, clear of water, rock and buildings.
+                float gt;
+                if (t0.r < SEA + 2.0 || t0.b > t0.g || t0.a < 0.0 || !oldSite(int2(floor(tc)), mg, gt)) continue;
                 covered = oldTreeIntervals(w, tc, t0.r, Ht, R, tr, th, seed, true, rr) > G || covered;
             }
         // Ferns on the mossy floor.
@@ -3906,35 +3956,7 @@ static float emergentTop(float2 w, float2 ctr, float gt, float y0, float R, int 
 // emergents or the planted trees as plantTrees makes them (without the checks that need the map: ledges, carved
 // rock), and the column's top the mean of the samples' (leaves, else ground) rounded, as its ground is. Returns
 // (top, depth of leaves under it); H is the bare column's height. Grove density and climate are taken once per column.
-// ground: the raw terrain height at a world column, for the jungle's steepness window.
-struct TerrainGround {
-    uint seed;
-    float at(int2 w) const { return terrainColumn(w, seed).h; }
-};
-// The 1-voxel map's raw columns where it has them: reduceMaxBase must judge level 1's slope exactly as the coarse
-// kernel does, or mip 1 would not bound the level-1 roof.
-struct RawGround {
-    texture2d<float, access::read> raw;
-    int2 origin;
-    uint seed;
-    float at(int2 w) const {
-        int2 q = w - origin;
-        int n = int(raw.get_width());
-        return all(q >= 0) && all(q < n) ? raw.read(uint2(q)).r : terrainColumn(w, seed).h;
-    }
-};
-
-// The jungle's steepness at world column c as plantTrees measures it: the ground's range over a 3x3 window 5 apart.
-template <typename G>
-static float jungleSteep(int2 c, thread const G& ground) {
-    float lo = 1e9, hi = -1e9;
-    for (int k = 0; k < 9; k++) {
-        float h = ground.at(c + int2(k % 3 - 1, k / 3 - 1) * 5);
-        lo = min(lo, h); hi = max(hi, h);
-    }
-    return hi - lo;
-}
-
+// ground: heights for the forest's site checks (jungleWindow, oldSite), as plantTrees reads them.
 template <typename G>
 static float2 coarseVeg(int2 cw, int k, float4 hs4, float H, uint seed, thread const G& ground) {
     int s = 1 << k, off = s >> 2, hs = s >> 1;
@@ -3944,11 +3966,10 @@ static float2 coarseVeg(int2 cw, int k, float4 hs4, float H, uint seed, thread c
     float J = provinces(centre + so, seed).x;
     float sum = 0.0, leaves = 0.0;
     int2 o4[4] = { int2(0), int2(hs, 0), int2(0, hs), int2(hs, hs) };
-    float spread = max(max(hs4.x, hs4.y), max(hs4.z, hs4.w)) - min(min(hs4.x, hs4.y), min(hs4.z, hs4.w));
     if (J >= 0.15) {
         // The roof steps down on steep ground and stands on no cliff, as plantTrees grows it, judged on its own window
         // round the column's centre: samples a few voxels apart on terraced ground often share a tread and read level.
-        float steep = jungleSteep(cw * s + s / 2, ground);
+        float steep = jungleWindow(cw * s + s / 2, ground).x;
         for (int i = 0; i < 4; i++) {
             float2 wi = float2(b + o4[i]) + 0.5;
             float g = hs4[i], t = g;
@@ -3962,7 +3983,7 @@ static float2 coarseVeg(int2 cw, int k, float4 hs4, float H, uint seed, thread c
                         float y0, R;
                         int pads;
                         uint eh;
-                        if (steep >= JUNGLE_STEEP || g < SEA + 10.0 || !emergentIn(e0 + int2(ii, j), seed, J, ec, y0, R, pads, eh)) continue;
+                        if (steep >= EMERGENT_STEEP || g < SEA + 10.0 || !emergentIn(e0 + int2(ii, j), seed, J, ec, y0, R, pads, eh)) continue;
                         if (length_squared(wi - ec) > 4.4 * R * R) continue;
                         t = max(t, emergentTop(wi, ec, g, y0, R, pads, eh, seed));
                     }
@@ -3972,26 +3993,29 @@ static float2 coarseVeg(int2 cw, int k, float4 hs4, float H, uint seed, thread c
         }
     } else if (J < 0.15 && provinces(centre + so, seed).y >= 0.2) {
         float O = provinces(centre + so, seed).y;
-        if (spread >= max(10.0, 0.6 * float(s))) return float2(H, 0);
         GRuns none;
         none.n = 0;
-        for (int i = 0; i < 4; i++) {
-            float2 wi = float2(b + o4[i]) + 0.5;
-            float g = hs4[i], t = g;
-            if (g >= SEA + 2.0) {
-                int2 c0 = int2(floor(wi / OLD_CELL));
-                for (int j = -1; j <= 1; j++)
-                    for (int ii = -1; ii <= 1; ii++) {
-                        float2 tc;
-                        float Ht, R, tr;
-                        uint th;
-                        if (!oldTreeIn(c0 + int2(ii, j), seed, O, tc, Ht, R, tr, th)) continue;
-                        if (length_squared(wi - tc) > 1.3 * R * R) continue;
-                        t = max(t, oldTreeIntervals(wi, tc, g, Ht, R, tr, th, seed, false, none));
-                    }
+        float4 t4 = hs4;
+        // The trees of the cells round the four samples, each judged once: its site costs five terrain columns.
+        int2 cA = int2(floor((float2(b) + 0.5) / OLD_CELL)) - 1, cB = int2(floor((float2(b + hs) + 0.5) / OLD_CELL)) + 1;
+        for (int cy = cA.y; cy <= cB.y; cy++)
+            for (int cx = cA.x; cx <= cB.x; cx++) {
+                float2 tc;
+                float Ht, R, tr, gt;
+                uint th;
+                if (!oldTreeIn(int2(cx, cy), seed, O, tc, Ht, R, tr, th)) continue;
+                bool near = false;
+                for (int i = 0; i < 4; i++) near = near || (hs4[i] >= SEA + 2.0 && length_squared(float2(b + o4[i]) + 0.5 - tc) <= 1.3 * R * R);
+                if (!near || !oldSite(int2(floor(tc)), ground, gt) || gt < SEA + 2.0) continue;
+                for (int i = 0; i < 4; i++) {
+                    float2 wi = float2(b + o4[i]) + 0.5;
+                    if (hs4[i] < SEA + 2.0 || length_squared(wi - tc) > 1.3 * R * R) continue;
+                    t4[i] = max(t4[i], oldTreeIntervals(wi, tc, gt, Ht, R, tr, th, seed, false, none));
+                }
             }
-            sum += t;
-            leaves += t > g ? 1.0 : 0.0;
+        for (int i = 0; i < 4; i++) {
+            sum += t4[i];
+            leaves += t4[i] > hs4[i] ? 1.0 : 0.0;
         }
     } else if (J < 0.15) {
         float dens = groveDensity(centre, H, seed);
