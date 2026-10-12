@@ -4607,20 +4607,22 @@ static inline float3 autumnLeaf(float2 w, float birch, uint seed) {
 // darker. A tree's single-run columns and its multi-run ones (old growth, the jungle's roof) must agree, or one crown
 // shows two palettes.
 static float3 woodLeaf(float2 w, Climate c, float painted, float3 fallLeaf, float autumn, uint seed) {
+    float jw = smoothstep(0.1, 0.4, c.jungle);
+    float3 jl = 0;
+    if (jw > 0.0) {
+        // The jungle's crowns differ one from the next: deep green, olive, now and then a cool teal.
+        float jk = perlin2(w / 9.0, seed + 340u) + 0.6 * perlin2(w / 31.0, seed + 341u);
+        jl = mix(float3(0.028, 0.062, 0.034), float3(0.072, 0.094, 0.032), smoothstep(-0.3, 0.5, jk));
+        jl = mix(jl, float3(0.024, 0.068, 0.058), smoothstep(0.25, 0.6, perlin2(w / 17.0 + 7.3, seed + 342u)));
+        if (jw >= 1.0) return jl;
+    }
     float conifer = smoothstep(0.50, 0.32, c.temp);
     float k = saturate(perlin2(w / 23.0, seed + 93u) * 0.9 + 0.5);
     float3 leaf = mix(float3(0.035, 0.07, 0.035), float3(0.065, 0.09, 0.04), k);
     leaf = mix(leaf, float3(0.025, 0.055, 0.045), conifer);
     leaf = mix(leaf, float3(0.11, 0.125, 0.09), painted);
     leaf = mix(leaf, fallLeaf, autumn * (1.0 - conifer * 0.5));
-    if (c.jungle > 0.0) {
-        // The jungle's crowns differ one from the next: deep green, olive, now and then a cool teal.
-        float jk = perlin2(w / 9.0, seed + 340u) + 0.6 * perlin2(w / 31.0, seed + 341u);
-        float3 jl = mix(float3(0.028, 0.062, 0.034), float3(0.072, 0.094, 0.032), smoothstep(-0.3, 0.5, jk));
-        jl = mix(jl, float3(0.024, 0.068, 0.058), smoothstep(0.25, 0.6, perlin2(w / 17.0 + 7.3, seed + 342u)));
-        leaf = mix(leaf, jl, smoothstep(0.1, 0.4, c.jungle));
-    }
-    return leaf;
+    return mix(leaf, jl, jw);
 }
 
 // Crown by crown, species and age: a third cooler and darker, one in five yellower, one in ten light and warm, each
@@ -4843,12 +4845,13 @@ static Surface giantSurface(thread const Terrain& tr, Surface s, int k, int3 v, 
     }
     float3 a;
     if (gm == GM_LEAF) {
-        float kq = saturate(perlin2(wq / 31.0, seed + 601u) * 0.9 + 0.5);
         uint pal = k == 0 ? (gsb >> 28) & 7u : giantPalette(gi.h);
-        a = pal == 2u ? mix(float3(0.024, 0.070, 0.060), float3(0.050, 0.098, 0.066), kq)
-                      : mix(float3(0.034, 0.078, 0.050), float3(0.075, 0.112, 0.042), kq);
         s.up = 1.0 - saturate((runHi - 1.0 - y) / 14.0);
-        if (pal == 0u && k == 0) {
+        if (pal != 0u || k != 0) {
+            float kq = saturate(perlin2(wq / 31.0, seed + 601u) * 0.9 + 0.5);
+            a = pal == 2u ? mix(float3(0.024, 0.070, 0.060), float3(0.050, 0.098, 0.066), kq)
+                          : mix(float3(0.034, 0.078, 0.050), float3(0.075, 0.112, 0.042), kq);
+        } else {
             // Old growth and the jungle: the wood's own leaves (provinces carry no autumn or painted hills).
             float2 w = float2(v.xz + mapOrigin);
             Climate c = climateL(tr, 0, float2(v.xz) + 0.5);
@@ -7064,8 +7067,9 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
     // Voxels per pixel along the foreshortened view: detail hands over to its mean before it shrinks to a pixel.
     float fpv = tw * x.pixelAngle / max(-d.y, 0.1);
     float3 c = 0;
-    float b2 = seaNoise(ww * (1.0 / 230.0), x.seed + 145u);
     float big = seaNoise(ww * (1.0 / 900.0), x.seed + 144u);
+    // b2 lies in [-0.5, 0.5]: under -0.225 big alone rules out a bloom.
+    float b2 = big > -0.225 ? seaNoise(ww * (1.0 / 230.0), x.seed + 145u) : -0.5;
     float bloom = smoothstep(0.0, 0.15, big + 0.45 * b2);
     float near = smoothstep(420.0, 180.0, tw) * (1.0 - fres);
     if (bloom <= 0.0 && near <= 0.0) return 0;
@@ -7111,15 +7115,18 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
             // Foam flecks a few voxels long along the crest, with gaps, each of its own brightness.
             float2 wd = sel < 0.5 ? wd1 : wd2;
             float2 fq = float2(dot(ww, wd) * 0.35, (ww.x * wd.y - ww.y * wd.x) * 0.26);
-            float fl = seaNoise(fq + float2(-t * 0.6, t * 0.25), x.seed + 82u);
             // Runs of a crest a dozen voxels long, the rest of it calm.
-            cr *= smoothstep(-0.25, 0.1, seaNoise(fq * float2(0.3, 0.3) + float2(t * 0.05, 7.3), x.seed + 83u));
+            if (cr > 0.0) cr *= smoothstep(-0.25, 0.1, seaNoise(fq * float2(0.3, 0.3) + float2(t * 0.05, 7.3), x.seed + 83u));
             // The surf breaks up again every few voxels whatever way the shore runs, so it never draws its outline.
-            if (sh > 0.0) cr *= mix(1.0, smoothstep(-0.1, 0.2, seaNoise(ww * 0.16 + float2(0, t * 0.1), x.seed + 85u)), sh);
-            float fleck = smoothstep(0.05 - 0.15 * sh, 0.28, fl) * (0.3 + 1.1 * smoothstep(0.05, 0.4, e0));
-            // Close up the foam is a grain of sparks rather than smooth blobs.
-            if (fa < 0.4) fleck *= mix(0.45 + 1.1 * smoothstep(0.0, 0.45, seaNoise(ww * 2.3 + float2(t * 0.3, -t * 0.2), x.seed + 84u)), 1.0, fa * 2.5);
-            fleck = mix(fleck, 0.25, saturate(fa * 0.8));
+            if (cr > 0.0 && sh > 0.0) cr *= mix(1.0, smoothstep(-0.1, 0.2, seaNoise(ww * 0.16 + float2(0, t * 0.1), x.seed + 85u)), sh);
+            float fleck = 0.0;
+            if (cr > 0.0) {
+                float fl = seaNoise(fq + float2(-t * 0.6, t * 0.25), x.seed + 82u);
+                fleck = smoothstep(0.05 - 0.15 * sh, 0.28, fl) * (0.3 + 1.1 * smoothstep(0.05, 0.4, e0));
+                // Close up the foam is a grain of sparks rather than smooth blobs.
+                if (fa < 0.4) fleck *= mix(0.45 + 1.1 * smoothstep(0.0, 0.45, seaNoise(ww * 2.3 + float2(t * 0.3, -t * 0.2), x.seed + 84u)), 1.0, fa * 2.5);
+                fleck = mix(fleck, 0.25, saturate(fa * 0.8));
+            }
             crest = mix(cr * fleck, crest, saturate(fpv * 0.45));
         }
         float glow = crest * (0.3 + 0.9 * surf) * shore * patch;
