@@ -5322,7 +5322,7 @@ static Hit trace(thread const Terrain& tr, float3 o, float3 d, float tMax, int m
 // MARK: - Horizon
 
 // The terrain horizon around the camera: per azimuth bin, the steepest tangent of elevation any terrain reaches,
-// from the max mips (cells a few percent of the distance wide, so a bin also bounds its neighbours' gaps); the ground
+// from the max mips (cells about a percent of the distance wide, so a bin also bounds its neighbours' gaps); the ground
 // under an island's band counts, and the island over it gives the bin a range of tangents of its own (bins
 // HORIZON_BINS on: its lowest, 2 HORIZON_BINS on: its highest). A primary ray above its bin's horizon (and the
 // neighbours') and outside their island ranges can hit nothing and skips the trace.

@@ -1205,10 +1205,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var isleVariant = false
     private var isleShapeVariant = false
     // The scene pass is drawn in sceneTile-pixel squares, each with the cheapest variant its pixels need: the islands'
-    // surfaces only where an island's spheres (Islands.spheres) cover it, their shade, sky occlusion and mist only where
-    // those reach.
+    // surfaces only where an island's boxes (Islands.boxes) cover it, their shade, sky occlusion and mist only where those
+    // reach.
     static let sceneTile = 16
-    private var tileNeed: [UInt8] = []
     private var historyIndex = 0
     private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
     let world: World
@@ -1634,7 +1633,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             // Per tile: 1 an island's surfaces may show, 2 its shade or sky occlusion, 8 close by one within isleShadeReach,
             // 4 its mist.
             let T = Renderer.sceneTile, nx = (w + T - 1) / T, ny = (h + T - 1) / T
-            tileNeed = [UInt8](repeating: 0, count: nx * ny)
+            var tileNeed = [UInt8](repeating: 0, count: nx * ny)
             func mark(_ list: [Islands.Box], _ bit: UInt8) {
                 for b in list {
                     guard let t = tileRange(box: b.lo, b.hi, nx: nx, ny: ny, tw: Double(T), th: Double(T), width: w, height: h, pad: 6) else { continue }
@@ -1801,33 +1800,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         for i in 0..<smokeCount { hazeRefs[16 + i] = Int32(near[i].1) }
     }
 
-    // Marks the tiles a sphere's projection may touch: its bounding box's corners bound the projection, padded by a few
-    // pixels for the subpixel jitter. A sphere reaching behind the near plane marks every tile.
-    // The tiles (nx x ny of tw x th pixels over a width x height frame, rows down the screen) whose rays may cross the
-    // sphere (centre c, radius r), padded by pad pixels; nil: none.
-    private func tileRange(_ c: SIMD3<Double>, _ r: Double, nx: Int, ny: Int, tw: Double, th: Double, width: Int, height: Int,
-                           pad: Double) -> (x0: Int, x1: Int, y0: Int, y1: Int)? {
-        let b = camera.basis
-        let tanV = tan(25.0 * .pi / 180), aspect = Double(width) / Double(height)
-        let v = c - camera.position
-        let x = simd_dot(v, b.right), y = simd_dot(v, b.up), z = simd_dot(v, b.fwd)
-        guard z - r > 0.5 else { return (0, nx - 1, 0, ny - 1) }
-        var nx0 = Double.infinity, nx1 = -Double.infinity, ny0 = Double.infinity, ny1 = -Double.infinity
-        for zz in [z - r, z + r] {
-            for xx in [x - r, x + r] { let q = xx / (zz * tanV * aspect); nx0 = min(nx0, q); nx1 = max(nx1, q) }
-            for yy in [y - r, y + r] { let q = yy / (zz * tanV); ny0 = min(ny0, q); ny1 = max(ny1, q) }
-        }
-        let padX = 2 * pad / Double(width), padY = 2 * pad / Double(height)
-        nx0 -= padX; nx1 += padX; ny0 -= padY; ny1 += padY
-        if nx1 < -1 || nx0 > 1 || ny1 < -1 || ny0 > 1 { return nil }
-        let W = Double(width), H = Double(height)
-        // Tile rows run down the screen, NDC y up.
-        return (max(0, Int(floor((nx0 + 1) / 2 * W / tw))), min(nx - 1, Int(floor((nx1 + 1) / 2 * W / tw))),
-                max(0, Int(floor((1 - ny1) / 2 * H / th))), min(ny - 1, Int(floor((1 - ny0) / 2 * H / th))))
-    }
-
-    // tileRange for the box lo...hi: the part of it in front of the eye, by its corners and where its edges cross the near
-    // plane.
+    // The tiles (nx x ny of tw x th pixels over a width x height frame, rows down the screen) whose rays may cross the box
+    // lo...hi, padded by pad pixels for the subpixel jitter: the part of it in front of the eye, by its corners and where its
+    // edges cross the near plane; nil: none.
     private func tileRange(box lo: SIMD3<Double>, _ hi: SIMD3<Double>, nx: Int, ny: Int, tw: Double, th: Double, width: Int, height: Int,
                            pad: Double) -> (x0: Int, x1: Int, y0: Int, y1: Int)? {
         let b = camera.basis
@@ -1855,13 +1830,31 @@ final class Renderer: NSObject, MTKViewDelegate {
                 max(0, Int(floor((1 - ny1) / 2 * H / th))), min(ny - 1, Int(floor((1 - ny0) / 2 * H / th))))
     }
 
+    // Marks the tiles a sphere's projection may touch: its bounding box's corners bound the projection, padded by a few
+    // pixels for the subpixel jitter. A sphere reaching behind the near plane marks every tile.
     private func fillLampTiles(frame f: Frame, width: Int, height: Int) {
         let n = Renderer.lampTiles
         for i in 0..<tileMasks.count { tileMasks[i] = 0 }
+        let b = camera.basis, cam = camera.position
+        let tanV = tan(25.0 * .pi / 180), aspect = Double(width) / Double(height)
+        let padX = 6.0 / Double(width), padY = 6.0 / Double(height)
         func mark(_ c: SIMD3<Double>, _ r: Double, _ bit: UInt32) {
-            guard let t = tileRange(c, r, nx: n, ny: n, tw: Double(width) / Double(n), th: Double(height) / Double(n),
-                                    width: width, height: height, pad: 3) else { return }
-            for ty in t.y0...t.y1 { for tx in t.x0...t.x1 { tileMasks[ty * n + tx] |= bit } }
+            let v = c - cam
+            let x = simd_dot(v, b.right), y = simd_dot(v, b.up), z = simd_dot(v, b.fwd)
+            var x0 = 0, x1 = n - 1, y0 = 0, y1 = n - 1
+            if z - r > 0.5 {
+                var nx0 = Double.infinity, nx1 = -Double.infinity, ny0 = Double.infinity, ny1 = -Double.infinity
+                for zz in [z - r, z + r] {
+                    for xx in [x - r, x + r] { let q = xx / (zz * tanV * aspect); nx0 = min(nx0, q); nx1 = max(nx1, q) }
+                    for yy in [y - r, y + r] { let q = yy / (zz * tanV); ny0 = min(ny0, q); ny1 = max(ny1, q) }
+                }
+                nx0 -= padX; nx1 += padX; ny0 -= padY; ny1 += padY
+                if nx1 < -1 || nx0 > 1 || ny1 < -1 || ny0 > 1 { return }
+                x0 = max(0, Int(floor((nx0 + 1) / 2 * Double(n)))); x1 = min(n - 1, Int(floor((nx1 + 1) / 2 * Double(n))))
+                // Tile rows run down the screen, NDC y up.
+                y0 = max(0, Int(floor((1 - ny1) / 2 * Double(n)))); y1 = min(n - 1, Int(floor((1 - ny0) / 2 * Double(n))))
+            }
+            for ty in y0...y1 { for tx in x0...x1 { tileMasks[ty * n + tx] |= bit } }
         }
         let lamps = world.lamps
         for i in 0..<Int(f.refs.x) {

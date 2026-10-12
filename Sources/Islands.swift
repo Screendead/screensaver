@@ -143,7 +143,7 @@ enum Islands {
     }
 
     // The box its sky occlusion reaches: from the sea's floor up to its underside's mean height.
-    static func occlusionBox(_ s: IslandInfo) -> (lo: SIMD3<Double>, hi: SIMD3<Double>) {
+    static func occlusionBox(_ s: IslandInfo) -> Box {
         let r = occlusionReach(s)
         return (SIMD3(s.pos.x - r, 0, s.pos.y - r), SIMD3(s.pos.x + r, 0.5 * (s.keel + s.top), s.pos.y + r))
     }
@@ -161,9 +161,9 @@ enum Islands {
     // underside's mean height; radius, top, keel and its mist's fade with distance from p; its fall's lip xz, top and
     // foot, or zeros; its mist bank's bounding sphere, radius 0 for none, and puffs (centre, radius), all in world
     // coordinates), as bytes for setFragmentBytes. view: the eye, its forward axis and the half angle of a cone round the
-    // frame; mist that lies wholly outside it is left out (the scene pass draws mist on primary rays only).
-    // mist: boxes bounding the mist banks and plumes it holds (isleMistBound's ellipsoids).
-    // Each entry ends with the square of its sky occlusion's reach (occlusionReach).
+    // frame; mist that lies wholly outside it is left out (the scene pass draws mist on primary rays only). Each entry
+    // ends with the square of its sky occlusion's reach (occlusionReach). mist: boxes bounding the mist banks and plumes
+    // it holds (isleMist's ellipsoids).
     static func table(_ list: [IslandInfo], near p: SIMD2<Double>, within d: Double,
                       view: (eye: SIMD3<Double>, fwd: SIMD3<Double>, half: Double)? = nil) -> (bytes: [UInt8], mist: [Box]) {
         func seen(_ c: SIMD3<Double>, _ r: Double) -> Bool {
