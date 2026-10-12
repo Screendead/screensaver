@@ -1239,7 +1239,7 @@ static inline float3 isleSpan(IsleRec r, float2 p, uint seed, int s, thread uint
     // A low dome of meadow, rolling on the broad ones, terraced as the lowland is: wide treads, short risers.
     // Small ones are boulders: a rounder crown, a pointed keel, no beds.
     float small = 1.0 - smoothstep(35.0, 55.0, R);
-    float top = r.A + mix(0.06, 0.15, small) * R * (1.0 - d * d) + 1.2 * perlin2(p / 37.0, seed + 704u);
+    float top = r.A + mix(0.06 * R, min(0.3 * R, 0.06 * R + 9.0), small) * (1.0 - d * d) + 1.2 * perlin2(p / 37.0, seed + 704u);
     if (R > 120.0) top += 7.0 * fbm2(p / 90.0, 2, seed + 709u) * smoothstep(120.0, 250.0, R) * (1.0 - d * d);
     int form = isleForm(R, h);
     if (form == 1) top += isleCrag(R, h) * (1.0 - d) * (1.0 - d) * (0.7 + 0.3 * perlin2(p / 15.0, seed + 729u));
@@ -1249,7 +1249,7 @@ static inline float3 isleSpan(IsleRec r, float2 p, uint seed, int s, thread uint
     }
     float tl = floor(top / 5.0);
     // The rim falls away by a varying step, from nothing to three, so no edge runs round the top at one inset.
-    top = (tl + smoothstep(0.6, 0.95, top / 5.0 - tl)) * 5.0
+    top = mix((tl + smoothstep(0.6, 0.95, top / 5.0 - tl)) * 5.0, top, small)
         - 3.0 * smoothstep(0.8 + 0.12 * perlin2(p / 17.0, seed + 726u), 1.0, d) * saturate(0.5 + 1.2 * perlin2(p / 29.0, seed + 727u));
     // A rim of rock teeth on some.
     if (hashf(pcg(h + 13u)) < 0.3) top += 3.0 * ridged2(p / 7.0, 2, seed + 710u) * smoothstep(0.88, 0.97, d);
