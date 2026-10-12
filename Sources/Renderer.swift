@@ -1055,7 +1055,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private static let lampReach: [Double] = [1, 20, 16, 7, 10, 24, 22, 6]   // LAMP_R in Shaders/Saver.metal
     private var tileMasks = [UInt32](repeating: 0, count: 16 * 16)
     static let ditherCells = 864.0
-    // Sun height the land's glow starts from (BIO_SUN in Shaders/Saver.metal).
+    // Sun height the glowing bugs start from (BIO_SUN in Shaders/Saver.metal).
     static let bioSun: Float = 0.07
     // Bug sprites: one per cube of the MOTE_N^3 block round the camera (bioVertex in Shaders/Saver.metal).
     static let moteCount = 18 * 18 * 18

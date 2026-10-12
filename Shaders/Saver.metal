@@ -6216,7 +6216,7 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
 
 // MARK: - Bioluminescence
 
-// The land's glow by sun height: faint from just before sunset, full from mid twilight (Renderer.bioSun must match the
+// The glowing bugs by sun height: faint from just before sunset, full from mid twilight (Renderer.bioSun must match the
 // start).
 constant float BIO_SUN = 0.07;
 static inline float bioRamp(float sunY) { return smoothstep(BIO_SUN, -0.12, sunY); }
