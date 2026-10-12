@@ -5174,6 +5174,7 @@ struct Surface {
     float3 nrm;     // the plane a structure's roof voxel or a tower's wall shades as (zero: the face normal)
     float3 emit;    // fire, lanterns and lit windows
     float cave;     // how much of the sky and bounce light a cave's depth keeps from this face (0 outside caves)
+    float caveG;    // a face caveDress may dress (shade()): its green share, plus 2 under a gap; -1 none
     float up;       // leaves: height up the crown, 0 at its foot, 1 at its top
     bool vine;      // a giant's hanging vines
     float bio;      // night glow share of this ground (-1: a giant's, worked out in bioLight)
@@ -5705,6 +5706,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     s.nrm = 0;
     s.emit = 0;
     s.cave = 0;
+    s.caveG = -1.0;
     int2 mapOrigin = tr.origin;
     float cs = tr.lod[k].w;
     float4 col4 = columnL(tr, k, v.xz);
@@ -5982,7 +5984,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     if (tr.caves > 0.0 && s.gapNear && !tree && !built && !vegLeaf) {
         float green = smoothstep(0.25, 0.5, c.moist) * smoothstep(0.18, 0.32, c.temp) * (1.0 - smoothstep(0.15, 0.45, desert))
                     * (1.0 - smoothstep(snowline - 20.0, snowline, H));
-        caveDress(tr, s, n, w, wq, wy, cs, fpA, underGap, green, seed, time);
+        s.caveG = green + (underGap ? 2.0 : 0.0);
     }
     if ((tree && float(v.y) >= col4.a) || vegLeaf) {
         float leafLo = vegLeaf ? vegLo : col4.a;
@@ -7110,6 +7112,15 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     float fpA = fp / max(abs(dot(n, d)), 0.15);
     float bio = shadows != 0 && !(x.prof & 4096) ? bioLandRamp(L.sun.y) : 0.0;
     Surface s = surfaceAt(x.tr, x.st, x.sites, x.lampState, k, h.voxel, h.normal, uv, fp, fpA, p, x.seed, x.time, inWater, bio > 0.0);
+    // Dressed here, not in surfaceAt: inlined there, among its many live values, it slowed every pixel.
+    if (s.caveG >= 0.0) {
+        int3 n3 = h.normal;
+        float2 w = float2(h.voxel.xz * int(cs) + x.tr.origin);
+        float2 wq = w + (n3.y != 0 ? uv : n3.x != 0 ? float2(n3.x > 0 ? 1.0 : 0.0, uv.x) : float2(uv.x, n3.z > 0 ? 1.0 : 0.0)) * cs;
+        float wy = n3.y != 0 ? float(h.voxel.y + max(n3.y, 0)) : float(h.voxel.y) + uv.y;
+        bool under = s.caveG >= 2.0;
+        caveDress(x.tr, s, n3, w, wq, wy, cs, fpA, under, s.caveG - (under ? 2.0 : 0.0), x.seed, x.time);
+    }
     if (sceneTowers && x.towers->n.x > 0) towerSurface(x, s, k, h.voxel, h.normal, uv, inWater ? max(fp, 4.0) : fp, inWater ? max(fpA, 4.0) : fpA, d);
     // A tower wall shading as its plane (s.nrm; terrain has none of its own): no corner AO, which would line every jog of
     // a diagonal face.

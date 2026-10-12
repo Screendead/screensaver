@@ -45,7 +45,7 @@ Snapshot test switches: `VR_MOTION=1` (with `VR_MOTION_FRAMES=n`, `VR_FRAMES=n`)
 `VR_LODSHIFT=v` moves the rings' centre v voxels ahead of the camera, and `VR_POWER_FLIP=i` switches power source at frame i.
 `VR_EXPOSURE=e` holds a bug report's recorded exposure, and `VR_BUGTEST=s` flies s seconds recording as the saver does, then
 writes a report into `<screenshot>_reports/`.
-Caves: `VR_CAVES=r` lists the caves within r of each new map's centre, `VR_CAVE=distance,height,bearing[,rank[,which]]` holds the
+Caves: `VR_CAVES=r` lists the caves within r of each new map's centre (and counts the lowland ones), `VR_CAVE=distance,height,bearing[,rank[,which]]` holds the
 camera on the rank-th nearest cave (which: 1 lived-in, 2 big and seen clear, 3 grottoes), `VR_DOLLY=v` moves a held camera v voxels
 a frame along its heading (approaches across the rings), and `VR_NOCAVES=1` leaves the cave table empty (renders as before caves).
 Live frame times are measured at `--size 3456x2234 --scale 1`: the scene renders on the 864-cell dither grid, so scale 1 is the AC live size.
