@@ -383,14 +383,24 @@ static inline Mega megaLift(float2 p, float lagoon, uint seed) {
         float2 c = (float2(cell) + 0.25 + 0.5 * float2(hashf(pcg(hc)), hashf(pcg(hc + 1u)))) * CELL;
         float R = 900.0 + 600.0 * hashf(pcg(hc + 2u));
         float dd = length(p - c);
-        if (dd < R + 1300.0) {
+        if (dd < R + 1600.0) {
             // Lobes and buttresses, so the rim reads as eroded rock, not a drum.
             float d = dd + 520.0 * fbm2(p / 1100.0, 3, seed + 241u) + 140.0 * perlin2(p / 330.0, seed + 244u)
-                    + 50.0 * perlin2(p / 140.0, seed + 242u);
-            float Hl = 1500.0 + 350.0 * hashf(pcg(hc + 3u));
-            float t = 0.22 * smoothstep(R + 420.0, R + 10.0, d) + 0.78 * smoothstep(R + 10.0, R - 6.0, d);
-            float top = 30.0 * fbm2(p / 350.0, 2, seed + 243u) * smoothstep(R, R - 80.0, d);
-            float T = Hl * t + top;
+                    + 50.0 * perlin2(p / 140.0, seed + 242u)
+                    + 110.0 * smoothstep(0.16, 0.0, abs(perlin2(p / 280.0, seed + 245u)));
+            float Hl = 1450.0 + 300.0 * hashf(pcg(hc + 3u));
+            // Seen from far off a sheer drum is a rectangle: the wall steps back at two ledges whose heights and depths
+            // wander round the rim, and canyons notch the crown, so the outline is never two verticals under a flat top.
+            float a1 = 0.46 + 0.12 * perlin2(p / 900.0, seed + 246u);
+            float a2 = 0.70 + 0.12 * perlin2(p / 700.0 + 9.3, seed + 246u);
+            float r1 = R - 6.0 - R * (0.04 + 0.22 * saturate(perlin2(p / 600.0, seed + 247u) + 0.5));
+            float r2 = r1 - 16.0 - R * (0.04 + 0.22 * saturate(perlin2(p / 520.0 + 4.7, seed + 248u) + 0.5));
+            float crown = 240.0 * fbm2(p / 800.0, 3, seed + 243u) - 380.0 * smoothstep(0.09, 0.0, abs(perlin2(p / 520.0, seed + 249u)));
+            crown = floor(crown / 70.0) * 70.0 + 70.0 * smoothstep(0.7, 1.0, fract(crown / 70.0));
+            float t = 0.32 * pow(smoothstep(R + 900.0, R + 10.0, d), 1.6) + (a1 - 0.32) * smoothstep(R + 10.0, R - 6.0, d)
+                    + 0.02 * smoothstep(R - 6.0, r1, d) + (a2 - a1 - 0.02) * smoothstep(r1 + 16.0, r1, d)
+                    + 0.02 * smoothstep(r1, r2, d);
+            float T = Hl * t + (Hl * (0.96 - a2) + crown) * smoothstep(r2 + 16.0, r2, d);
             if (T > g.U) { g.U = T; g.wK = 0.0; g.lipU = 0.0; g.notchH = 0.0; }
         }
     }
@@ -657,7 +667,7 @@ static inline bool towerNearTepui(float2 p, float d, uint seed) {
             uint hc = hash2i(cell, seed + 240u);
             if (hashf(hc) >= 0.35) continue;
             float2 c = (float2(cell) + 0.25 + 0.5 * float2(hashf(pcg(hc)), hashf(pcg(hc + 1u)))) * CELL;
-            if (length(p - c) < 1500.0 + 1300.0 + 520.0 + d) return true;
+            if (length(p - c) < 1500.0 + 1600.0 + 520.0 + d) return true;
         }
     return false;
 }
@@ -6565,16 +6575,19 @@ static float3 shadeL(thread const Ctx& x, thread const Light& L, float3 o, float
     return shade(x, L, o, d, h, shadows, inWater);
 }
 
-// Converges on the actual sky colour as fog thickens (T -> 0), so fogged land meets the sky with no seam.
-static inline float3 fogColor(thread const Ctx& x, float3 d, float T) {
+// Converges on the actual sky colour as fog thickens (T -> 0), so fogged land meets the sky with no seam (less the
+// land's solid floor, which fades out toward the world's edge).
+static inline float3 fogColor(thread const Ctx& x, float3 d, float T, float solid = 0.0) {
     // At night the sky's horizon gradient is mirrored below it, so far land and sea dim smoothly downward.
     float y = max(d.y, -d.y * x.L.night);
     float3 c = skyColor(float3(d.x, mix(y, y * 0.5 + 0.12, T), d.z), x.L, false, x.seed, x.time);
     // Aerial colour cools away from the sun so far ridges separate from the sky.
     float away = saturate(dot(normalize(d.xz + 1e-5), normalize(x.L.sun.xz + 1e-5)) * 0.5 + 0.5);
     float3 cool = mix(float3(0.80, 0.82, 0.95), float3(0.52, 0.55, 0.88), x.L.gold);
-    return c * mix(float3(1.0), mix(cool, float3(1.0), away * away), T);
+    return c * mix(float3(1.0), mix(cool, float3(1.0), away * away), T) * mix(float3(1.0), cool * 0.9, solid * (1.0 - T));
 }
+
+constant float LAND_SOLID = 0.5;
 
 // Share of the lowland air haze left at height y (Sources/Sight.swift ports it).
 static inline float airAloft(float y) { return exp(-max(y - 120.0, 0.0) / 400.0); }
@@ -6621,16 +6634,22 @@ static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, 
     return exp(-((heightTerm + air + mist) * clear + 6.0 * smoothstep(x.tr.fadeStart, x.tr.rmax, r)));
 }
 
-static float3 applyFogT(thread const Ctx& x, float3 col, float3 o, float3 d, float T) {
+// solid: land, which even fully hazed stays a shade darker and cooler than the sky behind it, so a far range or a
+// tepui's upper wall reads as a solid layer and not a cut-out of the sky; 0 at the world's edge, which goes to sky.
+static float3 applyFogT(thread const Ctx& x, float3 col, float3 o, float3 d, float T, float solid = 0.0) {
     // Thin haze in-scatters less than the full horizon radiance; only thick fog converges on the sky.
     // Forward scatter fades out above the horizon as the sky's does, so fully hazed land matches the sky behind it.
     float scatter = min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night) * mix(1.0, smoothstep(0.1, 0.0, d.y), smoothstep(0.5, 0.0, T));
-    float3 f = (fogColor(x, d, T) + x.L.keyCol * scatter) * mix(mix(0.3, 0.12, x.L.gold), 1.0, smoothstep(0.1, 0.9, 1.0 - T));
+    float3 f = (fogColor(x, d, T, solid) + x.L.keyCol * scatter) * mix(mix(0.3, 0.12, x.L.gold), 1.0, smoothstep(0.1, 0.9, 1.0 - T));
     return mix(f, col, T);
 }
 
 static float3 applyFog(thread const Ctx& x, float3 col, float3 o, float3 d, float t) {
     return applyFogT(x, col, o, d, fogTransmittance(x, o, d, t));
+}
+
+static inline float landSolid(thread const Ctx& x, float3 p) {
+    return LAND_SOLID * (1.0 - smoothstep(x.tr.fadeStart, x.tr.rmax, length(p.xz - x.tr.cam)));
 }
 
 // In-scatter of the nearest lamps' light along a ray to tEnd: the closed-form integral of 1/(r^2 + 4) - 1/(Rh^2 + 4)
@@ -7437,7 +7456,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
                 open = 0.0;
                 // Land the haze all but hides needs no shading.
                 float T = fogTransmittance(x, wp, r, rh.t, 2);
-                refl = applyFogT(x, T < 0.01 || (x.prof & 8) ? float3(0.0) : shadeL(x, x.L, wp, r, rh, x.shadowMode == 1.0 ? 2 : 1, true), wp, r, T);
+                refl = applyFogT(x, T < 0.01 || (x.prof & 8) ? float3(0.0) : shadeL(x, x.L, wp, r, rh, x.shadowMode == 1.0 ? 2 : 1, true), wp, r, T,
+                                 landSolid(x, wp + r * rh.t));
             } else {
                 refl = softCloudSky(x, wp, r);
             }
@@ -7562,7 +7582,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             }
     }
     if (f.misc2.z == 3) return float4(float3(fogTransmittance(x, o, d, tSurf)), 1);
-    if (f.misc2.z != 2) col = Tfog >= 0.0 ? applyFogT(x, col, o, d, Tfog) : applyFog(x, col, o, d, tSurf);
+    if (f.misc2.z != 2) col = Tfog >= 0.0 ? applyFogT(x, col, o, d, Tfog, landSolid(x, o + d * h.t)) : applyFog(x, col, o, d, tSurf);
     // A summit above the cloud base is seen through the slab in front of it.
     if (!(x.prof & 32) && !water && h.hit && o.y < CLOUD_Y0 && o.y + d.y * h.t > CLOUD_Y0) {
         CloudSample cl = cloudSheet(x, o, d, h.t, 6);
