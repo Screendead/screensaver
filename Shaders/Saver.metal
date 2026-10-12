@@ -4315,6 +4315,12 @@ static inline float morphAt(thread const Terrain& tr, int k, float2 p) {
 // Whether world xz w lies on a tower's plinth.
 static inline bool towerWallAt(constant TowerTable* tt, float2 w) { return towerIndexAt(tt, w) >= 0; }
 
+// Whether level-k cell c (k <= GAP2_LEVELS) holds a giant crown's air as its second gap.
+static inline bool giantAirAt(thread const Terrain& tr, int k, int2 c) {
+    float2 g = tr.cg2.read(uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1)), uint(k - 1)).rg;
+    return g.y > g.x;
+}
+
 // Morphed (H, gapLo, gapHi): across the band a column slides to its parent's height and its gap to the parent's (opening
 // from the parent's floor where it has none), or closes from the top where the parent has none, so at the handoff the
 // level equals the next one exactly.
@@ -4333,7 +4339,11 @@ static inline float4 columnMorphW(thread const Terrain& tr, int k, int2 c, float
             wh = step(0.5, w);
         col.x = mix(col.x, ph, wh);
         float2 pg = parentGap(tr, k, c);
-        if (pg.y > pg.x) {
+        // On the last level with a second gap, a giant column's crown air is what the parent's principal gap goes on as
+        // (secondGapW): the tier gap above it closes, where sliding it down through the crown as the crown's air closed
+        // from the top hung a solid skirt under every column of the band, descending, and climbing as the eye came.
+        bool crownAir = k == GAP2_LEVELS && pg.y > pg.x && giantAirAt(tr, k, c);
+        if (pg.y > pg.x && !crownAir) {
             float2 g0 = col.z > col.y ? col.yz : pg.xx;
             col.yz = mix(g0, pg, w);
         } else {
@@ -4348,7 +4358,14 @@ static inline float4 columnMorphW(thread const Terrain& tr, int k, int2 c, float
 // (cg2), else none. Only a point under the principal gap can be in it.
 static inline float2 secondGapW(thread const Terrain& tr, int k, int2 c, float w) {
     float2 g = k <= GAP2_LEVELS ? tr.cg2.read(uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1)), uint(k - 1)).rg : float2(0);
-    return w > 0.0 ? morphGap2(g, parentGap2(tr, k, c), w) : g;
+    if (w <= 0.0) return g;
+    float2 p2 = parentGap2(tr, k, c);
+    // The last level with a second gap: the crown's air goes on as the parent's principal gap (columnMorphW).
+    if (k == GAP2_LEVELS && g.y > g.x) {
+        float2 pg = parentGap(tr, k, c);
+        if (pg.y > pg.x) p2 = pg;
+    }
+    return morphGap2(g, p2, w);
 }
 
 static inline float3 columnMorph(thread const Terrain& tr, int k, int2 c) {
@@ -4472,7 +4489,7 @@ static Hit trace(thread const Terrain& tr, float3 o, float3 d, float tMax, int m
         float H = col.x, gl = col.y, gh = col.z;
         bool inGap = yA >= gl && yA < gh;
         // Under the principal gap: the 1-voxel map's extra gaps, a coarse giant column's air under its crown.
-        if (!inGap && k <= GAP2_LEVELS && gh != gl && yA < col.w) {
+        if (!inGap && k <= GAP2_LEVELS && yA < col.w) {
             float4 e;
             if (k == 0) {
                 e = extraGaps(tr.gx.read(uint2(lc)));
