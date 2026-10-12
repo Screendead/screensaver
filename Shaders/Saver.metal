@@ -6495,6 +6495,8 @@ static inline float bioPulse(float2 w, float t, uint seed, float warp) {
 // Means of the near patterns below, per unit of glow; far off each surface takes its mean, so the land keeps one level
 // of light from the camera's feet to the haze.
 constant float BIO_FLOOR = 0.052, BIO_FLOOR_HALO = 0.68, BIO_CROWN = 0.038;
+// Distant glow: x(1 + gain) reached at FAR1 voxels from the camera, none within FAR0.
+constant float BIO_FAR0 = 48.0, BIO_FAR1 = 1400.0, BIO_FAR_GAIN = 4.5;
 
 // The light the vegetation gives off at night: moss and undergrowth carpets on the ground, pooled round trunk feet,
 // ragged moss hanging from terrace lips, fungus collars hugging trunk bases, crowns lit from within (undersides and
@@ -6583,8 +6585,17 @@ static float3 bioLight(thread const Ctx& x, thread const Surface& s, int k, int3
         if (jw > 0.0) glade *= mix(1.0, 0.3 + 5.2 * smoothstep(0.15, 0.4, bioNoise(wp.xz / 9.0, x.seed + 730u) + 0.4 * bioNoise(wp.xz / 3.5, x.seed + 731u)), jw);
         glade = mix(glade, 1.0, gf);
     }
-    return hue * D * pulse * glade * (e + alb * halo * 0.2 * (1.3 - 0.5 * sv));
+    // Far off, a grove's many small lights merge into one glow brighter than their literal mean, rising with distance
+    // alone (so alike on either side of every map boundary and the pattern-to-mean fade); the swells calm toward
+    // their mean as they shrink.
+    float far = smoothstep(BIO_FAR0, BIO_FAR1, fp / x.pixelAngle);
+    pulse = mix(pulse, 0.58, 0.5 * far);
+    // Violet pockets gain half as much: far off they would crowd out the regional teal and blue.
+    float gain = 1.0 + BIO_FAR_GAIN * far * (1.0 - 0.5 * saturate(3.0 * (hue.r - hue.g)));
+    return hue * D * pulse * glade * gain * (e + alb * halo * 0.2 * (1.3 - 0.5 * sv));
 }
+
+static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, int mistSamples = -1);
 
 // shadows: 0 none, 1 traced near ray and maps, 2 maps only (reflections: ripples hide contact shadows).
 // L: the light (the bed under water takes it refracted); inWater: seen in rippled water.
@@ -6853,8 +6864,12 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         }
     }
     // From early twilight, out to the haze. Reflections shade with a wide footprint, so they take the means.
-    if (bio > 0.0 && s.bio != 0.0 && s.mat < 4 && !planar && s.pale < 0.5)
-        col += bioLight(x, s, k, h.normal, p, alb, fp, sv) * bio;
+    if (bio > 0.0 && s.bio != 0.0 && s.mat < 4 && !planar && s.pale < 0.5) {
+        // Light given off loses less to the haze than light reflected: fogged as T^0.5 rather than T (the valley mist
+        // left out), and as 2.5 T in thick haze, so it still fades into the haze at the very horizon.
+        float lift = rsqrt(max(fogTransmittance(x, o, d, h.t, 0), 0.16));
+        col += bioLight(x, s, k, h.normal, p, alb, fp, sv) * bio * lift;
+    }
     return col + s.emit;
 }
 
@@ -6892,7 +6907,7 @@ static inline float airAloft(float y) { return exp(-max(y - 120.0, 0.0) / 400.0)
 
 // Exponential height fog plus a slow-drifting noise modulation that pools mist in valleys.
 // mistSamples < 0 takes the quality's count; 0 leaves out the valley mist (the closed-form terms only).
-static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, int mistSamples = -1) {
+static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, int mistSamples) {
     float hf = 30.0;
     float a = 0.0009, c2 = 1.3e-6;
     // Air: the near haze saturates into a thin linear tail, so far ranges read as layered haze rather than vanish.
