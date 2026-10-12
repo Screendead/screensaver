@@ -4658,7 +4658,7 @@ static inline float hg(float c, float g) {
     return (1.0 - g2) / (12.566 * pow(1.0 + g2 - 2.0 * g * c, 1.5));
 }
 
-static float3 skyColor(float3 d, Light L, bool withDiscs, uint seed, float time) {
+static float3 skyColor(float3 d, Light L) {
     float up = saturate(d.y);
     float lowSun = 1.0 - smoothstep(0.0, 0.35, abs(L.sun.y));
     float3 hor = L.skyHor;
@@ -4677,7 +4677,12 @@ static float3 skyColor(float3 d, Light L, bool withDiscs, uint seed, float time)
     // A tighter aureole and a dome that deepens away from the sun, so the sun sits in its own pool of light.
     c *= mix(float3(1.0), float3(0.70, 0.70, 0.95), L.gold * mix(0.5, 1.0, L.sunAmt) * (1.0 - toward) * smoothstep(-0.05, 0.25, d.y));
     c += glowCol * pow(s, 24.0) * 0.5 * L.gold * (1.0 - 0.5 * up);
-    if (!withDiscs) return c;
+    return c;
+}
+
+// The sky c (skyColor) with the sun's and moon's discs, and at night the stars and the Milky Way.
+static float3 skyDiscs(float3 c, float3 d, Light L, uint seed, float time) {
+    float s = max(dot(d, L.sun), 0.0);
     // Disc takes the key light's hue (amber near the horizon) and blooms into the haze.
     float3 tint = L.keyCol / max(max(L.keyCol.r, max(L.keyCol.g, L.keyCol.b)), 1e-3);
     c += tint * 12.0 * smoothstep(0.99955, 0.9998, s) * L.sunAmt;
@@ -5251,14 +5256,21 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     if (gWood) return giantSurface(tr, s, k, v, n, uv, fp, wq, wy, col, gsb, gLoc, gi, cs, mapOrigin, seed);
     Climate c = climateL(tr, k, (float2(v.xz) + 0.5) * cs);
     float desert = desertAmount(c);
+    // Beaches and beds take sand or crust, faces included, so they need none of the ground and rock tones.
+    bool beach = H <= SEA + 1.2;
+    // Bark and leaves take their own colours below: of the ground's tones they keep only a salt pan's level, and on a top
+    // face the sand's ripples, which the snowline can rule out.
     // Painted-hill beds belong to low mounds; on the great walls their 11-voxel bands would read as stripes.
-    float wallM = megaWall(tr, w);
+    float wallM = vegVox && paintedAmount(c) <= 0.0 ? 0.0 : megaWall(tr, w);
     s.wall = wallM;
     float painted = smoothstep(0.0, 0.6, paintedAmount(c)) * (1.0 - wallM);
-    float snowline = snowlineAt(c.temp) + 5.0 * perlin2(w / 160.0, seed + 21u);
-    // On the ranges rock breaks through the lower snowfields in drifts, so a massif is not one white sheet.
-    if (H > 150.0) snowline += 60.0 * perlin2(w / 700.0, seed + 28u) * smoothstep(150.0, 400.0, H)
-                             + 260.0 * saturate(perlin2(w / 90.0, seed + 33u) * 0.9 + 0.45) * smoothstep(150.0, 450.0, H);
+    float snowline = 1e9;
+    if (!vegVox || (n.y > 0 && (beach || desert > 0.35))) {
+        snowline = snowlineAt(c.temp) + 5.0 * perlin2(w / 160.0, seed + 21u);
+        // On the ranges rock breaks through the lower snowfields in drifts, so a massif is not one white sheet.
+        if (H > 150.0) snowline += 60.0 * perlin2(w / 700.0, seed + 28u) * smoothstep(150.0, 400.0, H)
+                                 + 260.0 * saturate(perlin2(w / 90.0, seed + 33u) * 0.9 + 0.45) * smoothstep(150.0, 450.0, H);
+    }
     c.temp = altitudeTemp(c.temp, H);
     float cold = smoothstep(0.42, 0.18, c.temp);
     float autumn = autumnAmount(c);
@@ -5277,19 +5289,17 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     float salt = saltAmount(c);
     float rimW = smoothstep(0.05, 0.4, salt);
 
-    // Beaches and beds take sand or crust, faces included, so they need none of the ground and rock tones.
-    bool beach = H <= SEA + 1.2;
     // Rock tone shows on side and under faces, and on high treads; a low tread never reads it.
     bool needStone = !beach && !vegVox && (!(n.y > 0 && !underGap) || H - SEA > 0.55 * 110.0);
     float3 stone = needStone ? strataTone(wy, wq, seed, max(desert, rimW), fpA, wallM, lite) : float3(0);
 
     float lagoon = smoothstep(0.0, 0.35, lagoonAmount(c));
     // Pale ground (sand, salt, snow) sits well below the clouds, and drifts in tone so open flats never read as one sheet.
-    float drift = 1.0 + 0.12 * perlin2(wq / 110.0, seed + 32u);
+    float drift = vegVox ? 1.0 : 1.0 + 0.12 * perlin2(wq / 110.0, seed + 32u);
     float3 sand = mix(float3(0.33, 0.29, 0.21), float3(0.37, 0.33, 0.245), lagoon) * drift;
     float3 snow = float3(0.31, 0.325, 0.35) * drift;
     float3 tread = sand;
-    if (!beach) {
+    if (!beach && !vegVox) {
         float3 grassWet = float3(0.12, 0.20, 0.13), grassDry = float3(0.40, 0.34, 0.16), grassCold = float3(0.20, 0.23, 0.17);
         float3 grass = mix(mix(grassDry, grassWet, smoothstep(0.3, 0.7, c.moist)), grassCold, cold);
         // Autumn ground: tawny grass, with fallen leaves drifting out from the groves in the canopy's own hues.
@@ -5329,7 +5339,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     // Salt crust: cream with slow Perlin drifts, and a faint polygon net from two crossing sets of
     // Perlin zero-lines that fades long before it could alias.
     float crustW = beach ? smoothstep(0.3, 0.6, salt) : 0.0;
-    if (crustW > 0.0) {
+    if (crustW > 0.0 && !vegVox) {
         float3 crust = mix(float3(0.32, 0.305, 0.27), float3(0.33, 0.29, 0.27), saturate(perlin2(wq / 210.0, seed + 23u) + 0.5))
                      * (drift + 0.07 * perlin2(wq / 60.0, seed + 19u) + 0.04 * perlin2(wq / 17.0, seed + 20u));
         if (fpA < 0.2) {
@@ -5348,12 +5358,12 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         float damp = H < PAN ? 1.0 : smoothstep(lvl - 0.14, lvl, poolNoise(wq + seedOffset(seed), seed));
         crust *= mix(float3(1.0), float3(0.80, 0.82, 0.85), damp);
         tread = mix(tread, crust, crustW);
-        // The pan is dead level: lit by the smoothed heightfield, or with the lip and pool floor lit as
-        // walls and corners, every pool would be outlined.
-        s.level = crustW;
     }
+    // The pan is dead level: lit by the smoothed heightfield, or with the lip and pool floor lit as walls and corners,
+    // every pool would be outlined.
+    s.level = crustW;
     // Coarse levels carry no trees: the share of a column under canopy tints its ground with their leaves.
-    if (k > 0) {
+    if (k > 0 && !vegVox) {
         float2 cd = cdK;
         float cov = saturate(cd.x * COVER_GAIN);
         if (cov > 0.0) {
@@ -6633,7 +6643,11 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         // Past the 1-voxel map a pixel spans columns: the maps alone, with occluders from two texels out.
         // Under the moon, whose shadows are soft and faint, only near ground keeps the traced ray.
         bool mapOnly = maps && (shadows == 2 || k >= 1 || h.t > (L.night > 0.5 ? 120.0 : 500.0));
-        if (!mapOnly) sHit = trace(x.tr, so, L.key, brute ? 6000.0 : maps ? SHADOW_NEAR : 700.0, shadowIters, k);
+        // Where the maps shade the point fully, the traced ray can only agree. Maps baked for a light on or under the
+        // horizon shade nothing: there the lookup waits until after the ray.
+        bool mapFirst = maps && !mapOnly && L.key.y > 0.0;
+        float mapLit = mapFirst ? shadowMapLit(x, so, false) : 1.0;
+        if (!mapOnly && mapLit > 0.0) sHit = trace(x.tr, so, L.key, brute ? 6000.0 : maps ? SHADOW_NEAR : 700.0, shadowIters, k);
         // A ray that runs out of steps is still threading terrain toward the sun: count it as blocked there, so a
         // shaded spot never comes out lit.
         sHit.hit = sHit.hit || sHit.iters >= shadowIters;
@@ -6643,7 +6657,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         float reach = wf2 / max(L.key.y, 0.05);
         // A roof overhead is never a contact shadow.
         sh = sHit.hit ? (sHit.normal.y < 0 && sHit.iters < shadowIters ? 0.0 : 0.35 * (1.0 - smoothstep(2.0 + reach, 8.0 + reach, sHit.t))) : 1.0;
-        if (maps) sh = min(sh, shadowMapLit(x, so, mapOnly));
+        if (maps) sh = min(sh, mapFirst ? mapLit : shadowMapLit(x, so, mapOnly));
         // Under a roof the roof stands in for the ray: the maps see an overhang only from two texels out, and a traced ray
         // that slips out under the edge on one row and not the next stripes the back wall with sun.
         if (wf2 > 0.0 && !planar) sh = mix(sh, min(sh, stairShadow(x.tr, k, p.xz, L.key, d, contact, 0.35, fp > 3.0 || shadows == 2)), wf2);
@@ -6759,7 +6773,7 @@ static float3 shadeL(thread const Ctx& x, thread const Light& L, float3 o, float
 static inline float3 fogColor(thread const Ctx& x, float3 d, float T, float solid = 0.0) {
     // At night the sky's horizon gradient is mirrored below it, so far land and sea dim smoothly downward.
     float y = max(d.y, -d.y * x.L.night);
-    float3 c = skyColor(float3(d.x, mix(y, y * 0.5 + 0.12, T), d.z), x.L, false, x.seed, x.time);
+    float3 c = skyColor(float3(d.x, mix(y, y * 0.5 + 0.12, T), d.z), x.L);
     // Aerial colour cools away from the sun so far ridges separate from the sky.
     float away = saturate(dot(normalize(d.xz + 1e-5), normalize(x.L.sun.xz + 1e-5)) * 0.5 + 0.5);
     float3 cool = mix(float3(0.80, 0.82, 0.95), float3(0.52, 0.55, 0.88), x.L.gold);
@@ -6960,11 +6974,11 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float tEn
 }
 
 static float4 skyWithClouds(thread const Ctx& x, float3 o, float3 d) {
-    float3 raw = skyColor(d, x.L, false, x.seed, x.time);
+    float3 raw = skyColor(d, x.L);
     float3 bare = raw;
     // Forward-scatter glow near the horizon, matching what applyFog adds to fogged land.
     bare += x.L.keyCol * min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night) * smoothstep(0.1, 0.0, d.y);
-    float3 discs = skyColor(d, x.L, true, x.seed, x.time) - raw;
+    float3 discs = skyDiscs(raw, d, x.L, x.seed, x.time) - raw;
     CloudSample c = cloudSheet(x, o, d, x.prof1 ? 7000.0 : 1e9);
     // Clouds hide the stars, moon and sun behind them.
     // At night thin cloud veils the moon instead of hiding it.
@@ -6974,7 +6988,7 @@ static float4 skyWithClouds(thread const Ctx& x, float3 o, float3 d) {
 
 // Reflected sky: clouds softened (rippled water blurs them), no stars or discs; glitter handles the lights.
 static float3 softCloudSky(thread const Ctx& x, float3 o, float3 r) {
-    float3 sky = skyColor(r, x.L, false, x.seed, x.time);
+    float3 sky = skyColor(r, x.L);
     if (r.y < 0.02) return sky;
     float t = (CLOUD_Y - o.y) / r.y;
     float2 q = o.xz + r.xz * t + float2(x.origin);
@@ -7820,7 +7834,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     h.hit = false; h.t = x.tr.rmax; h.iters = 0; h.level = 0;
     if (f.shadow.z == 0.0 || !aboveHorizon(horizon, d)) h = trace(x.tr, o, d, x.tr.rmax, primaryIters, 0);
     if (f.misc2.z == 1) return float4(float(h.iters) / float(primaryIters), h.hit ? 0.3 : 0.0, h.iters >= primaryIters - 1 ? 1 : 0, 1);
-    if (f.misc2.z == 5) return float4(skyColor(d, x.L, false, x.seed, x.time), 1);
+    if (f.misc2.z == 5) return float4(skyColor(d, x.L), 1);
 
     float tw = d.y < 0 ? (SEA - o.y) / d.y : 1e9;
     bool water = d.y < 0 && tw > 0 && (!h.hit || tw < h.t);
