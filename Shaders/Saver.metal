@@ -6427,8 +6427,11 @@ static float4 bioSpot(float2 q, int plane, float cell, float pr, float r, float 
     float u = hashf(hh);
     if (u >= pr) return float4(0, 0, 0, 2);
     uint h1 = pcg(hh), h2 = pcg(h1), h3 = pcg(h2), h4 = pcg(h3);
-    float m = 0.35 * cell;
-    float2 c = ci * cell + m + (cell - 2.0 * m) * float2(hashf(h1), hashf(h2));
+    float m = 0.35 * cell, wa = 0.12 * cell;
+    float2 c = ci * cell + m + wa + (cell - 2.0 * (m + wa)) * float2(hashf(h1), hashf(h2));
+    // Each wanders a little about its place, inside the margin, so it never needs a neighbour cell.
+    float ph = 6.283 * hashf(h3);
+    c += wa * float2(sin(time * 0.53 + ph), sin(time * 0.41 + 2.1 * ph));
     float dd = length(q - c);
     if (dd >= m) return float4(0, 0, 0, 2);
     float rr = r * (0.6 + 0.8 * hashf(h3));
@@ -6437,7 +6440,8 @@ static float4 bioSpot(float2 q, int plane, float cell, float pr, float r, float 
     float g = (2.0 * exp(-e2) + 0.5 * exp(-e2 / 9.0)) * (rr * rr) / (re * re) * (1.0 - smoothstep(0.6 * m, m, dd));
     float hp = hashf(h4);
     float3 hue = hp < hues.x ? BIO_LAND[0] : hp < hues.x + hues.y ? BIO_LAND[1] : BIO_LAND[2];
-    return float4(hue * g * (0.75 + 0.25 * sin(time * (0.4 + 0.5 * hashf(pcg(h4))) + 6.283 * hp)), u / pr);
+    float pulse = 0.3 + 0.95 * smoothstep(-0.7, 1.0, sin(time * (0.65 + 0.8 * hashf(pcg(h4))) + 6.283 * hp));
+    return float4(hue * g * pulse, u / pr);
 }
 
 // Glowing fungus on trunk feet, speckled leaves (thickest under a giant's crown) and glowing plants on the forest floor:
@@ -8448,8 +8452,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             float2 slope = hv.xz / max(hv.y, 0.05);
             float2 vh = normalize(d.xz + 1e-5);
             float sa = dot(slope, vh), sc = slope.x * vh.y - slope.y * vh.x;
-            float q = sa * sa / 0.05 + sc * sc / 0.012;
-            float cover = 0.55 * exp(-q) + 0.25 * exp(-0.2 * q);
+            float q = sa * sa / 0.035 + sc * sc / 0.006;
+            float cover = 0.55 * exp(-q) + 0.18 * exp(-0.25 * q);
             // Glitter: a facet lights where the ripple field clears a threshold set by the cover, so the core is a
             // broken sheen and the skirt thins to scattered sparks. Each octave hands over to the next coarser as
             // its features shrink toward a pixel, measured along the foreshortened view; far out, swells long
