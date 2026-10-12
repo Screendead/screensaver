@@ -423,15 +423,25 @@ static inline float megaField(float2 p, uint seed, thread float2& q) {
     return fbm2(q / 16000.0, 3, seed + 202u) * 1.6 + 0.5;
 }
 
+// A pinned biome keeps only its own landforms: tableland and tepuis in desert and painted hills (4, 5), karst in lagoons
+// and jungle (7, 8), ranges alone in the rest.
+static inline bool pinnedTable(uint b) { return b == 4 || b == 5; }
+static inline bool pinnedKarst(uint b) { return b == 7 || b == 8; }
+
 // A province's alpine share (the rest is tableland and karst), at its warped position q.
-static inline float megaAlpine(float2 q, uint seed) { return smoothstep(-0.12, 0.12, perlin2(q / 22000.0, seed + 203u)); }
+static inline float megaAlpine(float2 q, uint seed) {
+    uint b = pinnedBiome(seed);
+    if (b != 0 && !pinnedTable(b) && !pinnedKarst(b)) return 1.0;
+    return smoothstep(-0.12, 0.12, perlin2(q / 22000.0, seed + 203u));
+}
 
 // The tepui of p's 30k cell, if one stands there: its centre c, rim radius R and hash hc.
 static inline bool tepuiIn(float2 p, uint seed, thread float2& c, thread float& R, thread uint& hc) {
     const float CELL = 30000.0;
     int2 cell = int2(floor(p / CELL));
     hc = hash2i(cell, seed + 240u);
-    if (hashf(hc) >= 0.35) return false;
+    uint b = pinnedBiome(seed);
+    if (hashf(hc) >= 0.35 || (b != 0 && !pinnedTable(b))) return false;
     c = (float2(cell) + 0.25 + 0.5 * float2(hashf(pcg(hc)), hashf(pcg(hc + 1u)))) * CELL;
     R = 900.0 + 600.0 * hashf(pcg(hc + 2u));
     return true;
@@ -449,7 +459,8 @@ static inline Mega megaLift(float2 p, float lagoon, uint seed) {
     if (M > 0.0) {
         float b = perlin2(q / 22000.0 + 9.7, seed + 204u);
         float wA = megaAlpine(q, seed);
-        float wT = (1.0 - wA) * smoothstep(-0.12, 0.12, b);
+        uint pb = pinnedBiome(seed);
+        float wT = (1.0 - wA) * (pinnedTable(pb) ? 1.0 : pinnedKarst(pb) ? 0.0 : smoothstep(-0.12, 0.12, b));
         float wK = (1.0 - wA) * (1.0 - wT);
         float core = smoothstep(0.55, 0.95, m);
         float U = 0.0;
