@@ -1077,7 +1077,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     // Sun height the glowing bugs start from (BIO_SUN in Shaders/Saver.metal).
     static let bioSun: Float = 0.07
     // Bug sprites: one per cube of the MOTE_N^3 block round the camera (bioVertex in Shaders/Saver.metal).
-    static let moteCount = 18 * 18 * 18
+    static let moteCount = 23 * 23 * 23
     private var historyIndex = 0
     private var prevCamera: (pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>)?
     let world: World

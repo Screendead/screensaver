@@ -6457,7 +6457,7 @@ static float3 bioGlow(texture2d<float> hm, texture2d<uint> st, texture2d<float> 
     bool giant = multi && ((gsb >> 28) & 7u) != 0u;
     // Giants carry their glow farther than the scatter elsewhere, which far off would mass into a sprinkled carpet;
     // theirs thins with distance one spot at a time (keep, below).
-    float far = giant ? 1.0 - 0.25 * smoothstep(0.3, 0.75, fp) : 1.0 - smoothstep(0.25, 0.5, fp);
+    float far = giant ? 1.0 - 0.25 * smoothstep(0.6, 1.4, fp) : 1.0 - smoothstep(0.5, 1.0, fp);
     if (far <= 0.0) return 0;
     int3 vw = v + int3(origin.x, 0, origin.y);
     float3 wp = p + float3(float(origin.x), 0.0, float(origin.y));
@@ -6476,10 +6476,10 @@ static float3 bioGlow(texture2d<float> hm, texture2d<uint> st, texture2d<float> 
         k4 = giant ? float4(3.0, 0.6, 0.5, 0) : float4(2.0, 0.45, 0.3, 0);
         hues = float2(0.3, 0.2);
     } else if (mat == 1) {
-        k4 = float4(giant ? 5.0 : 4.0, giant ? (n.y < 0 ? 0.4 : 0.25) : 0.015, giant ? 0.45 : 0.35, 1);
+        k4 = float4(giant ? 5.0 : 4.0, giant ? (n.y < 0 ? 0.4 : 0.25) : 0.06, giant ? 0.45 : 0.35, 1);
         hues = float2(0.25, 0.6);
     } else if (mat == 0 && n.y > 0) {
-        k4 = float4(6.0, 0.1, 0.5, 2);
+        k4 = float4(6.0, 0.16, 0.5, 2);
         hues = float2(0.25, 0.4);
         plane = 0;
     } else return 0;
@@ -6490,12 +6490,13 @@ static float3 bioGlow(texture2d<float> hm, texture2d<uint> st, texture2d<float> 
     // spacing (low skirts more), and none ride the vines, which hang against the sky.
     float jw = smoothstep(0.65, 0.9, c.jungle);
     if (giant) {
-        float keep = 1.15 * (1.0 - smoothstep(0.25, 0.75, fp)) * (1.0 - jw * (vine ? 1.0 : hb < 30.0 ? 0.75 : 0.6));
+        float keep = 1.15 * (1.0 - smoothstep(0.5, 1.4, fp)) * (1.0 - jw * (vine ? 1.0 : hb < 30.0 ? 0.75 : 0.6));
         return sp.rgb * fade * (1.0 - smoothstep(keep - 0.15, keep, sp.w));
     }
     float prov = smoothstep(0.1, 0.5, provinceAmount(c));
-    float wet = k4.w == 2.0 ? prov : max(prov, 0.3 * smoothstep(0.4, 0.65, c.moist));
-    wet *= (1.0 - smoothstep(0.42, 0.18, c.temp)) * smoothstep(0.05, 0.4, perlin2(float2(vw.xz) / 70.0, seed + 704u)) * (1.0 - 0.6 * jw);
+    // Night is dark but for the glow: damp land well beyond the forests carries it, in broad patches.
+    float wet = max(prov, (k4.w == 2.0 ? 0.5 : 0.7) * smoothstep(0.25, 0.55, c.moist));
+    wet *= (1.0 - smoothstep(0.42, 0.18, c.temp)) * smoothstep(-0.2, 0.2, perlin2(float2(vw.xz) / 70.0, seed + 704u)) * (1.0 - 0.6 * jw);
     return sp.w < wet ? sp.rgb * fade : float3(0);
 }
 
@@ -7258,9 +7259,9 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
     float fpv = tw * x.pixelAngle / max(-d.y, 0.1);
     float3 c = 0;
     float big = seaNoise(ww * (1.0 / 900.0), x.seed + 144u);
-    // b2 lies in [-0.5, 0.5]: under -0.225 big alone rules out a bloom.
-    float b2 = big > -0.225 ? seaNoise(ww * (1.0 / 230.0), x.seed + 145u) : -0.5;
-    float bloom = smoothstep(0.0, 0.15, big + 0.45 * b2);
+    // b2 lies in [-0.5, 0.5]: under -0.5 big alone rules out a bloom.
+    float b2 = big > -0.5 ? seaNoise(ww * (1.0 / 230.0), x.seed + 145u) : -0.5;
+    float bloom = smoothstep(-0.275, -0.075, big + 0.45 * b2);
     float3 hue0 = mix(BIO_LAND[0], BIO_LAND[1], 0.15 + 0.3 * smoothstep(-0.15, 0.15, b2));
     float near = smoothstep(420.0, 180.0, tw) * (1.0 - fres);
     if (bloom <= 0.0 && near <= 0.0 && wake <= 0.0) return 0;
@@ -7449,8 +7450,8 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
 // sprite over the scene (Renderer: one instance per cube of the MOTE_N^3 block round the camera). Whether a bug is there
 // is decided at its anchor, so drifting over a column edge never switches it.
 constant float MOTE_CELL = 6.0;
-constant float MOTE_REACH = 50.0;
-constant int MOTE_N = 18; // cubes along each side of the block, which must hold the sphere of MOTE_REACH; Renderer.moteCount
+constant float MOTE_REACH = 66.0;
+constant int MOTE_N = 23; // cubes along each side of the block, which must hold the sphere of MOTE_REACH; Renderer.moteCount
 
 struct MoteOut { float4 pos [[position]]; float3 m [[flat]]; float re [[flat]]; float3 col [[flat]]; };
 
@@ -7483,7 +7484,7 @@ vertex MoteOut bioVertex(uint vid [[vertex_id]], uint iid [[instance_id]], const
     float above = a.y - col4.r;
     if (above >= 8.0 || above <= (veg ? -25.0 : -1.0)) return o;
     Climate cl = climateAt(clim, ml, pv, origin);
-    float w = max(smoothstep(0.1, 0.5, provinceAmount(cl)), veg ? 0.2 * smoothstep(0.35, 0.6, cl.moist) : 0.0)
+    float w = max(smoothstep(0.1, 0.5, provinceAmount(cl)), (veg ? 0.7 : 0.35) * smoothstep(0.25, 0.55, cl.moist))
             * (1.0 - smoothstep(0.42, 0.18, cl.temp));
     if (hashf(h5) >= w) return o;
     float tanH = f.camPos.w;
