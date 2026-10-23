@@ -44,7 +44,9 @@ Snapshot test switches: `VR_MOTION=1` (with `VR_MOTION_FRAMES=n`, `VR_FRAMES=n`)
 `VR_CHUNKED=1` updates the LOD rings a piece per frame as live, `VR_COARSE_FULL=1` rebuilds them whole every frame,
 `VR_LODSHIFT=v` moves the rings' centre v voxels ahead of the camera, and `VR_POWER_FLIP=i` switches power source at frame i.
 `VR_EXPOSURE=e` holds a bug report's recorded exposure, and `VR_BUGTEST=s` flies s seconds recording as the saver does, then
-writes a report into `<screenshot>_reports/`.
+writes a report into `<screenshot>_reports/`. `VR_PATH=file` renders a recorded camera path frame by frame, and
+`./bugclip.sh "<bug report folder>" [app] [out.mp4]` uses it to prove a fix: the report's clip over the same camera path
+through the build, in one video.
 Caves: `VR_CAVES=r` lists the caves within r of each new map's centre (and counts the lowland ones), `VR_CAVE=distance,height,bearing[,rank[,which]]` holds the
 camera on the rank-th nearest cave (which: 1 lived-in, 2 big and seen clear, 3 grottoes), `VR_DOLLY=v` moves a held camera v voxels
 a frame along its heading (approaches across the rings), and `VR_NOCAVES=1` leaves the cave table empty (renders as before caves).

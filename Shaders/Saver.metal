@@ -2489,10 +2489,10 @@ static void writeVeg(GCol gc, float G, uint2 gid, texture2d<float, access::write
         dst.write(float4(gc.H, G, gc.n == 2 ? gc.gh : G, max(gc.leafStart, G)), gid);
         return;
     }
-    // The gaps go where the morph sends them to the level-1 column's (coarseColumn): the highest in the principal slot,
-    // toward its principal gap; the taller of any two below it (the air under a crown) in the first extra slot, toward
-    // its second gap; the other in the second, which closes. With one gap the principal slot holds it inverted (lo > hi):
-    // no gap to the trace, but still the bound under which it looks for extra gaps, and air to corner AO.
+    // The highest gap in the principal slot; the taller of any two below it (the air under a crown) in the first extra
+    // slot, the other in the second (the morph band takes them all by height: giantBand). With one gap the principal slot
+    // holds it inverted (lo > hi): no gap to the trace, but still the bound under which it looks for extra gaps, and air
+    // to corner AO.
     float4 e = gc.n == 2 ? float4(gc.gl, gc.gh, 0, 0) : gc.n == 4 && gc.e.w - gc.e.z > gc.e.y - gc.e.x ? gc.e.zwxy : gc.e;
     dst.write(float4(gc.H, gc.n == 2 ? float2(gc.gh, gc.gl) : float2(gc.gl, gc.gh), GIANT_A), gid);
     gx.write(uint4(uint(e.x), uint(e.y), uint(e.z) | (GAP_GIANT << 11), uint(e.w)), gid);
@@ -4425,47 +4425,43 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
     Col c0 = terrainColumnC(b, seed, s, caves), c1 = terrainColumnC(b + int2(hs, 0), seed, s, caves);
     Col c2 = terrainColumnC(b + int2(0, hs), seed, s, caves), c3 = terrainColumnC(b + int2(hs, hs), seed, s, caves);
     float H = coarseCombine(c0.h, c1.h, c2.h, c3.h, float(s));
-    // A giant: where at least two samples stand in it, the mean of their tops, of their lowest gaps (the air under the
-    // crown, the second gap) and of the tallest gap above that (between tiers, the principal one); solid where two are
-    // trunk or one is a hanging root. A root sample cuts the lowest gap to the air it shares; a buttress sample
-    // raises its floor.
+    // A giant: where at least two samples stand in it, the mean of their tops, and under it air where most of them have
+    // air at that height (a mean of their gaps paired a gap under a limb with the crown's air beside it and hung a slab
+    // between them). Air must be a hanging root's too, so each root keeps its length and stands in the column; a buttress
+    // sample raises the air's floor. Of the gaps that leaves, the principal is the highest and the second the one below it;
+    // past GAP2_LEVELS the one gap is the lowest, the crown's air.
     Giant gi;
     if (giantAt(giants, float2(b + hs / 2) + 0.5, float(s), gi)) {
         float hs4[4] = { c0.h, c1.h, c2.h, c3.h };
         int2 o4[4] = { int2(0), int2(hs, 0), int2(0, hs), int2(hs, hs) };
-        float nT = 0.0, sH = 0.0, nS = 0.0, nTop = 0.0, sLowH = 0.0, floorH = -1e9;
-        float4 sLow = 0.0, sUp = 0.0;   // (sum lo, sum hi, count, -)
-        // Aerial roots: the air all their samples share, so each keeps its length and stands in the column.
-        float2 thinG = float2(-1e9, 1e9);
-        bool thinSolid = false;
+        float nT = 0.0, sH = 0.0, nTop = 0.0, sLowH = 0.0, floorH = -1e9;
+        float2 sg[4][3];
+        float sTop[4];
+        bool sThin[4];
+        float bnd[30];
+        int nb = 0;
         for (int i = 0; i < 4; i++) {
             GCol gc;
             GRuns rr;
             rr.n = 0;
             rr.thin = false;
-            if (giantColumn(gi, float2(b + o4[i]) + 0.5, hs4[i], rr, gc, k)) {
-                nT += 1.0;
-                float2 gs[3] = { gc.e.zw, gc.e.xy, float2(gc.gl, gc.gh) };
-                int lowI = -1;
-                for (int j = 0; j < 3; j++) if (gs[j].y > gs[j].x) { lowI = j; break; }
-                // Under three gaps, the taller of the two below the highest (as the 1-voxel map files it: writeVeg).
-                if (lowI == 0 && gs[1].y - gs[1].x > gs[0].y - gs[0].x) lowI = 1;
-                if (lowI < 0) {
-                    // A buttress or an arching root raises the floor of the crown's air; a trunk, a hanging root or a
-                    // skirt of leaves down to the ground fills the column.
-                    if (!rr.thin && gc.H < gi.G + 120.0) { floorH = max(floorH, gc.H); sLowH += gc.H; continue; }
-                    if (rr.thin) { thinSolid = true; floorH = max(floorH, gc.leafStart); }
-                    nS += 1.0;
-                }
-                sH += gc.H;
-                nTop += 1.0;
-                if (lowI < 0) continue;
-                if (rr.thin) thinG = float2(max(thinG.x, gs[lowI].x), min(thinG.y, gs[lowI].y));
-                else sLow += float4(gs[lowI], 1.0, 0.0);
-                float2 up = float2(0);
-                for (int j = lowI + 1; j < 3; j++) if (gs[j].y - gs[j].x > up.y - up.x) up = gs[j];
-                if (up.y > up.x) sUp += float4(up, 1.0, 0.0);
+            if (!giantColumn(gi, float2(b + o4[i]) + 0.5, hs4[i], rr, gc, k)) continue;
+            int v = int(nT);
+            nT += 1.0;
+            sg[v][0] = gc.e.zw; sg[v][1] = gc.e.xy; sg[v][2] = float2(gc.gl, gc.gh);
+            sTop[v] = gc.H;
+            sThin[v] = rr.thin;
+            bool gap = false;
+            for (int j = 0; j < 3; j++) {
+                if (sg[v][j].y <= sg[v][j].x) continue;
+                gap = true;
+                bnd[nb++] = sg[v][j].x; bnd[nb++] = sg[v][j].y;
             }
+            bnd[nb++] = gc.H;
+            // A buttress or an arching root (solid, low, no crown over it) raises the floor of the crown's air.
+            if (!gap && !rr.thin && gc.H < gi.G + 120.0) { floorH = max(floorH, gc.H); sLowH += gc.H; continue; }
+            sH += gc.H;
+            nTop += 1.0;
         }
         if (nT >= 2.0) {
             // Marks the column as a giant's for shading (coverDepthL).
@@ -4474,22 +4470,62 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
             // buttresses) for giantSurface; an empty gap is no gap to the trace or the morph.
             if (nTop < 1.0) { float t = max(floor(sLowH / nT + 0.5), H); g2 = float2(t); return float3(t, 0, 0); }
             float top = floor(sH / nTop + 0.5);
-            bool thin = thinG.y < 1e8;
-            g2 = float2(max(max(floorH, thinG.x), 0.0));
-            if (k > GAP_LEVELS || nS >= 2.0 || thinSolid || (sLow.z < 1.0 && !thin)) return float3(max(top, H), 0, 0);
-            float2 lowG = sLow.z >= 1.0 ? floor(sLow.xy / sLow.z + 0.5) : thinG;
-            lowG = float2(max(max(lowG.x, thinG.x), max(floorH, H)), min(lowG.y, thinG.y));
-            float nG = sLow.z + (thin ? 1.0 : 0.0);
-            if (lowG.y - lowG.x < 2.0 || top - lowG.y < 1.0) {
-                // The lowest gaps disagree (a drooping skirt): the gap between tiers alone, if the samples share one.
-                float2 upA = sUp.z >= 2.0 ? floor(sUp.xy / sUp.z + 0.5) : float2(0);
-                if (upA.y - upA.x >= 2.0 && top - upA.y >= 1.0 && upA.x > H) return float3(top, upA);
-                return float3(max(top, H), 0, 0);
+            float fl = max(floorH, H);
+            g2 = float2(max(floorH, 0.0));
+            if (k > GAP_LEVELS) return float3(max(top, H), 0, 0);
+            bnd[nb++] = fl;
+            bnd[nb++] = top;
+            for (int i = 1; i < nb; i++) {
+                float a = bnd[i];
+                int j = i - 1;
+                while (j >= 0 && bnd[j] > a) { bnd[j + 1] = bnd[j]; j--; }
+                bnd[j + 1] = a;
             }
-            float2 upG = sUp.z >= max(1.0, 0.5 * nG) ? floor(sUp.xy / sUp.z + 0.5) : float2(0);
-            if (k <= GAP2_LEVELS && upG.y - upG.x >= 2.0 && upG.x >= lowG.y + 2.0 && top - upG.y >= 1.0) { g2 = lowG; return float3(top, upG); }
-            g2 = lowG;
-            return float3(top, lowG);
+            // The air runs between fl and top, bottom up.
+            float2 air[6];
+            int na = 0;
+            bool open = false;
+            for (int i = 0; i + 1 < nb; i++) {
+                float a = max(bnd[i], fl), c = min(bnd[i + 1], top);
+                if (c <= a) continue;
+                float y = 0.5 * (a + c);
+                float votes = 0.0;
+                bool rootSolid = false;
+                for (int v = 0; v < int(nT); v++) {
+                    bool inAir = y >= sTop[v];
+                    for (int j = 0; j < 3; j++) inAir = inAir || (y >= sg[v][j].x && y < sg[v][j].y);
+                    votes += inAir ? 1.0 : 0.0;
+                    rootSolid = rootSolid || (sThin[v] && !inAir);
+                }
+                bool isAir = 2.0 * votes > nT && !rootSolid;
+                if (isAir && open) air[na - 1].y = c;
+                else if (isAir && na < 6) { air[na++] = float2(a, c); open = true; }
+                else open = false;
+            }
+            for (int i = 0; i < na; i++) air[i] = floor(air[i] + 0.5);
+            // Air up to the top, or under less than a voxel of roof, leaves none: the column ends under it (dropped,
+            // it stood a pillar from the ground to the crown).
+            if (na > 0 && top - air[na - 1].y < 1.0) { top = max(air[na - 1].x, H); na--; }
+            int m = 0;
+            for (int i = 0; i < na; i++) if (air[i].y - air[i].x >= 2.0) air[m++] = air[i];
+            if (m == 0) return float3(max(top, H), 0, 0);
+            // More gaps than the level keeps: two over a run as thin as a limb's tip or an arching root join, so no run
+            // is left standing in the air; past that the shortest gap over the crown's air fills, joining the runs
+            // round it (joined across a tier of the crown, they left a hole through it).
+            for (int keep = k > GAP2_LEVELS ? 1 : 2; m > keep; m--) {
+                int j = 0;
+                for (int i = 1; i < m - 1; i++) if (air[i + 1].x - air[i].y < air[j + 1].x - air[j].y) j = i;
+                if (air[j + 1].x - air[j].y < 8.0) {
+                    air[j].y = air[j + 1].y;
+                    j++;
+                } else {
+                    j = 1;
+                    for (int i = 2; i < m; i++) if (air[i].y - air[i].x < air[j].y - air[j].x) j = i;
+                }
+                for (int i = j; i < m - 1; i++) air[i] = air[i + 1];
+            }
+            g2 = air[0];
+            return float3(top, air[m - 1]);
         }
     }
     // No trees take root in or beside a cave on the 1-voxel map (plantTrees keeps off carved rock): nor here.
@@ -4701,13 +4737,6 @@ static inline float2 parentGap2(thread const Terrain& tr, int k, int2 c) {
     return tr.cg2.read(uint2((w >> 1) & (COARSE_N - 1)), uint(k)).rg;
 }
 
-// A lower gap across the morph band: toward the parent's second gap where it has one (opening from its floor where
-// this column has none), else closing from the top. A crown's air would otherwise fill in across the band.
-static inline float2 morphGap2(float2 g, float2 p2, float w) {
-    if (p2.y > p2.x) return mix(g.y > g.x ? g : p2.xx, p2, w);
-    return float2(g.x, mix(g.y, g.x, w));
-}
-
 static inline float2 parentGap(thread const Terrain& tr, int k, int2 c) {
     if (k + 1 > GAP_LEVELS) return float2(0);
     int2 w = c + (k == 0 ? tr.origin : tr.origin >> k);
@@ -4730,14 +4759,71 @@ static inline bool giantAirAt(thread const Terrain& tr, int k, int2 c) {
     return g.y > g.x;
 }
 
+// A giant's column across the morph band, on the 1-voxel map (a giant's column, or any under a parent holding a crown's
+// air) and on the last level with a second gap (a column holding one): (H, principal gap, the height under which the
+// others lie) and the others (the 1-voxel map's extras, or the second gap in xy). A column with at most one gap whose
+// parent has as many, its gap and the run over it each overlapping the parent's, slides to the parent: nothing in it
+// moves through the air. Any other steps whole, H with its gaps, to its parent at a point of the band of its own.
+// Opening or closing a gap there (a gap under a limb beside the crown's air over it, a trunk's edge, bare ground under a
+// crown's rim) hung a run in the air that slid across the band; sliding a run between two gaps toward the parent's broke
+// a limb into pieces at each column's height; and a jungle crown under a giant's rim rose through the air to its crown.
+struct BandCol { float4 col; float4 e; };
+
+static inline bool giantBandAt(thread const Terrain& tr, int k, int2 c, float4 cl) {
+    if (k == 0) { float2 p2 = parentGap2(tr, 0, c); return cl.a == GIANT_A || p2.y > p2.x; }
+    return k == GAP2_LEVELS && giantAirAt(tr, k, c);
+}
+
+static BandCol giantBand(thread const Terrain& tr, int k, int2 c, float4 cl, float w) {
+    float4 e = k == 0 ? extraGaps(tr.gx.read(uint2(clamp(c, int2(0), int2(tr.size - 1)))))
+                      : float4(tr.cg2.read(uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1)), uint(k - 1)).rg, 0, 0);
+    float2 cg[3], pp[2];
+    int nc = 0, np = 0;
+    // A coarse column files a lone gap in both slots; the 1-voxel map's principal slot holds one inverted.
+    float2 cs[3] = { e.zw, e.xy, cl.yz };
+    for (int i = 0; i < 3; i++)
+        if (cs[i].y > cs[i].x && !(nc > 0 && all(cs[i] == cg[nc - 1]))) cg[nc++] = cs[i];
+    float2 ps[2] = { parentGap2(tr, k, c), parentGap(tr, k, c) };
+    for (int i = 0; i < 2; i++)
+        if (ps[i].y > ps[i].x && !(np > 0 && all(ps[i] == pp[np - 1]))) pp[np++] = ps[i];
+    for (int i = 1; i < nc; i++)
+        for (int j = i; j > 0 && cg[j].x < cg[j - 1].x; j--) { float2 t = cg[j]; cg[j] = cg[j - 1]; cg[j - 1] = t; }
+    if (np == 2 && pp[1].x < pp[0].x) { float2 t = pp[0]; pp[0] = pp[1]; pp[1] = t; }
+    float ph = parentH(tr, k, c);
+    bool pair = nc == np && nc <= 1 && (nc == 0 || (cg[0].x < pp[0].y && pp[0].x < cg[0].y && cg[0].y < ph && pp[0].y < cl.x));
+    float H = cl.x;
+    if (pair) {
+        H = mix(cl.x, ph, w);
+        for (int i = 0; i < nc; i++) cg[i] = mix(cg[i], pp[i], w);
+    } else if (w > 0.1 + 0.8 * hashf(hash2i(c + (k == 0 ? tr.origin : tr.origin >> k), 913u))) {
+        H = ph;
+        nc = np;
+        for (int i = 0; i < np; i++) cg[i] = pp[i];
+    }
+    BandCol r;
+    float2 top = nc > 0 ? cg[nc - 1] : float2(0);
+    r.col = float4(H, top, top.y);
+    r.e = float4(nc > 1 ? cg[nc - 2] : float2(0), nc > 2 ? cg[0] : float2(0));
+    return r;
+}
+
 // Morphed (H, gapLo, gapHi): across the band a column slides to its parent's height and its gap to the parent's (opening
 // from the parent's floor where it has none), or closes from the top where the parent has none, so at the handoff the
-// level equals the next one exactly.
+// level equals the next one exactly; a giant's column as giantBand has it, which also gives its other gaps (ext, with
+// got set).
 // w: the morph weight (columnMorphW).
 // w of the result: the height under which the column's extra gaps can lie (the top of its unmorphed principal gap, or of
 // its morphed one's floor).
-static inline float4 columnMorphW(thread const Terrain& tr, int k, int2 c, float w) {
-    float4 col = float4(columnL(tr, k, c).rgb, 0.0);
+static inline float4 columnMorphE(thread const Terrain& tr, int k, int2 c, float w, thread float4& ext, thread bool& got) {
+    float4 cl = columnL(tr, k, c);
+    got = false;
+    if (w > 0.0 && k <= GAP2_LEVELS && giantBandAt(tr, k, c, cl)) {
+        BandCol b = giantBand(tr, k, c, cl, w);
+        ext = b.e;
+        got = true;
+        return b.col;
+    }
+    float4 col = float4(cl.rgb, 0.0);
     col.w = max(col.y, col.z);
     if (w > 0.0) {
         float ph = parentH(tr, k, c);
@@ -4748,11 +4834,7 @@ static inline float4 columnMorphW(thread const Terrain& tr, int k, int2 c, float
             wh = step(0.5, w);
         col.x = mix(col.x, ph, wh);
         float2 pg = parentGap(tr, k, c);
-        // On the last level with a second gap, a giant column's crown air is what the parent's principal gap goes on as
-        // (secondGapW): the tier gap above it closes, where sliding it down through the crown as the crown's air closed
-        // from the top hung a solid skirt under every column of the band, descending, and climbing as the eye came.
-        bool crownAir = k == GAP2_LEVELS && pg.y > pg.x && giantAirAt(tr, k, c);
-        if (pg.y > pg.x && !crownAir) {
+        if (pg.y > pg.x) {
             float2 g0 = col.z > col.y ? col.yz : pg.xx;
             col.yz = mix(g0, pg, w);
         } else {
@@ -4763,18 +4845,19 @@ static inline float4 columnMorphW(thread const Terrain& tr, int k, int2 c, float
     return col;
 }
 
+static inline float4 columnMorphW(thread const Terrain& tr, int k, int2 c, float w) {
+    float4 ext;
+    bool got;
+    return columnMorphE(tr, k, c, w, ext, got);
+}
+
 // A coarse column's gap below the principal one, morphed by w: on levels 1...GAP2_LEVELS a giant crown's air under it
 // (cg2), else none. Only a point under the principal gap can be in it.
 static inline float2 secondGapW(thread const Terrain& tr, int k, int2 c, float w) {
     float2 g = k <= GAP2_LEVELS ? tr.cg2.read(uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1)), uint(k - 1)).rg : float2(0);
     if (w <= 0.0) return g;
-    float2 p2 = parentGap2(tr, k, c);
-    // The last level with a second gap: the crown's air goes on as the parent's principal gap (columnMorphW).
-    if (k == GAP2_LEVELS && g.y > g.x) {
-        float2 pg = parentGap(tr, k, c);
-        if (pg.y > pg.x) p2 = pg;
-    }
-    return morphGap2(g, p2, w);
+    if (k == GAP2_LEVELS && g.y > g.x) return giantBand(tr, k, c, columnL(tr, k, c), w).e.xy;
+    return float2(g.x, mix(g.y, g.x, w));
 }
 
 static inline float3 columnMorph(thread const Terrain& tr, int k, int2 c) {
@@ -4782,11 +4865,15 @@ static inline float3 columnMorph(thread const Terrain& tr, int k, int2 c) {
 }
 
 // The 1-voxel map's extra gaps (lo1, hi1, lo2, hi2) at frame-local column c, closing from the top across the morph band
-// (the coarser levels carry only the principal gap).
+// (the coarser levels carry only the principal gap); a giant's as giantBand has them.
 static inline float4 extraGapsMorph(thread const Terrain& tr, int2 c) {
-    float4 e = extraGaps(tr.gx.read(uint2(clamp(c, int2(0), int2(tr.size - 1)))));
     float w = morphAt(tr, 0, float2(c) + 0.5);
-    if (w > 0.0) { e.xy = morphGap2(e.xy, parentGap2(tr, 0, c), w); e.w = mix(e.w, e.z, w); }
+    if (w > 0.0) {
+        float4 cl = columnL(tr, 0, c);
+        if (giantBandAt(tr, 0, c, cl)) return giantBand(tr, 0, c, cl, w).e;
+    }
+    float4 e = extraGaps(tr.gx.read(uint2(clamp(c, int2(0), int2(tr.size - 1)))));
+    if (w > 0.0) e.yw = mix(e.yw, e.xz, w);
     return e;
 }
 
@@ -4894,16 +4981,18 @@ static Hit trace(thread const Terrain& tr, float3 o, float3 d, float tMax, int m
         // it); a ray passing over it moves on as a skip would. A ray above the column never needs its gaps, which lie
         // at least two voxels under its top: coarse levels read them only for a ray inside.
         float wm = morphAt(tr, k, (float2(lc) + 0.5) * s);
-        float4 col = columnMorphW(tr, k, lc, wm);
+        float4 ext;
+        bool got;
+        float4 col = columnMorphE(tr, k, lc, wm, ext, got);
         float H = col.x, gl = col.y, gh = col.z;
         bool inGap = yA >= gl && yA < gh;
         // Under the principal gap: the 1-voxel map's extra gaps, a coarse giant column's air under its crown.
         if (!inGap && k <= GAP2_LEVELS && yA < col.w) {
-            float4 e;
-            if (k == 0) {
+            float4 e = ext;
+            if (!got && k == 0) {
                 e = extraGaps(tr.gx.read(uint2(lc)));
-                if (wm > 0.0) { e.xy = morphGap2(e.xy, parentGap2(tr, 0, lc), wm); e.w = mix(e.w, e.z, wm); }
-            } else e = float4(secondGapW(tr, k, lc, wm), 0, 0);
+                if (wm > 0.0) e.yw = mix(e.yw, e.xz, wm);
+            } else if (!got) e = float4(secondGapW(tr, k, lc, wm), 0, 0);
             bool g1 = yA >= e.x && yA < e.y, g2 = yA >= e.z && yA < e.w;
             inGap = g1 || g2;
             gl = g1 ? e.x : e.z;
