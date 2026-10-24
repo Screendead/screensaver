@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Shares the GPU between agents: renders run together, timing runs alone.
+
+  vrgpu -- <cmd ...>          run cmd under the shared lock (screenshots, flights, motion frames)
+  vrgpu --time -- <cmd ...>   run cmd under the exclusive lock (any run whose ms you will report)
+  vrgpu --status              who holds the lock now, and the last holders
+"""
+import fcntl, os, signal, subprocess, sys, time
+
+# Machine-wide, not per checkout: every worktree's agents share one GPU. Not under /tmp, where a cleaner could
+# delete a held lock file and let a second holder in.
+DIR = os.path.expanduser('~/Library/Caches/vrgpu')
+LOG = os.path.join(DIR, 'log')
+
+
+def log(mode, event, cmd):
+    with open(LOG, 'a') as f:
+        f.write('%s %d %s %s %s\n' % (time.strftime('%Y-%m-%dT%H:%M:%S'), os.getpid(), mode, event, ' '.join(cmd)[:200]))
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def status():
+    lines = open(LOG).read().splitlines() if os.path.exists(LOG) else []
+    open_ = {}
+    for l in lines:
+        p = l.split(' ', 4)
+        if len(p) >= 4:
+            if p[3] == 'start':
+                open_[p[1]] = l
+            else:
+                open_.pop(p[1], None)
+    held = [l for pid, l in open_.items() if alive(int(pid))]
+    print('holding now:' if held else 'holding now: nobody')
+    for l in held:
+        print('  ' + l)
+    print('recent:')
+    for l in lines[-12:]:
+        print('  ' + l)
+
+
+def main(argv):
+    if argv[:1] == ['--status']:
+        return status()
+    timing = argv[:1] == ['--time']
+    if timing:
+        argv = argv[1:]
+    if argv[:1] != ['--'] or len(argv) < 2:
+        sys.exit(__doc__)
+    cmd = argv[1:]
+    # A command run inside a vrgpu command already holds the lock; taking it again would deadlock behind its own gate.
+    if os.environ.get('VRGPU_HELD'):
+        os.execvp(cmd[0], cmd)
+    os.makedirs(DIR, exist_ok=True)
+    mode = 'time' if timing else 'render'
+    gate = open(os.path.join(DIR, 'gate'), 'a')
+    gpu = open(os.path.join(DIR, 'gpu'), 'a')
+    # The gate makes timing writer-preferring: a waiting timer holds it, so new renders queue behind the timer
+    # rather than starving it; renders pass through it only to take their shared lock.
+    fcntl.flock(gate, fcntl.LOCK_EX)
+    fcntl.flock(gpu, fcntl.LOCK_EX if timing else fcntl.LOCK_SH)
+    if not timing:
+        fcntl.flock(gate, fcntl.LOCK_UN)
+    log(mode, 'start', cmd)
+    child = subprocess.Popen(cmd, env={**os.environ, 'VRGPU_HELD': '1'})
+    for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(s, lambda n, _: child.send_signal(n))
+    code = child.wait()
+    log(mode, 'end', cmd)
+    sys.exit(code if code >= 0 else 128 - code)
+
+
+main(sys.argv[1:])

@@ -17,6 +17,8 @@ Render an offscreen PNG at the live size (the scene renders on the 864-cell dith
 build/VoxelReverie.app/Contents/MacOS/voxelreverie --screenshot out.png --size 3456x2234 --scale 1 --seed 1 --times 10,60
 ```
 
+Run every launch of the binary through the GPU lock, `tools/vrgpu -- <binary> ...`, and any run whose ms you will report through `tools/vrgpu --time -- <cmd>`; `tools/vrgpu --status` shows who holds it.
+
 `--phase P`, `--pitch R` and `--debug M` override the day phase, camera pitch and debug view. Look at every PNG you render.
 
 ## VR_* switches (from README)
