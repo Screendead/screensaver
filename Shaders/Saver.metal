@@ -4771,7 +4771,11 @@ struct BandCol { float4 col; float4 e; };
 
 static inline bool giantBandAt(thread const Terrain& tr, int k, int2 c, float4 cl) {
     if (k == 0) { float2 p2 = parentGap2(tr, 0, c); return cl.a == GIANT_A || p2.y > p2.x; }
-    return k == GAP2_LEVELS && giantAirAt(tr, k, c);
+    if (k != GAP2_LEVELS) return false;
+    // Or one under a parent of the giant's own (cover depth 64): bare ground under the crown's rim would otherwise rise to
+    // the parent's crown with its air opening beneath, a slab crossing the band in mid-air.
+    int2 w = (c + (tr.origin >> k)) >> 1;
+    return giantAirAt(tr, k, c) || tr.cv.read(uint2(w & (COARSE_N - 1)), uint(k), 0).g > 0.99;
 }
 
 static BandCol giantBand(thread const Terrain& tr, int k, int2 c, float4 cl, float w) {

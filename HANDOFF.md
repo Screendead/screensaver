@@ -54,6 +54,7 @@ Every report under `~/Library/Application Support/STRATA/Bug Reports/` replayed 
 | 10-12 22.00 | Light lines in the forest at night | Fixed (c48780b) | Crest lines gone |
 | 10-23 16.05 | Tree vines weird again | Fixed (PR #1) | Dark streaks per frame 78 to 2 |
 | 10-24 22.21 | Bars travelling down a tower with the camera | Physics, not a bug (kept) | Dawn cloud shadows at a 3-degree sun swing fast as the 12-minute day lifts the sun; camera held still, they still slide. A clamp (PR #7) was reverted at Jack's call. If it grates, the lever is a slower clock around sunrise, not the shadows |
+| 10-25 00.21 | Tree vines still scuffed (far giant) | Fixed (fix/giant-band-scuff) | Not the vines: the same pieces show with the strand pass off. Columns under the crown's rim slid as slabs through the air across level 1's morph band (1376-1720 voxels). In a dolly through the band, pixels jumping around the tree 11.1 to 0.3 a frame; level-2 frames byte-identical. Needs a live look |
 
 Taste questions for Jack, not faults: should moon glints roll off softly rather than clip to flat white, and is the dense blue glow near the camera the Avatar look he wants?
 
