@@ -517,7 +517,7 @@ final class FlightCamera {
 
         // Constant angular ground flow: faster when high, slower when skimming.
         let agl = position.y - h(position.x, position.z)
-        let v = min(15, max(5.5, 3.5 + agl * 0.17))
+        let v = 2 * min(15, max(5.5, 3.5 + agl * 0.17))
         position.x += sin(yaw) * v * dt
         position.z += cos(yaw) * v * dt
 

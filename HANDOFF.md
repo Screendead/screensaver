@@ -29,6 +29,8 @@ STRATA has no finish line: it evolves for as long as it is used. The goal is a s
 
 Auto-start was off until 2026-10-24, so the saver never came on by itself. It is now on with a 15 s idle delay; the saver still holds off while a video or other app keeps the display awake. Watch whether that changes how often Jack sees it.
 
+The flight runs at twice its old speed (11-30 voxels/s by height, Jack's call 2026-10-25). 15-minute flights on seeds 1, 303 and 808 kept their clearance and never dropped low; frame times held (no frame over 16.7 ms on mains or battery).
+
 ## Open questions for Jack
 
 1. **What is missing when you don't use it?** If there are days the saver isn't running, or you turn it off, say why (too hot, too slow on battery, a fault, a scene you tire of). Each answer becomes the next step.
