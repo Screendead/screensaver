@@ -14,7 +14,7 @@ Statuses come from the commit history as of 2026-10-24 (master at 440f08b). "Mer
 | Biomes | Merged 2026-10-10 to 2026-10-12: autumn and painted hills, lagoons, salt flats, hamlets and towers; a menu can pin one biome and pinned biomes keep only their own landforms | 3ba1881, 52f7851, 80c0bc5, 5c09a40, 81e7019, 87247f1, f19c791 |
 | Wildlife | Boid flocks (songbirds, raptors, gulls, geese, starlings, bats) on master 2026-10-10; birds never pop in or out of view (2026-10-10, kept under mega terrain 2026-10-11); coral reefs and fish wakes merged 2026-10-12 | 7404e6c, b5c0805, fd986b7, 3a8bb97 |
 | Night glow | Sea glow, forest glow and glowing bugs merged 2026-10-12; distant glow brighter with distance and less lost to fog merged 2026-10-12 | 1842545, 3a8252c, 988778a, b7f16a4 |
-| Caves | Merged 2026-10-12 (cave table, mouths fitted to cliff faces, dressing moved out of surfaceAt for speed). No commit records a soak test with caves in | 3e19413, ed9a4ee, 8e68647 |
+| Caves | Merged 2026-10-12. Off-screen soak 2026-10-24 (below): two cave approaches at live size, median 6.3 and 4.8 ms, no slow frames after the first | 3e19413, ed9a4ee, 8e68647 |
 | Performance | Three rounds merged 2026-10-11 to 2026-10-12: cell-grid drawable (-176 MB), off-main far readback, CPU per frame -43%, adaptive idle poll, shared pipelines across screens, shading skips | 319d1e7, c41e403, 685c113 |
 | Menu | Menu bar item merged 2026-10-12: start now, pause, idle delay, dithering; later Time of Day presets, biome pinning, S for a screenshot | 871f5e1, ac00d66, 1a2dfd3, 87247f1, 7c27069 |
 | Bug reports | B while the saver shows files a report (clip, per-frame state, replay commands, note); merged 2026-10-12 | 55bfef4, 4478756 |
@@ -32,12 +32,21 @@ STRATA has no finish line: it evolves for as long as it is used. The goal is a s
 1. **What is missing when you don't use it?** If there are days the saver isn't running, or you turn it off, say why (too hot, too slow on battery, a fault, a scene you tire of). Each answer becomes the next step.
 2. **Unmerged branches.** Should `strata/islands2` (floating islands) and the other unmerged branches above be finished or archived?
 
+## Soak results (2026-10-24)
+
+`tools/soak.sh`, seed 1, 3456x2234, exclusive GPU lock, on mains power (`--battery` selects the battery path's 0.7 scale; the machine was plugged in). 30 s of frame-by-frame flight at t = 60, 600, 1200 and 1800 s, then two cave approaches from 300 voxels.
+
+| Run | Frames | Median | p95 | p99 | Worst |
+| --- | --- | --- | --- | --- | --- |
+| Flight, mains path | 7200 | 6.39 ms | 8.43 | 9.29 | 33.16 |
+| Flight, battery path | 7200 | 3.74 ms | 5.98 | 6.50 | 14.81 |
+| Approach, big cave in clear view | 280 | 6.31 ms | 7.94 | 10.11 | 10.32 |
+| Approach, lived-in cave | 280 | 4.83 ms | 6.05 | 10.32 | 22.19 |
+
+- Every frame over 16.7 ms is the first after a simulated time jump (cold temporal history and freshly built maps); steady flight peaks at 12.3 ms. The live saver never jumps, so these do not show live.
+- GPU memory in snapshot runs climbed with simulated time (433 MB at 60 s, 2.9 GB at 7200 s). It was an undrained autorelease pool in the snapshot path, fixed in 43ac04a (411 MB throughout). The live saver drains its pool every frame, so it should not have had this; the power soak measures the live process's memory to confirm.
+- Not measured: watts, battery drain and heat. Frame times suggest the cost but do not prove it.
+
 ## The plan
 
-**Next step: a cave soak test on Jack's Mac with `VR_TIMING=1`.** Caves are the most recent feature (2026-10-12) and the one the history shows no soak run for. Repeat the run with `--battery`, since the saver has to stay efficient on battery too. Build with `make`, then run a long preview with timing on, for example:
-
-```sh
-VR_TIMING=1 VR_CAVES=2000 build/VoxelReverie.app/Contents/MacOS/voxelreverie --preview --duration 1800 --speed 4 2>&1 | tee cave-soak.log
-```
-
-`VR_CAVES` lists the caves within 2000 voxels of each new map's centre, so the log shows which maps had caves; `VR_TIMING` logs GPU frame times and world regeneration. Look for frame-time spikes or slow regenerations near the cave lines, and file anything that looks wrong with B while it runs.
+**Next step: the battery soak on Jack's MacBook, overnight.** Run `tools/powersoak` (after `make`) and leave the laptop unplugged and untouched: it waits for battery power and 5 idle minutes, measures 20 minutes of baseline with the display held on, then runs the live saver until the battery reaches 3%, logging watts, battery %, battery temperature and the saver's memory every 30 s into `build/power/`. Its `summary.txt` gives the saver's watts over baseline, battery %/hour and whether memory stays flat; those decide the next step.

@@ -21,6 +21,17 @@ Run every launch of the binary through the GPU lock, `tools/vrgpu -- <binary> ..
 
 `--phase P`, `--pitch R` and `--debug M` override the day phase, camera pitch and debug view. Look at every PNG you render.
 
+## Tools
+
+| Tool | Use |
+| --- | --- |
+| `tools/vrgpu -- <cmd>` / `--time -- <cmd>` / `--status` | GPU lock: renders share it, timing runs hold it alone |
+| `tools/vrr <app> --screenshot ...` | The same render through a warm per-build server (byte-identical; skips the shader compile) |
+| `tools/render.sh <out dir> [app]` | The standard 32 frames (8 seeds x dawn, noon, sunset, night) and four contact sheets; milestones only |
+| `tools/vrgpu --time -- tools/bench.sh ROUNDS "a=<app> b=<app>" [regex]` | A/B GPU ms over twelve fixed scenes |
+| `tools/soak.sh` | Off-screen soak: frame-by-frame flight on mains and battery plus two cave approaches, with frame-time percentiles |
+| `tools/powersoak [app]` | On the laptop, unplugged: baseline then the live saver until 3% battery, logging watts, battery, heat and memory |
+
 ## VR_* switches (from README)
 
 | Switch | Effect |
