@@ -1337,7 +1337,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     // Advances the simulation; large steps are subdivided so steering stays stable.
     func simulate(_ dt: Double) {
         var remaining = dt * timeScale
-        while remaining > 0 {
+        // Snapshots simulate long stretches outside any run loop: without a pool per step, the autoreleased command
+        // buffers of each map rebuild, and the world buffers they retain, pile up (1 GB per simulated half hour).
+        while remaining > 0 { autoreleasepool {
             let step = min(remaining, 1.0 / 30.0)
             if let p = pinnedPhase { clock.phase = p }
             camera.sun = clock.sunDirection
@@ -1359,7 +1361,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 refreshFar()
             }
             remaining -= step
-        }
+        } }
         simTime += dt * timeScale
         // Out to the AC edge only once its level is built (after battery mode it is rebuilt in pieces).
         let full = Clipmap.handoff(Clipmap.levels), part = Clipmap.handoff(Clipmap.levels - 1)
