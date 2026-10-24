@@ -29,6 +29,7 @@ Run every launch of the binary through the GPU lock, `tools/vrgpu -- <binary> ..
 | `tools/vrr <app> --screenshot ...` | The same render through a warm per-build server (byte-identical; skips the shader compile) |
 | `tools/render.sh <out dir> [app]` | The standard 32 frames (8 seeds x dawn, noon, sunset, night) and four contact sheets; milestones only |
 | `tools/vrgpu --time -- tools/bench.sh ROUNDS "a=<app> b=<app>" [regex]` | A/B GPU ms over twelve fixed scenes |
+| `tools/flicker.py <dir or glob> [--skip n] [--crop WxH]` | Frame-to-frame flicker of a PNG sequence (a report's decoded clip, VR_PATH or VR_FRAMES renders): flip and one-frame blink rates in dark and bright regions |
 | `tools/soak.sh` | Off-screen soak: frame-by-frame flight on mains and battery plus two cave approaches, with frame-time percentiles |
 | `tools/powersoak [app]` | On the laptop, unplugged: baseline then the live saver until 3% battery, logging watts, battery, heat and memory |
 
