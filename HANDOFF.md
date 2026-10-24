@@ -51,7 +51,7 @@ Every report under `~/Library/Application Support/STRATA/Bug Reports/` replayed 
 | 10-12 21.56 | Karst in a grassland-only world | Fixed (f19c791), judged from code | The fix raised the terrain, so the replay camera sits inside it |
 | 10-12 22.00 | Light lines in the forest at night | Fixed (c48780b) | Crest lines gone |
 | 10-23 16.05 | Tree vines weird again | Fixed (PR #1) | Dark streaks per frame 78 to 2 |
-| 10-24 22.21 | Bars travelling down a tower with the camera | Fixed (fix/cloud-shadow-sweep) | Cloud shadows at a 3-degree dawn sun swept the wall about 47 voxels a second as the sun climbed; camera held still, the bands now hold. Band motion on the wall in the replay 1.11 to 0.38 per 0.1 s |
+| 10-24 22.21 | Bars travelling down a tower with the camera | Physics, not a bug (kept) | Dawn cloud shadows at a 3-degree sun swing fast as the 12-minute day lifts the sun; camera held still, they still slide. A clamp (PR #7) was reverted at Jack's call. If it grates, the lever is a slower clock around sunrise, not the shadows |
 
 Taste questions for Jack, not faults: should moon glints roll off softly rather than clip to flat white, and is the dense blue glow near the camera the Avatar look he wants?
 
