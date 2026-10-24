@@ -19,14 +19,15 @@ clip = [x for x in sel if x['time'] >= T - dur]
 with open(tmp + '/path.txt', 'w') as o:
     for x in sel:
         p = x['position']
-        o.write('%.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n' % (x['simTime'] / ts, p[0], p[2], p[1], x['yawDeg'], x['pitchDeg'], x['rollDeg'],
-                                                                 x['exposure'], x['phase']))
+        o.write('%.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %d\n' % (x['simTime'] / ts, p[0], p[2], p[1], x['yawDeg'], x['pitchDeg'], x['rollDeg'],
+                                                                    x['exposure'], x['phase'], x['day']))
 with open(tmp + '/concat.txt', 'w') as o:
     w = len(sel) - len(clip)
     for i, x in enumerate(clip):
         d = clip[i + 1]['time'] - x['time'] if i + 1 < len(clip) else 1 / 60
-        o.write(f"file 'f_p{w + i:04d}.png'\nduration {d:.6f}\n")
-    o.write(f"file 'f_p{w + len(clip) - 1:04d}.png'\n")
+        # A still image's stream runs at 25 fps by default, which rounds 60 fps durations away: most frames vanished.
+        o.write(f"file 'f_p{w + i:04d}.png'\noption framerate 1000\nduration {d:.6f}\n")
+    o.write(f"file 'f_p{w + len(clip) - 1:04d}.png'\noption framerate 1000\n")
 print(sel[0]['VR_CAM']); print(sel[0]['exposure']); print(sel[0]['simTime'] / ts); print(s['seed'])
 print('%dx%d' % tuple(s['drawable'])); print('%dx%d' % (s['clip']['width'], s['clip']['height']))
 print(s['renderScale']); print('--battery' if s['battery'] else ''); print('--nodither' if s.get('dither') is False else ''); print(ts)

@@ -2210,18 +2210,25 @@ enum Snapshot {
             // VR_EXPOSURE=e: the exposure a bug report recorded (snapshots jump straight to the target the saver eases toward).
             if let e = Double(env["VR_EXPOSURE"] ?? "") { r.exposure = e }
             simulated = t
-            // VR_PATH=file: renders each line "simTime x z y yawDeg pitchDeg rollDeg exposure [phase]" (a bug report's recorded
-            // frames, bugclip.sh) in turn as <screenshot>_pNNNN.png, carrying the temporal history across them as live. The
-            // phase holds the sky clock where the report's frame had it: the menu's Time of Day pins it in the saver.
+            // VR_PATH=file: renders each line "simTime x z y yawDeg pitchDeg rollDeg exposure [phase day]" (a bug report's
+            // recorded frames, bugclip.sh) in turn as <screenshot>_pNNNN.png, carrying the temporal history across them as live.
+            // Phase and day hold the sky clock where the report's frame had it: the menu's Time of Day pins the phase in the
+            // saver, and the day picks each night's lit beacons and rites.
             if let pf = env["VR_PATH"], let text = try? String(contentsOfFile: pf, encoding: .utf8) {
                 var bytes = [UInt8](repeating: 0, count: w * h * 4)
                 var n = 0
                 for line in text.split(separator: "\n") {
                     let v = line.split(separator: " ").compactMap { Double($0) }
-                    guard v.count == 8 || v.count == 9 else { continue }
-                    if v.count == 9 { r.pinnedPhase = v[8] }
+                    guard v.count == 8 || v.count == 10 else { continue }
+                    if v.count == 10 { r.pinnedPhase = v[8] }
                     r.simulate(max(v[0] - simulated, 0))
                     simulated = v[0]
+                    if v.count == 10 {
+                        r.clock.phase = v[8]
+                        r.clock.day = Int(v[9])
+                        r.camera.sun = r.clock.sunDirection
+                        r.camera.nightIndex = r.clock.nightIndex
+                    }
                     r.camera.freeze(position: SIMD3(v[1], v[3], v[2]), yaw: v[4] * .pi / 180, pitch: v[5] * .pi / 180, roll: v[6] * .pi / 180)
                     r.exposure = v[7]
                     let cb = r.queue.makeCommandBuffer()!
