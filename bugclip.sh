@@ -13,28 +13,30 @@ dur=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$rep/clip.mp4"
 args=("${(@f)$(python3 -I - "$rep/state.json" "$dur" "$tmp" <<'EOF'
 import json, sys
 s = json.load(open(sys.argv[1])); dur = float(sys.argv[2]); tmp = sys.argv[3]
-f = s['frames']; T = f[-1]['time']
+f = s['frames']; T = f[-1]['time']; ts = s.get('timeScale', 1)
 sel = [x for x in f if x['time'] >= T - dur - 1.0]
 clip = [x for x in sel if x['time'] >= T - dur]
 with open(tmp + '/path.txt', 'w') as o:
     for x in sel:
         p = x['position']
-        o.write('%.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n' % (x['simTime'], p[0], p[2], p[1], x['yawDeg'], x['pitchDeg'], x['rollDeg'], x['exposure']))
+        o.write('%.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n' % (x['simTime'] / ts, p[0], p[2], p[1], x['yawDeg'], x['pitchDeg'], x['rollDeg'],
+                                                                 x['exposure'], x['phase']))
 with open(tmp + '/concat.txt', 'w') as o:
     w = len(sel) - len(clip)
     for i, x in enumerate(clip):
         d = clip[i + 1]['time'] - x['time'] if i + 1 < len(clip) else 1 / 60
         o.write(f"file 'f_p{w + i:04d}.png'\nduration {d:.6f}\n")
     o.write(f"file 'f_p{w + len(clip) - 1:04d}.png'\n")
-print(sel[0]['VR_CAM']); print(sel[0]['exposure']); print(sel[0]['simTime']); print(s['seed'])
+print(sel[0]['VR_CAM']); print(sel[0]['exposure']); print(sel[0]['simTime'] / ts); print(s['seed'])
 print('%dx%d' % tuple(s['drawable'])); print('%dx%d' % (s['clip']['width'], s['clip']['height']))
-print(s['renderScale']); print('--battery' if s['battery'] else '')
+print(s['renderScale']); print('--battery' if s['battery'] else ''); print('--nodither' if s.get('dither') is False else ''); print(ts)
 EOF
 )}")
-cam=$args[1] exposure=$args[2] simTime=$args[3] seed=$args[4] size=$args[5] clipSize=$args[6] scale=$args[7] battery=$args[8]
+cam=$args[1] exposure=$args[2] simTime=$args[3] seed=$args[4] size=$args[5] clipSize=$args[6] scale=$args[7] battery=$args[8] nodither=$args[9]
+speed=$args[10]
 
 VR_PATH=$tmp/path.txt VR_CAM=$cam VR_EXPOSURE=$exposure "$app/Contents/MacOS/voxelreverie" --screenshot "$tmp/f.png" \
-    --size $size --seed $seed --times $simTime --scale $scale ${battery:+$battery} > /dev/null
+    --size $size --seed $seed --times $simTime --scale $scale --speed $speed ${battery:+$battery} ${nodither:+$nodither} > /dev/null
 
 # Labels, where Pillow is to hand (this ffmpeg has no drawtext).
 labels=()
