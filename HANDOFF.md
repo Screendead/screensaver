@@ -32,6 +32,28 @@ STRATA has no finish line: it evolves for as long as it is used. The goal is a s
 1. **What is missing when you don't use it?** If there are days the saver isn't running, or you turn it off, say why (too hot, too slow on battery, a fault, a scene you tire of). Each answer becomes the next step.
 2. **Unmerged branches.** Should `strata/islands2` (floating islands) and the other unmerged branches above be finished or archived?
 
+## Bug reports (triaged 2026-10-24)
+
+Every report under `~/Library/Application Support/STRATA/Bug Reports/` replayed through master 67ef343 with `bugclip.sh`, judged from frames and region measurements, and each verdict checked by a second agent trying to refute it (none disputed). Videos and evidence frames are in each report folder (`triage_before_after.mp4`, `triage/`, `verify/`, `fixcheck*`).
+
+| Report | What Jack saw | Status | Evidence |
+| --- | --- | --- | --- |
+| 10-12 09.42 | Hometree vines falling and receding | Fixed (54532f4, then PR #1) | Vines run unbroken at constant length |
+| 10-12 11.38 | Flickery water highlights | Fixed (e3a7050) | Single-frame blinks about 4x lower, at the noise floor of edges |
+| 10-12 12.39 | Specular water highlights wrong | Fixed | Mean frame difference on the water 9.3 to 1.7 |
+| 10-12 12.54 | Moon reflection too large | Fixed (a1a3357) | Path about 0.7x as wide |
+| 10-12 13.13 | Near-camera glow sporadic, tacky | Fixed (stable) | No confetti or brightness jumps; whether it reads as Avatar is Jack's call |
+| 10-12 16.12 | Vines still messed up | Fixed | Needed the phase fix in bugclip: at night the vines reach the ground in every frame, no floating pieces |
+| 10-12 17.46 | Foliage disappears near the bottom | Fixed | Bare ground in the lower third stays 5-7% (was climbing to 31%) |
+| 10-12 17.57 | Black bars on mountainsides | Fixed | Bands 2-3x brighter, level with the rock |
+| 10-12 21.56 | Karst in a grassland-only world | Fixed (f19c791), judged from code | The fix raised the terrain, so the replay camera sits inside it |
+| 10-12 22.00 | Light lines in the forest at night | Fixed (c48780b) | Crest lines gone |
+| 10-23 16.05 | Tree vines weird again | Fixed (PR #1) | Dark streaks per frame 78 to 2 |
+
+Taste questions for Jack, not faults: should moon glints roll off softly rather than clip to flat white, and is the dense blue glow near the camera the Avatar look he wants?
+
+`bugclip.sh` itself was the open fault: it replayed every report at the free-running clock, so night reports filed with Time of Day pinned replayed at dusk; it ignored dither off; and ffmpeg kept only about 25 of each 60 replayed frames. Fixed on `fix/bugclip-phase`.
+
 ## Soak results (2026-10-24)
 
 `tools/soak.sh`, seed 1, 3456x2234, exclusive GPU lock, on mains power (`--battery` selects the battery path's 0.7 scale; the machine was plugged in). 30 s of frame-by-frame flight at t = 60, 600, 1200 and 1800 s, then two cave approaches from 300 voxels.
