@@ -35,9 +35,12 @@ EOF
 )}")
 cam=$args[1] exposure=$args[2] simTime=$args[3] seed=$args[4] size=$args[5] clipSize=$args[6] scale=$args[7] battery=$args[8] nodither=$args[9]
 speed=$args[10]
+# The report's replay commands carry --phase when the menu pinned Time of Day: the warm-up before the path then runs at
+# the recorded hour too, so the wildlife in the air at the first frame is the recorded hour's.
+pinned=(${=$(grep -o -m1 -E -- '--phase [-0-9.]+' "$rep/replay.txt" 2>/dev/null || true)})
 
 VR_PATH=$tmp/path.txt VR_CAM=$cam VR_EXPOSURE=$exposure "$app/Contents/MacOS/voxelreverie" --screenshot "$tmp/f.png" \
-    --size $size --seed $seed --times $simTime --scale $scale --speed $speed ${battery:+$battery} ${nodither:+$nodither} > /dev/null
+    --size $size --seed $seed --times $simTime --scale $scale --speed $speed $pinned ${battery:+$battery} ${nodither:+$nodither} > /dev/null
 
 # Labels, where Pillow is to hand (this ffmpeg has no drawtext).
 labels=()
@@ -54,6 +57,6 @@ w=${clipSize%x*} h=${clipSize#*x}
 stack="[0:v]fps=60,setpts=PTS-STARTPTS[a0];[1:v]fps=60,setpts=PTS-STARTPTS,crop=$w:$h:0:0[b0]"
 if (( $#labels )); then stack="$stack;[a0][2:v]overlay=12:12[a];[b0][3:v]overlay=12:12[b]"; else stack="$stack;[a0]null[a];[b0]null[b]"; fi
 ffmpeg -loglevel error -y -i "$rep/clip.mp4" -f concat -safe 0 -i "$tmp/concat.txt" $labels \
-    -filter_complex "$stack;[a][b]vstack,format=yuv420p" -c:v libx264 -crf 16 -preset slow -movflags +faststart -shortest "$out"
+    -filter_complex "$stack;[a][b]vstack=shortest=1,format=yuv420p" -c:v libx264 -crf 16 -preset slow -movflags +faststart "$out"
 trash "$tmp"
 echo "$out"
