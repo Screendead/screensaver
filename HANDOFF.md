@@ -23,14 +23,18 @@ Statuses come from the commit history as of 2026-10-24 (master at 440f08b). "Mer
 
 Branches with commits that master lacks (from `git branch --no-merged master`): `strata/islands2` (31 commits, floating islands), `strata/islands-fix`, `strata/islands-b`, `strata/islands`, `strata/giant-C3` and `strata/giant-C2-roots` (morph-band work from 2026-10-13, before PR #1), `strata/vines3`, `strata/waves`, `strata/tundra`, `strata/merge4`, and single-commit prototypes. None of them is described in a merge message, so whether any is still wanted is unknown.
 
+## Goal (Jack, 2026-10-24)
+
+STRATA has no finish line: it evolves for as long as it is used. The goal is a screensaver Jack enjoys and finds beautiful, that stays fast and efficient on battery as well as on mains. The test is that Jack actually uses it on his MacBook; if he doesn't, something is missing, and finding what is the work. It stays a personal install (`install.sh`) for now; no signing or release.
+
 ## Open questions for Jack
 
-1. **What does finished mean?** Is STRATA done when it runs for a week on this Mac without a bug report, when a fixed list of features is in, or never (it stays a living project)? The answer decides whether the unmerged branches above (islands above all) get finished or archived.
-2. **How does STRATA leave this Mac?** Today `install.sh` builds it from source with `make`, copies the app to `~/Applications` and registers two login agents by hand; nothing is signed or notarised. The options include: it never leaves (personal use only); a signed, notarised app shared with friends; a `.saver` bundle for System Settings; or a public release. Each needs different work.
+1. **What is missing when you don't use it?** If there are days the saver isn't running, or you turn it off, say why (too hot, too slow on battery, a fault, a scene you tire of). Each answer becomes the next step.
+2. **Unmerged branches.** Should `strata/islands2` (floating islands) and the other unmerged branches above be finished or archived?
 
 ## The plan
 
-**Next step: a cave soak test on Jack's Mac with `VR_TIMING=1`.** Caves are the most recent feature (2026-10-12) and the one the history shows no soak run for. Build with `make`, then run a long preview with timing on, for example:
+**Next step: a cave soak test on Jack's Mac with `VR_TIMING=1`.** Caves are the most recent feature (2026-10-12) and the one the history shows no soak run for. Repeat the run with `--battery`, since the saver has to stay efficient on battery too. Build with `make`, then run a long preview with timing on, for example:
 
 ```sh
 VR_TIMING=1 VR_CAVES=2000 build/VoxelReverie.app/Contents/MacOS/voxelreverie --preview --duration 1800 --speed 4 2>&1 | tee cave-soak.log
