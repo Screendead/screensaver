@@ -1,0 +1,150 @@
+#!/usr/bin/python3 -I
+"""vrr: a fast `--screenshot`, served by a long-lived render server for the binary.
+
+  vrr <app-or-binary> --screenshot out.png [same args as the binary]   (VR_* env vars are passed on)
+
+Byte-identical to `tools/vrgpu -- <binary> --screenshot ...`, without paying process launch, Metal setup and shader
+compilation on every render. One server per binary build (path + binary and metallib mtimes), started on first use;
+it exits after 10 minutes idle or when the build changes. Takes the shared tools/vrgpu lock for each request only.
+
+  vrr --list      running servers
+  vrr --stop      stop all servers
+"""
+import array, fcntl, glob, hashlib, json, os, signal, socket, subprocess, sys, time
+
+# Next to tools/vrgpu's lock, which this shares; socket paths must stay under 104 bytes.
+D = os.path.expanduser("~/Library/Caches/vrr")
+G = os.path.expanduser("~/Library/Caches/vrgpu")
+os.makedirs(D, exist_ok=True)
+os.makedirs(G, exist_ok=True)
+
+
+def lock_log(event, cmd):
+    with open(f"{G}/log", "a") as f:
+        f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')} {os.getpid()} render {event} {cmd[:200]}\n")
+
+
+def resolve(target):
+    t = os.path.realpath(target)
+    if os.path.isdir(t):
+        t = os.path.join(t, "Contents/MacOS/voxelreverie")
+    if not os.access(t, os.X_OK):
+        sys.exit(f"vrr: no binary at {target}")
+    lib = os.path.join(os.path.dirname(os.path.dirname(t)), "Resources/Saver.metallib")
+    if not os.path.exists(lib):
+        lib = os.path.join(os.path.dirname(t), "Saver.metallib")
+    stamp = f"{t}:{os.stat(t).st_mtime_ns}:{os.stat(lib).st_mtime_ns if os.path.exists(lib) else 0}"
+    return t, hashlib.sha1(stamp.encode()).hexdigest()[:16]
+
+
+def connect(path):
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        s.connect(path)
+        return s
+    except OSError:
+        s.close()
+        return None
+
+
+def start(binary, key):
+    sock, logp = f"{D}/{key}.sock", f"{D}/{key}.log"
+    with open(f"{D}/{key}.lock", "a") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        s = connect(sock)
+        if s:
+            return s
+        env = {k: v for k, v in os.environ.items() if not k.startswith("VR_")}
+        with open(logp, "a") as lf:
+            lf.write(f"--- {binary}\n")
+            lf.flush()
+            p = subprocess.Popen([binary, "--serve", sock], stdin=subprocess.DEVNULL, stdout=lf, stderr=lf,
+                                 cwd="/", env=env, start_new_session=True)
+        with open(f"{D}/{key}.info", "w") as f:
+            f.write(f"{p.pid} {binary}\n")
+        t0 = time.time()
+        while time.time() - t0 < 600:
+            s = connect(sock)
+            if s:
+                return s
+            if p.poll() is not None:
+                break
+            time.sleep(0.05)
+        sys.stderr.write(f"vrr: server failed to start (exit {p.poll()}); log {logp}\n")
+        return None
+
+
+def request(s, args):
+    msg = json.dumps({"args": args, "env": {k: v for k, v in os.environ.items() if k.startswith("VR_")},
+                      "cwd": os.getcwd()}).encode() + b"\n"
+    sys.stdout.flush()
+    sys.stderr.flush()
+    sent = socket.send_fds(s, [msg], [1, 2])
+    if sent < len(msg):
+        s.sendall(msg[sent:])
+    buf = b""
+    while not buf.endswith(b"\n"):
+        chunk = s.recv(4096)
+        if not chunk:
+            return None
+        buf += chunk
+    return json.loads(buf).get("ok") is True
+
+
+def servers():
+    for info in sorted(glob.glob(f"{D}/*.info")):
+        pid, binary = open(info).read().split(" ", 1)
+        try:
+            os.kill(int(pid), 0)
+            yield int(pid), binary.strip(), info
+        except (OSError, ValueError):
+            pass
+
+
+def main():
+    a = sys.argv[1:]
+    if a[:1] == ["--list"]:
+        for pid, binary, _ in servers():
+            print(pid, binary)
+        return 0
+    if a[:1] == ["--stop"]:
+        for pid, _, _ in servers():
+            os.kill(pid, signal.SIGTERM)
+        return 0
+    if len(a) < 2 or a[0].startswith("-"):
+        print(__doc__)
+        return 2
+    if "--screenshot" not in a[1:] or "--preview" in a[1:] or "--serve" in a[1:]:
+        sys.exit("vrr: only --screenshot renders are served")
+    binary, key = resolve(a[0])
+    args = a[1:]
+
+    def serve():
+        # A build without --serve would ignore the flag and run as the live saver.
+        with open(binary, "rb") as f:
+            if b"vrr: --screenshot is required" not in f.read():
+                return subprocess.call([binary] + args)
+        s = connect(f"{D}/{key}.sock") or start(binary, key)
+        ok = request(s, args) if s else None
+        if ok is None:
+            sys.stderr.write(f"vrr: no reply from the server (log {D}/{key}.log); running the binary directly\n")
+            return subprocess.call([binary] + args)
+        return 0 if ok else 1
+
+    # Already inside vrgpu (shared or --time): locking again would deadlock behind a pending --time.
+    if os.environ.get("VRGPU_HELD"):
+        return serve()
+    # The same gate and lock as tools/vrgpu: through the gate exclusively, then hold the lock shared.
+    gpu, gate = open(f"{G}/gpu", "a"), open(f"{G}/gate", "a")
+    fcntl.flock(gate, fcntl.LOCK_EX)
+    fcntl.flock(gpu, fcntl.LOCK_SH)
+    fcntl.flock(gate, fcntl.LOCK_UN)
+    cmd = f"vrr {binary} {' '.join(args)}"
+    lock_log("start", cmd)
+    try:
+        return serve()
+    finally:
+        lock_log("end", cmd)
+
+
+sys.exit(main())
