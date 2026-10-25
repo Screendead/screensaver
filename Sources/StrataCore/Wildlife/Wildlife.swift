@@ -14,7 +14,7 @@ package final class Wildlife {
     static let maxClusters = 48, clusterSize = 16
     package static let bufferLength = ((maxFlocks + maxClusters) * 2 + maxBirds * 4) * MemoryLayout<SIMD4<Float>>.stride
 
-    package var flocks: [Flock] = []
+    package internal(set) var flocks: [Flock] = []
     private var state: UInt64
     var time = 0.0
     var spawnTimer = 0.0

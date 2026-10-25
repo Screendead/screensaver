@@ -3,15 +3,15 @@ import simd
 
 // Valley-following flight. Positions are world-space Doubles; the renderer rebases them onto the map.
 package final class FlightCamera {
-    package var position: SIMD3<Double>
-    package var yaw: Double
-    package var pitch: Double = -0.18
-    package var roll: Double = 0
+    package internal(set) var position: SIMD3<Double>
+    package internal(set) var yaw: Double
+    package internal(set) var pitch: Double = -0.18
+    package internal(set) var roll: Double = 0
     var yawRate: Double = 0
     var yawAccel: Double = 0
     var climbRate: Double = 0
     package var tracing = false
-    package var terms: [Double] = []
+    package internal(set) var terms: [Double] = []
     var time: Double = 0
     var surveyAmount: Double = 0
     var facing: Double = 0

@@ -24,12 +24,6 @@ extension FlightCamera {
         return (0.6 * reward, 1.2 * min(max((nearDeg - 15) / 10, 0), 1))
     }
 
-    // Shot director: score a candidate heading by what the frame would hold. Relief across the middle
-    // distance gives a subject; some water is welcome but a frame full of it is not; facing a low sun or
-    // the moon puts the light in shot; large turns cost a little so motion stays calm; land rising past eye
-    // height close ahead would fill the frame with a wall. Under a high sun close slopes read as blocks, so
-    // the shot looks out: open sightlines and water count for more, and near land climbing into the lower
-    // half of the frame (bottom edge 0.436 rad under the pitch) costs.
     // Interest of the sites a heading frames: by day the old stones and the villages, at night only what is lit.
     // Capped, so a site adds to a shot but never outvotes the land and the light.
     func siteInterest(_ heading: Double, night: Double) -> (Double, SiteInfo?) {
@@ -93,6 +87,12 @@ extension FlightCamera {
         }
     }
 
+    // Shot director: score a candidate heading by what the frame would hold. Relief across the middle
+    // distance gives a subject; some water is welcome but a frame full of it is not; facing a low sun or
+    // the moon puts the light in shot; large turns cost a little so motion stays calm; land rising past eye
+    // height close ahead would fill the frame with a wall. Under a high sun close slopes read as blocks, so
+    // the shot looks out: open sightlines and water count for more, and near land climbing into the lower
+    // half of the frame (bottom edge 0.436 rad under the pitch) costs.
     func shotScore(_ heading: Double, lightYaw: Double, lightW: Double, noon: Double, night: Double = 0) -> Double {
         let p = xz
         var rise = -Double.infinity, nearAngle = -Double.infinity
