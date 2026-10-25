@@ -5196,8 +5196,9 @@ static float3 skyColor(float3 d, Light L) {
     return c;
 }
 
-// The sky c (skyColor) with the sun's and moon's discs, and at night the stars and the Milky Way.
-static float3 skyDiscs(float3 c, float3 d, Light L, uint seed, float time) {
+// The sky c (skyColor) with the sun's and moon's discs, and at night the stars and the Milky Way. nightIndex is
+// the night index (Frame.lights.z), which steps the moon through its phases.
+static float3 skyDiscs(float3 c, float3 d, Light L, uint seed, float time, float nightIndex) {
     float s = max(dot(d, L.sun), 0.0);
     // Disc takes the key light's hue (amber near the horizon) and blooms into the haze.
     float3 tint = L.keyCol / max(max(L.keyCol.r, max(L.keyCol.g, L.keyCol.b)), 1e-3);
@@ -5206,7 +5207,12 @@ static float3 skyDiscs(float3 c, float3 d, Light L, uint seed, float time) {
 
     if (L.night > 0.0) {
         float md = max(dot(d, L.moon), 0.0);
-        c += float3(0.10, 0.13, 0.22) * (pow(md, 24.0) * 0.6 + pow(md, 400.0) * 1.5) * L.night;
+        // An 8-night cycle of phases with full moon at k = 4. It stops short of new moon (lit share 0.13), which would
+        // leave no moon at all. th is the sun's angle around the moon as seen from here: pi is full.
+        uint k = (uint(int(nightIndex) + 8000) + pcg(seed + 5u)) & 7u;
+        float th = 3.14159265 + 0.6 * (float(k) - 4.0);
+        float lit = 0.5 - 0.5 * cos(th);
+        c += float3(0.10, 0.13, 0.22) * (pow(md, 24.0) * 0.6 + pow(md, 400.0) * 1.5) * L.night * lit;
         // Stars: one hashed point per cell, thinned by low-frequency noise into clusters and voids and
         // denser along a band (a galactic plane at a seed-dependent tilt).
         float3 q = d * 260.0;
@@ -5227,7 +5233,8 @@ static float3 skyDiscs(float3 c, float3 d, Light L, uint seed, float time) {
         float dust = saturate(rift * 0.6 + murk * 0.4);
         float3 mwCol = mix(float3(0.55, 0.62, 0.90), float3(0.95, 0.88, 0.78), saturate(core * (0.5 + 0.8 * n2)));
         float horizonFade = smoothstep(0.0, 0.12, d.y);
-        float mw = glow * (1.0 - dust) * L.night * horizonFade;
+        // A thin moon leaves the sky darker, so the Milky Way stands out.
+        float mw = glow * (1.0 - dust) * L.night * horizonFade * (1.6 - 0.6 * lit);
         c += mwCol * mw * 0.07;
         if (mw > 0.02) {
             float3 fq = d * 500.0;
@@ -5244,14 +5251,21 @@ static float3 skyDiscs(float3 c, float3 d, Light L, uint seed, float time) {
             float twinkle = 0.7 + 0.3 * sin(time * 1.3 + hashf(pcg(h + 4)) * 40.0);
             c += float3(0.9, 0.95, 1.1) * b * twinkle * smoothstep(0.55, 0.0, dd) * L.night * smoothstep(0.0, 0.05, d.y) * (1.0 - 0.8 * dust);
         }
-        // Moon: a clean disc whose maria are Perlin noise.
+        // Moon: a clean disc whose maria are Perlin noise. The terminator steps in blocks of a 14-cell grid like the
+        // voxels; the grid is held inside the rim, or a full moon's rim cells would turn half dark. The night side keeps
+        // a faint ash-blue earthshine, so a crescent still reads as a whole moon.
         if (md > 0.99) {
             float3 mu = normalize(cross(L.moon, float3(0, 1, 0)));
             float3 mv = cross(mu, L.moon);
             float2 xy = float2(dot(d, mu), dot(d, mv)) / 0.03;
             float disc = 1.0 - smoothstep(0.96, 1.0, length(xy));
             float lum = 0.92 - 0.3 * smoothstep(0.15, 0.55, fbm2(xy * 1.3 + 3.0, 3, 9u) + 0.25);
-            c = mix(c, float3(0.75, 0.80, 0.92) * 2.4 * lum, L.night * disc);
+            float2 xq = (floor(xy * 7.0) + 0.5) / 7.0;
+            xq *= min(1.0, 0.98 / length(xq));
+            float3 n = float3(xq, sqrt(1.0 - dot(xq, xq)));
+            float sunlit = smoothstep(-0.05, 0.05, dot(n, float3(sin(th), 0.0, -cos(th))));
+            float3 moonCol = mix(float3(0.55, 0.65, 0.9) * 0.144, float3(0.75, 0.80, 0.92) * 2.4, sunlit) * lum;
+            c = mix(c, moonCol, L.night * disc);
         }
     }
     return c;
@@ -7747,7 +7761,7 @@ static float4 skyWithClouds(thread const Ctx& x, float3 o, float3 d) {
     float3 bare = raw;
     // Forward-scatter glow near the horizon, matching what applyFog adds to fogged land.
     bare += x.L.keyCol * min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night) * smoothstep(0.1, 0.0, d.y);
-    float3 discs = skyDiscs(raw, d, x.L, x.seed, x.time) - raw;
+    float3 discs = skyDiscs(raw, d, x.L, x.seed, x.time, x.lights.z) - raw;
     CloudSample c = cloudSheet(x, o, d, x.prof1 ? 7000.0 : 1e9);
     // Clouds hide the stars, moon and sun behind them.
     // At night thin cloud veils the moon instead of hiding it.
