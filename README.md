@@ -50,8 +50,6 @@ through the build, in one video.
 Caves: `VR_CAVES=r` lists the caves within r of each new map's centre (and counts the lowland ones), `VR_CAVE=distance,height,bearing[,rank[,which]]` holds the
 camera on the rank-th nearest cave (which: 1 lived-in, 2 big and seen clear, 3 grottoes), `VR_DOLLY=v` moves a held camera v voxels
 a frame along its heading (approaches across the rings), and `VR_NOCAVES=1` leaves the cave table empty (renders as before caves).
-Sun path: `VR_SUNARC=A|B|C|M` picks the sun's azimuth scheme (A a full turn a day, B the day arc kept with the rest made up in deep
-night, C out by day and back by night, M master's, which jumps half a turn at the day wrap); `tools/sunarc.py` compares them.
 Live frame times are measured at `--size 3456x2234 --scale 1`: the scene renders on the 864-cell dither grid, so scale 1 is the AC live size.
 
 ## Layout

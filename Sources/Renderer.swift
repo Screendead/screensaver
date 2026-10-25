@@ -178,22 +178,10 @@ struct SkyClock {
         return w * (w > 0 ? 0.42 : 0.56) + 0.07
     }
 
-    // VR_SUNARC picks the azimuth scheme while the pitch is open: A a full turn a day, B today's day arc with the
-    // rest of the turn made up in deep night, C a swing out by day and back by night, M master's (jumps at the wrap).
-    static var arc: String { Knobs.current.sunArc }
-
-    // Continuous across the wrap (phase 1 to 0), so the sun, the moon opposite it and the light never jump.
+    // Out by day and back by night (az 0.9 at dawn, 2.57 at dusk, as before), so the sun and the moon opposite it are
+    // continuous across the wrap; a full turn a day doubles the day arc and the moon's pace.
     static func azimuth(_ phase: Double) -> Double {
-        let f = phase - floor(phase)
-        switch arc {
-        case "M": return .pi * phase + 0.9
-        case "B":
-            // Below e = -0.2 (f 0.58..0.92) the afterglow is gone and only the moon shows the catch-up.
-            let t = min(max((f - 0.58) / 0.34, 0), 1)
-            return 0.9 + .pi * f + .pi * t * t * (3 - 2 * t)
-        case "C": return 0.9 + 0.834 * (1 - cos(2 * .pi * f))
-        default: return 0.9 + 2 * .pi * f
-        }
+        0.9 + 0.834 * (1 - cos(2 * .pi * phase))
     }
 
     var sunDirection: SIMD3<Double> {
