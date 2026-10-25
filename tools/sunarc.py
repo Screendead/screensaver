@@ -59,3 +59,8 @@ for name, az in SCHEMES.items():
     print('%-6s wrap jump %5.1f deg | day arc %5.1f deg | vs master: noon %+5.1f, sunset %+5.1f deg | '
           'moon in deep night: moves %5.1f deg, mean %.2f deg/s, peak %.2f deg/s' %
           (name, jump, day_arc, noon, sunset, moved, moved / max(len(rates) / 60, 1e-9), max(rates)))
+
+# Largest daylight azimuth difference from master, and where it falls.
+for name, az in SCHEMES.items():
+    worst = max(((abs(wrapdiff(az(p / 1000), SCHEMES['master'](p / 1000))) * deg, p / 1000) for p in range(-26, 527)))
+    print('%-6s daylight vs master: up to %5.1f deg at phase %.3f' % (name, *worst))
