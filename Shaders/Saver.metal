@@ -5271,8 +5271,12 @@ static float3 skyDiscs(float3 c, float3 d, Light L, uint seed, float time) {
             float2 xq = (floor(xy * 7.0) + 0.5) / 7.0;
             xq *= min(1.0, 0.98 / length(xq));
             float3 n = float3(xq, sqrt(1.0 - dot(xq, xq)));
-            // mu runs to the viewer's left, so a waxing moon (k < 4) is lit on its right.
-            float sunlit = smoothstep(-0.05, 0.05, dot(n, float3(-sin(th), 0.0, -cos(th))));
+            // The lit limb faces the sun along the great circle between them. The moon rides at the sun's opposite
+            // azimuth, lower than the sun is deep once the sun is 4.6 degrees down (L.moon), so that circle runs
+            // straight down through the horizon: horns up, waxing or waning. Before that, as the moon fades in, the
+            // circle would run over the zenith; the limb stays down rather than flip. A real moon this far from the
+            // sun would be full: the phase is licence, the orientation is not.
+            float sunlit = smoothstep(-0.05, 0.05, dot(n, float3(0.0, -abs(sin(th)), -cos(th))));
             float3 moonCol = mix(float3(0.55, 0.65, 0.9) * 0.144, float3(0.75, 0.80, 0.92) * 2.4, sunlit) * lum;
             c = mix(c, moonCol, L.night * disc);
         }
