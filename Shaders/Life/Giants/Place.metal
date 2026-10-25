@@ -12,25 +12,7 @@ constant uint ST_GIANT = 1u << 31;
 // An island column's word in st (plantTrees): its canopy's first leaf in the low 11 bits, or a stream or fall, or a vine.
 constant uint ST_ISLE = 1u << 30, ST_ISLE_WATER = 1u << 11, ST_ISLE_VINE = 1u << 12;
 constant uint GAP_GIANT = 2u;
-// The band test in the DDA: compiled in only while a canopy band is on the map (Renderer picks the pipeline); off in
-// every pipeline built without the constant.
-constant bool BAND_FC [[function_constant(0)]];
-constant bool BAND_SKIP = is_function_constant_defined(BAND_FC) && BAND_FC;
-// Renderer picks the pipeline per tile of the frame (Renderer.sceneTile) by what of the islands may show there.
-// The islands' shade and sky occlusion: compiled in only where an island within isleShadeReach casts them.
-constant bool ISLE_FC [[function_constant(3)]];
-constant bool SCENE_ISLES = is_function_constant_defined(ISLE_FC) && ISLE_FC;
-// Close by an island within isleShadeReach (its column of air), with its shade: the ground under it, its falls, streams,
-// canopies and glow.
-constant bool NEAR_FC [[function_constant(6)]];
-constant bool SCENE_NEAR = SCENE_ISLES && is_function_constant_defined(NEAR_FC) && NEAR_FC;
-// The islands' surfaces (their rock, roots and vines, air that is no shelter's roof): wherever an island at any distance
-// could show.
-constant bool SHAPE_FC [[function_constant(4)]];
-constant bool ISLE_SHAPE = SCENE_NEAR || (is_function_constant_defined(SHAPE_FC) && SHAPE_FC);
-// The islands' mist (isleMist), close by them.
-constant bool MIST_FC [[function_constant(5)]];
-constant bool SCENE_MIST = SCENE_NEAR && is_function_constant_defined(MIST_FC) && MIST_FC;
+
 constant int GIANT_LIMBS = 12;
 constant int GIANT_FLANGES = 9;
 constant int GM_WOOD = 0, GM_LEAF = 1, GM_VINE = 2;

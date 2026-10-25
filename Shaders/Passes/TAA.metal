@@ -29,8 +29,6 @@ static float4 sampleCatmullRom(texture2d<float> t, sampler s, float2 uv) {
 // than a scene pixel builds up over frames. History is reprojected through the previous camera (the world
 // is static) and clamped to the scene's 3x3 neighbourhood. Scene alpha carries hit distance; history alpha
 // carries the accumulated sample weight.
-constant bool STAR_FC [[function_constant(7)]];
-constant bool STAR_TAA = is_function_constant_defined(STAR_FC) && STAR_FC;
 
 fragment float4 taaFragment(VOut in [[stage_in]], texture2d<float> cur [[texture(0)]],
                             texture2d<float> hist [[texture(1)]], constant Frame& f [[buffer(0)]]) {

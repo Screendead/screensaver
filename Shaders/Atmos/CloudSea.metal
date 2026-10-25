@@ -1,10 +1,6 @@
 // Sea of cloud: around sunrise the night's cold air lies pooled in the low ground under an inversion, a flat layer
 // that hills and trees stand out of. It gathers in the blue hour and burns off as the sun climbs. Exactly 0 at
 // dusk (night progress stays under 0.2 until the sun is well down), by day and at night, so those frames are untouched.
-// Compiled in only while the sea of cloud is out (SEA_FC, Renderer picks the pipeline): held off in the scene and vine
-// passes it costs every pixel about 0.3 ms (pin606n, dusk).
-constant bool SEA_FC [[function_constant(8)]];
-constant bool SCENE_SEA = is_function_constant_defined(SEA_FC) && SEA_FC;
 
 static inline float cloudSeaAmount(thread const Ctx& x) {
     if (!SCENE_SEA) return 0.0;

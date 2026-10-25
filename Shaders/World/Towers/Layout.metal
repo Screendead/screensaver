@@ -12,9 +12,7 @@ constant int TOWER_MEMBERS = 4;
 constant float TOWER_R_MAX = 150.0;
 // Records in the shading table (fragment buffer 9); must match Towers.tableSize in Sources/Towers.swift.
 constant int TOWER_TABLE = 16;
-// Function constant 1: false compiles the towers out of sceneFragment, for frames with none in view. Compiled in, even
-// unused, they slow every pixel's shading.
-constant bool sceneTowers [[function_constant(1)]];
+
 // Reef colours and glow fade out by here: past it the haze and the surface's mirror hide the bed.
 constant float REEF_FAR = 1100.0;
 

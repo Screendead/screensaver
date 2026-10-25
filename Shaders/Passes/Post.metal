@@ -1,17 +1,3 @@
-static inline float3 acesFit(float3 x) {
-    return saturate((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14));
-}
-
-static inline float3 linearToSRGB(float3 c) {
-    return select(1.055 * pow(c, 1.0 / 2.4) - 0.055, c * 12.92, c <= 0.0031308);
-}
-
-static inline float3 srgbToLinear(float3 c) {
-    return select(pow((c + 0.055) / 1.055, 2.4), c / 12.92, c <= 0.04045);
-}
-
-constant bool DITHER_FC [[function_constant(2)]];
-
 // misc2.w is the display's EDR headroom; 0 means SDR output (sRGB-encoded 8-bit).
 fragment float4 postFragment(VOut in [[stage_in]], texture2d<float> scene [[texture(0)]],
                              constant Frame& f [[buffer(0)]]) {

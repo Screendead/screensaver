@@ -169,3 +169,14 @@ kernel void resolveIslands(device IsleRec* T [[buffer(0)]],
         }
     T[gid].R = drop ? -R : R;
 }
+
+// The shading table (fragment buffer 10; towers hold 9, giants 8): the islands nearest the camera (Sources/Islands.swift).
+// a: centre xz, reach, the underside's mean height; b: radius, top, keel, its mist's fade; c: its fall's lip xz, top and
+// foot (zero: none); mb: its mist bank's bounding sphere (radius 0: none), mp its puffs (centre, radius); o.x the square of
+// how far its sky occlusion reaches (Islands.occlusionReach). World coordinates.
+constant int ISLE_TABLE = 16;
+constant int ISLE_MIST_PUFFS = 6;
+// The mist's depth where its bodies begin (isleMist): banks and plumes that cannot reach most of it alone are not worked out.
+constant float ISLE_MIST_TAU0 = 0.5;
+struct IsleShade { float4 a; float4 b; float4 c; float4 mb; float4 mp[ISLE_MIST_PUFFS]; float4 o; };
+struct IsleTable { int4 n; IsleShade r[ISLE_TABLE]; };

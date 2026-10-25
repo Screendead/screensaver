@@ -299,3 +299,9 @@ static inline Col islandColumn(Col col, int2 w, uint seed, int s, device const I
     col.isk = kind;
     return col;
 }
+
+// The map's alpha for an island column from heights to planting, which turns it into its ST_ISLE word: the canopy's
+// first leaf; -2 a vine; -4 less a fall's foot (0 a stream's); 0 elsewhere.
+static inline float isleAlpha(Col c) {
+    return !c.island ? 0.0 : c.isk == ISK_WATER ? -4.0 - c.leaf : c.isk == ISK_VINE ? -2.0 : c.leaf;
+}

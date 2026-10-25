@@ -1,3 +1,7 @@
+// Trees sit on a jittered world-space grid, one candidate per cell; a canopy reaches at most 2 columns
+// from its trunk, so a column only needs the trees of its own and the 8 neighbouring cells.
+constant int TREE_CELL = 5;
+
 // Grove density: a low-frequency Perlin field gated by climate; zero on sand, snow, desert and water.
 static inline float groveDensity(float2 w, float g, uint seed) {
     float2 p = w + seedOffset(seed);

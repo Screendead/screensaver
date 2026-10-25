@@ -1,7 +1,3 @@
-// Trees sit on a jittered world-space grid, one candidate per cell; a canopy reaches at most 2 columns
-// from its trunk, so a column only needs the trees of its own and the 8 neighbouring cells.
-constant int TREE_CELL = 5;
-
 // Snow above this height: cold country as ever, while warm provinces lift it far up their ranges (hot ones never
 // snow), so massifs are rock and forest under a cap rather than white sheets.
 static inline float snowlineAt(float temp) {
