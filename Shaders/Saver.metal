@@ -7746,7 +7746,7 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float tEn
 // after the stars are out and gone before dawn. The sheet is a curve in polar form around the camera (range from
 // azimuth), so flight and map recentring never move it and each ray crosses it once; it brightens where it turns
 // edge-on (the path through it lengthens as 1/sin of the angle to the sheet), which draws the folds. The path saturates
-// smoothly at the sheet's thickness: a hard cap drew flat-topped bars. It spans about 55 degrees of azimuth, full over
+// smoothly at the sheet's thickness; a hard cap draws flat-topped bars. It spans about 55 degrees of azimuth, full over
 // the middle 25, and the fold and ray scales stay several cells wide so a turning camera doesn't make them shimmer in
 // the dither. Radiance stays near the Milky Way's.
 static float3 aurora(thread const Ctx& x, float3 d) {
