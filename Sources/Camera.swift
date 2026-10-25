@@ -20,6 +20,7 @@ final class FlightCamera {
     private var nextPilgrim: Double = 0
     private var rimLift: Double = 0
     var sun = SIMD3<Double>(0, 1, 0)
+    var cloudSea = 0.0
     var pitchOverride: Double?
     // A fixed pose for showcase snapshots; step() leaves it alone.
     private(set) var frozen = false
@@ -47,6 +48,8 @@ final class FlightCamera {
     private var hug: Double = 0
     // Ruined towers round the camera (Sources/Towers.swift).
     var towersAt: () -> [TowerInfo] = { [] }
+    // Floating islands round the camera (Sources/Islands.swift).
+    var islesAt: () -> [IslandInfo] = { [] }
     // Index of the current night, as the lamps read it (beacons and rites burn only on some nights).
     var nightIndex = 0
     // Sites a shot was built around, and when; each rests for a while so one place can't own the flight.
@@ -55,6 +58,8 @@ final class FlightCamera {
     // Giants already passed (by axis, rounded), and the one the flight is slowly heading for.
     private var visitedGiants = Set<SIMD2<Int>>()
     private var pilgrim: SIMD2<Double>?
+    // The pilgrim is a big island, flown beneath rather than beside.
+    private var pilgrimIsle = false
 
     init(seed: UInt32, world: World, far: FarHeights) {
         self.world = world
@@ -80,7 +85,35 @@ final class FlightCamera {
         return (f, r, u)
     }
 
-    private func h(_ x: Double, _ z: Double) -> Double { world.height(x: x, z: z) ?? far.height(x: x, z: z) ?? 20 }
+    // The flight passes beneath an island it is under by isleMargin, or can sink to that by the time it gets there (at
+    // most isleSink a second), with room under the keel; it steers by the ground there. Any other island is terrain to
+    // its top. Kept under isleCap below the underside, so the margin holds.
+    private static let isleMargin = 30.0, isleCap = 45.0, isleSink = 3.0
+    private var speed = 20.0
+    private func beneath(_ x: Double, _ z: Double, under u: Double) -> Bool {
+        let d = simd_length(SIMD2(x - position.x, z - position.z))
+        return position.y < u - FlightCamera.isleMargin + FlightCamera.isleSink * d / speed
+    }
+    private func h(_ x: Double, _ z: Double) -> Double {
+        if let c = world.column(x: x, z: z) {
+            if let u = c.under, u - c.ground >= 90, beneath(x, z, under: u) { return c.ground }
+            return c.top
+        }
+        return isleFloor(x, z) ?? far.height(x: x, z: z) ?? 20
+    }
+    // Beyond the loaded map: inside the reach of an island the flight could pass beneath, the ground under it.
+    private func isleFloor(_ x: Double, _ z: Double) -> Double? {
+        let q = SIMD2(x, z)
+        for s in islesAt() where s.passable && simd_length_squared(q - s.pos) < s.reach * s.reach && beneath(x, z, under: s.keel) {
+            return s.base
+        }
+        return nil
+    }
+    // The highest the flight may climb near (x, z) while it passes under an island there.
+    private func isleCeiling(_ x: Double, _ z: Double) -> Double {
+        guard let c = world.column(x: x, z: z), let u = c.under, u - c.ground >= 90, beneath(x, z, under: u) else { return .infinity }
+        return u - FlightCamera.isleCap
+    }
 
     // Starts the flight here (tests: VR_START).
     func start(at p: SIMD2<Double>, yaw y: Double) {
@@ -98,7 +131,7 @@ final class FlightCamera {
     }
     private func hSteer(_ x: Double, _ z: Double) -> Double { max(h(x, z), towerTop(x, z)) }
     // Far terrain: the 32-voxel max grid, else the fine map.
-    private func hFar(_ x: Double, _ z: Double) -> Double { far.height(x: x, z: z) ?? world.height(x: x, z: z) ?? 20 }
+    private func hFar(_ x: Double, _ z: Double) -> Double { isleFloor(x, z) ?? far.height(x: x, z: z) ?? world.height(x: x, z: z) ?? 20 }
 
     // How much terrain along a heading rises above what the flight could clear: the slope it may climb (capped at
     // the ceiling), weighted toward near walls. Gorges and passes are the open headings.
@@ -135,7 +168,9 @@ final class FlightCamera {
             for off in [-0.2, 0.0, 0.2] {
                 let d2 = SIMD2(sin(heading + off), cos(heading + off))
                 let q = SIMD2(position.x, position.z) + (off == 0 ? dir : d2) * dist
-                guard let g = dist < 300 ? world.height(x: q.x, z: q.y) : far.height(x: q.x, z: q.y) else { continue }
+                // An island the flight will pass beneath is no wall; far off it is a vista like any relief.
+                guard let g = dist < 1000 ? (dist < 300 ? (world.height(x: q.x, z: q.y) != nil ? h(q.x, q.y) : nil) : hFar(q.x, q.y))
+                                          : far.height(x: q.x, z: q.y) else { continue }
                 let e = atan2(g - position.y, dist)
                 if dist >= 1000 { best = max(best, e) } else { near = max(near, e) }
             }
@@ -287,7 +322,31 @@ final class FlightCamera {
         let light = lightW * max(0, cos(heading - lightYaw)) * 0.8
         let turn = -0.25 * abs(FlightCamera.angleDiff(heading, yaw))
         return relief + water + light + turn + wall + fill + open + siteInterest(heading, night: night).0 + towerInterest(heading, night: night) + { let v = vista(heading); return v.0 * (1 - night) - v.1 }()
-            + giantInterest(heading)
+            + giantInterest(heading) + isleInterest(heading)
+    }
+
+    // A big island 0.3-3 km ahead is a subject, framed head on: the flight goes on to pass beneath it.
+    // So is a way between two islands, or beneath one, within the next 1.8 km.
+    private func isleInterest(_ heading: Double) -> Double {
+        let p = SIMD2(position.x, position.z)
+        let fd = SIMD2(sin(heading), cos(heading)), side = SIMD2(fd.y, -fd.x)
+        var best = 0.0, left = Double.infinity, right = Double.infinity, under = 0.0
+        for s in islesAt() where s.radius > 40 {
+            let v = s.pos - p, d = simd_length(v)
+            guard d > 200, d < 3000 else { continue }
+            if s.radius > 60 {
+                let off = abs(FlightCamera.angleDiff(atan2(v.x, v.y), heading))
+                best = max(best, 0.8 * max(0, 1 - off / 0.35) * min(1, (3000 - d) / 1000) * (s.passable ? 1 : 0.4))
+            }
+            let along = simd_dot(v, fd), across = simd_dot(v, side)
+            guard along > 150, along < 1800 else { continue }
+            // Clear of the island's rock by its reach either side, or under it where it is passable.
+            let gap = abs(across) - s.reach
+            if gap > 0 { if across > 0 { right = min(right, gap) } else { left = min(left, gap) } }
+            else if s.passable && abs(across) < 0.5 * s.reach { under = max(under, 0.7) }
+        }
+        let between = left < 600 && right < 600 ? 0.6 * (1 - max(left, right) / 600) + 0.3 : 0
+        return best + max(between, under)
     }
 
     // A giant tree is a landmark: a heading that frames one 0.4-3 km ahead scores, and one far off draws the flight
@@ -329,17 +388,17 @@ final class FlightCamera {
     // A start among or beside the massifs moves to the nearest open low ground, so the flight begins under the ceiling.
     // Reads only the far heights.
     func moveToOpenGround() {
-        if (0..<12).contains(where: { (far.height(x: position.x + sin(Double($0) * .pi / 6) * 500, z: position.z + cos(Double($0) * .pi / 6) * 500) ?? 0) > 260 })
+        if (0..<12).contains(where: { hFar(position.x + sin(Double($0) * .pi / 6) * 500, position.z + cos(Double($0) * .pi / 6) * 500) > 260 })
             || hFar(position.x, position.z) > 200 {
             search: for r in stride(from: 200.0, through: 6000.0, by: 200.0) {
                 for k in 0..<24 {
                     let a = Double(k) * .pi / 12
                     let x = position.x + sin(a) * r, z = position.z + cos(a) * r
-                    guard let g = far.height(x: x, z: z), g < 120 else { continue }
+                    guard far.height(x: x, z: z) != nil, hFar(x, z) < 120 else { continue }
                     // Clear of the massifs on every side, so the first seconds are not a climb up a wall.
                     var clear = true
                     for rr in [250.0, 500.0, 800.0] {
-                        for j in 0..<12 where (far.height(x: x + sin(Double(j) * .pi / 6) * rr, z: z + cos(Double(j) * .pi / 6) * rr) ?? 0) > 260 { clear = false }
+                        for j in 0..<12 where hFar(x + sin(Double(j) * .pi / 6) * rr, z + cos(Double(j) * .pi / 6) * rr) > 260 { clear = false }
                     }
                     if clear { position.x = x; position.z = z; break search }
                 }
@@ -478,7 +537,8 @@ final class FlightCamera {
             let w = (1 - max(along, 0) / 1000) * (1 - abs(across) / clear)
             steerGiant += (across >= 0 ? -1 : 1) * 0.09 * min(1, 2.5 * w)
         }
-        // The nearest giant not yet reached, up to 12k off, draws the heading gently toward a point beside it.
+        // The nearest giant not yet reached, up to 12k off, draws the heading gently toward a point beside it; so does a
+        // big island within 3k, toward its middle, to pass beneath it; farther off one steers the flight into trees.
         var steerPilgrim = 0.0
         if time >= nextPilgrim {
             nextPilgrim = time + 2
@@ -490,20 +550,27 @@ final class FlightCamera {
                 let v = g.pos - p, d = simd_length(v)
                 // Within 1500 it is reached: framing it and passing beside it are the shots' and the steering's.
                 if d < 1500 { visitedGiants.insert(key); continue }
-                if d < best { best = d; pilgrim = g.pos }
+                if d < best { best = d; pilgrim = g.pos; pilgrimIsle = false }
+            }
+            for s in islesAt() where s.radius > 120 && s.passable {
+                let key = SIMD2(Int(s.pos.x.rounded()), Int(s.pos.y.rounded()))
+                if visitedGiants.contains(key) { continue }
+                let d = simd_length(s.pos - p)
+                if d < 0.4 * s.reach { visitedGiants.insert(key); continue }
+                if d < min(best, 3000) { best = d; pilgrim = s.pos; pilgrimIsle = true }
             }
         }
         if let g = pilgrim {
             let v = g - p
             let side = (v.x * fwdFlat.y - v.y * fwdFlat.x) >= 0 ? 1.0 : -1.0
             let n = simd_normalize(SIMD2(-v.y, v.x)) * side
-            let aim = g + n * (GiantInfo.reach + 260)
+            let aim = pilgrimIsle ? g : g + n * (GiantInfo.reach + 260)
             let bearing = atan2(aim.x - p.x, aim.y - p.y)
             // Not over a massif: where the land toward it rises well above the flight, the way round is the routing's.
             var rise = 0.0
             for d in [300.0, 600.0, 900.0] { rise = max(rise, hFar(p.x + sin(bearing) * d, p.y + cos(bearing) * d) - position.y) }
             // Nor while a slope fills the frame: getting clear of it comes first.
-            steerPilgrim = sin(FlightCamera.angleDiff(bearing, yaw)) * 0.06 * min(max((60 - rise) / 40, 0), 1) * (1 - hug)
+            steerPilgrim = sin(FlightCamera.angleDiff(bearing, yaw)) * (pilgrimIsle ? 0.09 : 0.06) * min(max((60 - rise) / 40, 0), 1) * (1 - hug)
         }
         let urgency = max(min(blockedAhead / 20, 1), 0.7 * crowd)
         avoidRate = routeYaw.map { sin(FlightCamera.angleDiff($0, yaw)) * 0.15 * urgency } ?? 0
@@ -518,6 +585,7 @@ final class FlightCamera {
         // Constant angular ground flow: faster when high, slower when skimming.
         let agl = position.y - h(position.x, position.z)
         let v = 2 * min(15, max(5.5, 3.5 + agl * 0.17))
+        speed = v
         position.x += sin(yaw) * v * dt
         position.z += cos(yaw) * v * dt
 
@@ -614,6 +682,18 @@ final class FlightCamera {
             }
         }
         target = max(target, min(regional, FlightCamera.ceiling))
+        // At dawn the sea of cloud's top reaches up to 12 x its amount over the sea (at most 14, SEA_LID in Saver.metal):
+        // fly well over it, high enough that it reads as a surface below, rising with the amount so the lift is gentle.
+        target = max(target, 19.85 + 38 * cloudSea)
+        // Under an island: below its underside all the way through, the keel's deepest ahead included.
+        var under = Double.infinity
+        for dist in [0.0, 30.0, 60.0, 100.0, 140.0, 180.0, 260.0, 360.0] {
+            for side in [-16.0, 0.0, 16.0] {
+                let q = p + fwdFlat * dist + left * side
+                under = min(under, isleCeiling(q.x, q.y))
+            }
+        }
+        target = min(target, under)
         // Climbs are capped (3 voxels/s): mountains are flown around and through, not leapt. A wall the routing
         // could not turn from lifts the flight just fast enough to clear it by the time it arrives, still smoothly.
         var need = 0.0

@@ -1,9 +1,11 @@
 #!/bin/zsh
-# A/B GPU timing over twelve fixed scenes: VR_BENCH=12 stills at 3456x2234 scale 1 per scene and build, the build order
+# A/B GPU timing over fixed scenes (twelve, two floating-island ones and a close beach): VR_BENCH=12 stills at 3456x2234 scale 1 per scene and build, the build order
 # rotating each round, reporting each scene's minimum gpu ms per build. Run it inside the exclusive lock:
 #   tools/vrgpu --time -- tools/bench.sh ROUNDS "label=app label=app" [scene filter regex]
 # A label of the form name@prof=app runs that build with VR_PROFILE=prof; PROFILE=... in the environment applies to all.
 # Copy each build's app aside first (e.g. into build/bench/), since make overwrites build/VoxelReverie.app.
+# BATTERY=1 runs every scene on the battery path (--battery). BENCH_SCENES replaces the scene list with its own
+# newline-separated entries in the same name|seed|time|phase|cam form.
 R=$1
 pairs=(${=2})
 F=${3:-.}
@@ -26,7 +28,11 @@ SCENES=(
   "giantNear2|101|420|0.25|3658,-60,60,0,8"
   "twrHero|101|420|0.25|4071.2,-3942.3,40,220,14,0"
   "stilt_close_dusk|1|20|0.53|SHOW:4,30,10,270,3"
+  "isleHero|303|10|0.12|9822,-2224,480,180,4,1"
+  "isleUnder|303|10|0.12|9822,-2700,300,180,18,1"
+  "beach303|303|20|0.3|6324,-945,29,10,-27.2,1"
 )
+[[ -n $BENCH_SCENES ]] && SCENES=("${(@f)BENCH_SCENES}")
 for r in $(seq $R); do
   n=${#labels}
   k=$(( (r - 1) % n ))
@@ -42,6 +48,7 @@ for r in $(seq $R); do
       B=$apps[i]/Contents/MacOS/voxelreverie
       args=(--screenshot $D/bench_out.png --size 3456x2234 --scale 1 --seed $p[2] --times $p[3])
       [[ $p[4] != - ]] && args+=(--phase $p[4])
+      [[ -n $BATTERY ]] && args+=(--battery)
       envs=(VR_BENCH=12)
       [[ -n $prof ]] && envs+=(VR_PROFILE=$prof)
       if [[ $p[5] == SHOW:* ]]; then envs+=(VR_SHOW=${p[5]#SHOW:})
