@@ -33,22 +33,31 @@ enum BugReport {
 
     private static func quoted(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
+    // state.json: the recorder's session info, the renderer's state now, the clip's size and the recorded frames.
+    static func state(info: [String: Any], records: [BugRecorder.Record], clip: (width: Int, height: Int), timeScale: Double, simTime: Double,
+                      clock: SkyClock, battery: Bool, renderScale: Double, headroom: Float, exposure: Double) -> [String: Any] {
+        var state = info
+        state["created"] = ISO8601DateFormatter().string(from: Date())
+        state["timeScale"] = num(timeScale)
+        state["simTime"] = num(simTime)
+        state["clock"] = ["phase": num(clock.phase), "day": clock.day, "nightIndex": clock.nightIndex,
+                          "sunY": num(clock.sunDirection.y), "dayLength": SkyClock.dayLength]
+        state["battery"] = battery
+        state["renderScale"] = num(renderScale)
+        state["headroom"] = num(Double(headroom))
+        state["exposure"] = num(exposure)
+        state["clip"] = ["file": "clip.mp4", "width": clip.width, "height": clip.height]
+        state["frames"] = records.map(json)
+        state["log"] = BugLog.recent
+        return state
+    }
+
     // Writes state.json and replay.txt; the clip follows from the recorder.
     static func write(to dir: URL, renderer r: Renderer, recorder: BugRecorder, binary: String) {
         let records = recorder.recentRecords()
-        var state: [String: Any] = recorder.info
-        state["created"] = ISO8601DateFormatter().string(from: Date())
-        state["timeScale"] = num(r.timeScale)
-        state["simTime"] = num(r.simTime)
-        state["clock"] = ["phase": num(r.clock.phase), "day": r.clock.day, "nightIndex": r.clock.nightIndex,
-                          "sunY": num(r.clock.sunDirection.y), "dayLength": SkyClock.dayLength]
-        state["battery"] = r.battery
-        state["renderScale"] = num(r.renderScale)
-        state["headroom"] = num(Double(r.headroom))
-        state["exposure"] = num(r.exposure)
-        state["clip"] = ["file": "clip.mp4", "width": recorder.width, "height": recorder.height]
-        state["frames"] = records.map(json)
-        state["log"] = BugLog.recent
+        let state = state(info: recorder.info, records: records, clip: (recorder.width, recorder.height), timeScale: r.timeScale,
+                          simTime: r.simTime, clock: r.clock, battery: r.battery, renderScale: r.renderScale, headroom: r.headroom,
+                          exposure: r.exposure)
         if let data = try? JSONSerialization.data(withJSONObject: state, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: dir.appendingPathComponent("state.json"))
         }
