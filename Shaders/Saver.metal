@@ -6,10 +6,8 @@
 #endif
 #if MOON_GLINT >= 2
 #define MOON_LOBE 7000.0
-#define MOON_FINE 2.2
 #else
 #define MOON_LOBE 4000.0
-#define MOON_FINE 1.6
 #endif
 using namespace metal;
 
@@ -9218,18 +9216,30 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             // its features shrink toward a pixel, measured along the foreshortened view; far out, swells long
             // across the moon's bearing break the path into bands, and past them the cover itself remains.
             float fpv = tw * x.pixelAngle / max(-d.y, 0.1);
-            float fine = perlin3(float3(ww * MOON_FINE, x.time * 0.7), x.seed + 61u);
+            float fine = perlin3(float3(ww * 1.6, x.time * 0.7), x.seed + 61u);
             // Crests face the moon's midnight bearing, within 45 degrees of it all night. Facing the moon itself
             // turned the axes with every step of its bearing about a world origin some 10^5 voxels off, so the swell
             // under the path jumped frame to frame.
             constexpr float az0 = 0.75 * M_PI_F + 0.9;
             const float2 mz = -float2(sin(az0), cos(az0));
             float swell = perlin3(float3(dot(ww, mz) * 0.07, (ww.x * mz.y - ww.y * mz.x) * 0.02, x.time * 0.1), x.seed + 62u);
-            float rip = mix(swell, mix(e0, fine, saturate(2.0 - fpv * 6.25 * MOON_FINE)), saturate(2.0 - fpv * 1.8));
+#if MOON_GLINT >= 2
+            // An octave between the ripples and the fine facets makes the glints smaller where it resolves.
+            float e1 = mix(e0, perlin3(float3(ww * 0.6, x.time * 0.4), x.seed + 64u), saturate(2.0 - fpv * 3.75));
+#else
+            float e1 = e0;
+#endif
+            float rip = mix(swell, mix(e1, fine, saturate(2.0 - fpv * 10.0)), saturate(2.0 - fpv * 1.8));
             // The ripple noise is near-Gaussian (sd ~0.22); a logistic quantile turns cover into its threshold.
             float thr = 0.13 * log((1.0 - cover) / max(cover, 1e-4));
+#if MOON_GLINT >= 1
+            // Facets brighten toward their crests rather than switching on flat, so each glint has a peak.
+            float glint = mix(cover, smoothstep(thr - 0.08, thr + 0.40, rip), saturate(2.0 - fpv * 0.43));
+            col += float3(0.75, 0.82, 1.0) * x.L.night * (0.05 * cover + 0.8 * glint);
+#else
             float glint = mix(cover, smoothstep(thr - 0.08, thr + 0.16, rip), saturate(2.0 - fpv * 0.43));
             col += float3(0.75, 0.82, 1.0) * x.L.night * (0.05 * cover + 0.55 * glint);
+#endif
         }
 #if MOON_GLINT >= 1
         if (x.L.night > 0.0) {
