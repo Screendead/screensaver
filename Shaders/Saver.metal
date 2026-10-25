@@ -7651,16 +7651,16 @@ static SeaFog cloudSea(thread const Ctx& x, float amt, float3 o, float3 d, float
     t = min(t, 3000.0);
     float3 ph = o + d * t;
     // Burning off, the layer sinks as well as thins. The closed form below needs one top per ray: the hit's.
-    // The inversion's lid: no top rises over SEA_LID, so the dawn flight (at least 12-22 over the ground or the sea,
+    // The inversion's lid: no top rises over SEA_LID, so the dawn flight (at least 38 x the amount over the sea,
     // Camera.swift) always looks down on the layer; a ray starting under its hit's top would be fogged all its length.
     // Basins well above the sea, and hillsides, stand clear of it.
-    float top0 = min(seaFloorAt(x, ph.xz) + mix(2.0, 8.0, amt), SEA_LID);
+    float top0 = min(seaFloorAt(x, ph.xz) + 8.0 * amt, SEA_LID);
     float y0 = o.y, y1 = ph.y;
     if (min(y0, y1) > top0 + 3.0) return s;
     float te = d.y < 0.0 && y0 > top0 ? min((y0 - top0) / -d.y, t) : 0.0;
     float2 q = o.xz + d.xz * te + float2(x.origin) - float2(0.35, 0.12) * x.time;
     float n = perlin2(q / 110.0, x.seed + 71u) + 0.3 * perlin2(OCT_ROT * q / 41.0, x.seed + 72u);
-    float top = min(top0 + 3.0 * n, SEA_LID);
+    float top = min(top0 + 3.0 * n * amt, SEA_LID);
     // Gaps open where the noise is low, wider as the sun climbs.
     float dens = 0.16 * amt * saturate((n + 0.55 - 1.6 * burn) * 2.5);
     if (dens <= 0.0) return s;
@@ -7673,9 +7673,17 @@ static SeaFog cloudSea(thread const Ctx& x, float amt, float3 o, float3 d, float
     float vis = cloudShadow(x, pe, x.L.key);
     float3 ambient = x.L.zenith * 0.8 + x.L.horizon * 0.3;
     float3 sun = x.L.keyCol * (0.3 + min(hg(dot(d, x.L.key), 0.55), 1.2)) * vis;
-    // Billow crowns catch the sun; the troughs between them sit in their own violet shade.
-    float crown = saturate(0.6 + 0.7 * n);
-    s.col = (ambient * mix(float3(0.75, 0.72, 0.95), float3(1.0), crown) + sun * crown * crown) * 0.62 * (1.0 - s.T);
+    // Billow crowns catch the sun; the troughs between them sit in their own violet shade. A finer octave and the
+    // relief's fall toward the sun (one step sunward) shade the billows' sides, so from above the top reads as a
+    // surface rather than a flat sheet.
+    float2 sd = 8.0 * normalize(x.L.key.xz + float2(1e-4, 0));
+    float rel = n + 0.12 * perlin2(q / 23.0, x.seed + 73u);
+    float2 qs = q + sd;
+    float relS = perlin2(qs / 110.0, x.seed + 71u) + 0.3 * perlin2(OCT_ROT * qs / 41.0, x.seed + 72u) + 0.12 * perlin2(qs / 23.0, x.seed + 73u);
+    float facing = saturate(0.5 + 4.5 * (rel - relS));
+    float crown = saturate(0.6 + 0.7 * rel);
+    s.col = (ambient * mix(float3(0.75, 0.72, 0.95), float3(1.0), crown) * (0.8 + 0.4 * facing)
+             + sun * crown * crown * (0.3 + 1.4 * facing)) * 0.62 * (1.0 - s.T);
     return s;
 }
 
