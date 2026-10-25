@@ -1,24 +1,13 @@
 import Foundation
 import Metal
+import StrataCore
 import simd
 
 extension Renderer {
-    // The key light as the shader's makeLight picks it, and whether it casts shadows.
-    static func keyLight(_ sun: SIMD3<Double>) -> (SIMD3<Double>, Bool) {
-        let e = sun.y
-        if e >= 0.05 { return (sun, true) }
-        if e > -0.02 { return (simd_normalize(SIMD3(sun.x, 0.05, sun.z)), true) }
-        let glow = simd_normalize(SIMD3(sun.x, 0.05, sun.z))
-        let moon = simd_normalize(SIMD3(-sun.x, max(-sun.y * 0.7, 0.08), -sun.z))
-        let t = min(max((e + 0.09) / (-0.16 + 0.09), 0), 1)
-        let m = t * t * (3 - 2 * t)
-        return (simd_normalize(glow + (moon - glow) * m), m > 0.5)
-    }
-
     // A band of each shadow-height map per frame, around the camera, for the current key light; everything at once
     // when the camera or the light has jumped (startup, snapshots), so the maps never hold another place's shadows.
     func bakeShadows(into enc: MTLComputeCommandEncoder, frame f: inout Frame) {
-        let (key, casts) = Renderer.keyLight(clock.sunDirection)
+        let (key, casts) = SkyClock.keyLight(clock.sunDirection)
         let levels = (1...Clipmap.levels).prefix { clipmap.ready($0) }.count
         // VR_PROFILE (tests): "noshadow" drops terrain shadows, "nobake" keeps the maps but skips their rebaking.
         // "bitsN" sets profiling flags directly: 8 reflections unshaded, 16 no sky visibility, 32 no cloud shadow or veil,

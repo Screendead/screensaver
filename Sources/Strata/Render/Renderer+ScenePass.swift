@@ -15,7 +15,7 @@ extension Renderer {
         let half = atan(tanV * (1 + Double(aspect) * Double(aspect)).squareRoot())
         // On while an island within the reach could show, off a little past it, so a camera hovering at the edge does
         // not flick it.
-        let key = Renderer.keyLight(clock.sunDirection).0
+        let key = SkyClock.keyLight(clock.sunDirection).0
         let isleSpheres = Islands.spheres(world.terrain.isles, eye: camera.position, within: Renderer.isleShadeReach + (isleVariant ? 400 : 0), key: key)
         isleVariant = Islands.inView(isleSpheres, eye: camera.position, fwd: tb.fwd, half: half, margin: isleVariant ? 0.12 : 0.06)
         let isles = isleVariant
