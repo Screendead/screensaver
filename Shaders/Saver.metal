@@ -5108,7 +5108,7 @@ vertex VOut fullscreenVertex(uint vid [[vertex_id]]) {
 
 // MARK: - Sky & light
 
-// Moonlight's strength on a moonless night, as a share of full moon's.
+// Moonlight's strength at new moon (lit share 0), as a share of full moon's.
 constant float MOON_FLOOR = 0.35;
 
 struct Light {
