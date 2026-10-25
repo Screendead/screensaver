@@ -16,42 +16,29 @@ for l in $LABEL $MENU_LABEL; do
 done
 [[ -e "$DEST" ]] && trash "$DEST"
 cp -R build/VoxelReverie.app "$DEST"
-cat > "$PLIST" <<PLIST
+agent() {
+  local plist=$1 label=$2 keep=$3; shift 3
+  cat > "$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>Label</key><string>$LABEL</string>
+	<key>Label</key><string>$label</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>$DEST/Contents/MacOS/voxelreverie</string>
+$(for a; do print -r -- "		<string>$a</string>"; done)
 	</array>
 	<key>RunAtLoad</key><true/>
-	<key>KeepAlive</key><true/>
+	<key>KeepAlive</key>$keep
 	<key>LimitLoadToSessionType</key><string>Aqua</string>
 	<key>ProcessType</key><string>Interactive</string>
 </dict>
 </plist>
 PLIST
+}
+agent "$PLIST" $LABEL '<true/>' "$DEST/Contents/MacOS/voxelreverie"
 # The menu bar item runs apart from the saver so its icon survives the saver agent's restarts; a clean Quit stays quit.
-cat > "$MENU_PLIST" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key><string>$MENU_LABEL</string>
-	<key>ProgramArguments</key>
-	<array>
-		<string>$DEST/Contents/MacOS/voxelreverie</string>
-		<string>--menu</string>
-	</array>
-	<key>RunAtLoad</key><true/>
-	<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-	<key>LimitLoadToSessionType</key><string>Aqua</string>
-	<key>ProcessType</key><string>Interactive</string>
-</dict>
-</plist>
-PLIST
+agent "$MENU_PLIST" $MENU_LABEL '<dict><key>SuccessfulExit</key><false/></dict>' "$DEST/Contents/MacOS/voxelreverie" --menu
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 launchctl bootstrap "gui/$(id -u)" "$MENU_PLIST"
 echo "Installed. Voxel Reverie starts after the idle delay (30s by default; change it from the menu bar item). Preview now: \"$DEST/Contents/MacOS/voxelreverie\" --preview"

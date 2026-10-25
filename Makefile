@@ -2,6 +2,7 @@ APP      := build/VoxelReverie.app
 BIN      := $(APP)/Contents/MacOS/voxelreverie
 RES      := $(APP)/Contents/Resources
 SOURCES  := $(shell find Sources -name '*.swift') Package.swift
+SHADERS  := $(shell find Shaders -name '*.metal')
 
 all: $(BIN) $(RES)/Saver.metallib $(APP)/Contents/Info.plist
 
@@ -12,7 +13,7 @@ $(BIN): $(SOURCES)
 	cp "$$(swift build -c release --show-bin-path)/voxelreverie" "$@.new"
 	mv -f "$@.new" "$@"
 
-$(RES)/Saver.metallib: Shaders/Saver.metal
+$(RES)/Saver.metallib: $(SHADERS)
 	@mkdir -p "$(RES)"
 	xcrun metal -O3 -std=metal3.1 Shaders/Saver.metal -o "$@"
 

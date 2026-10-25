@@ -34,11 +34,14 @@ Run every launch of the binary through the GPU lock, `tools/vrgpu -- <binary> ..
 | `tools/vrr <app> --screenshot ...` | The same render through a warm per-build server (byte-identical; skips the shader compile) |
 | `tools/golden.sh [app]` / `--update [app]` | Output regression check: 15 scenes (stills, a 12-frame motion run, a recorded-path replay) at 864x558 through `tools/vrr`, PNG and stdout sha256s against `tests/golden/manifest.sha256`; run it on every refactor, `--update` only for an intended output change |
 | `tools/render.sh <out dir> [app]` | The standard 32 frames (8 seeds x dawn, noon, sunset, night) and four contact sheets; milestones only |
-| `tools/vrgpu --time -- tools/bench.sh ROUNDS "a=<app> b=<app>" [regex]` | A/B GPU ms over twelve fixed scenes |
-| `tools/flicker.py <dir or glob> [--skip n] [--crop WxH]` | Frame-to-frame flicker of a PNG sequence (a report's decoded clip, VR_PATH or VR_FRAMES renders): flip and one-frame blink rates in dark and bright regions |
+| `tools/vrgpu --time -- tools/perf/bench.sh ROUNDS "a=<app> b=<app>" [regex]` | A/B GPU ms over twelve fixed scenes |
+| `tools/frames/flicker.py <dir or glob> [--skip n] [--crop WxH]` | Frame-to-frame flicker of a PNG sequence (a report's decoded clip, VR_PATH or VR_FRAMES renders): flip and one-frame blink rates in dark and bright regions |
 | `tools/mutants.py [regex]` | One deliberate change per unit test to the code it guards, run against that test and reverted: shows each test bites. Add a mutant with each new test |
-| `tools/soak.sh` | Off-screen soak: frame-by-frame flight on mains and battery plus two cave approaches, with frame-time percentiles |
-| `tools/powersoak [app]` | On the laptop, unplugged: baseline then the live saver until 3% battery, logging watts, battery, heat and memory |
+| `tools/perf/soak.sh` | Off-screen soak: frame-by-frame flight on mains and battery plus two cave approaches, with frame-time percentiles |
+| `tools/perf/powersoak [app]` | On the laptop, unplugged: baseline then the live saver until 3% battery, logging watts, battery, heat and memory |
+| `tools/frames/abstack.py <top dir> "<label>" <bottom dir> "<label>" <out dir> [box]` | Two VR_FRAMES sequences stacked and labelled for a before/after clip, with each one's mean frame-to-frame change in a box |
+| `tools/sky/skypath.py PHASE FRAMES FPS "x,z,y,yaw,pitch" EXPOSURE` | A VR_PATH file for a held camera with the sky clock running at its live rate |
+| `tools/sky/meteors.py <seed> <from s> <to s>` / `--nights N` | The shooting stars the shader draws for a seed, on the live sky clock |
 
 ## VR_* switches (from README)
 

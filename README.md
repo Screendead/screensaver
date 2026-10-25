@@ -68,6 +68,11 @@ Live frame times are measured at `--size 3456x2234 --scale 1`: the scene renders
   - `Snapshot/`: `--screenshot` runs and their test modes (poses, listings, the VR_FLIGHT soak, VR_PATH replay, PNG).
   - `App/`: the idle agent, power and lock probes, fullscreen windows, dismissal, prefs and the menu bar item. `BugReport/`: the B-key report. `Server/`: `--serve`.
 - `Sources/voxelreverie/main.swift`: the executable's entry point.
-- `Shaders/Saver.metal`: noise, terrain generation, the quadtree voxel DDA, shading, sky, clouds, fog, water, and the temporal and EDR post passes.
+- `Shaders/`: one Metal library. `Saver.metal` is its only translation unit and includes the rest in declaration order:
+  `Common` (Frame, constants, function constants), `Noise`, `World` (climate, relief, towers, islands, caves), `Life` (trees,
+  jungle, giants, vines, birds), `Sites` (hamlets, lamps), `Maps` (coarse rings, mips), `Trace` (the quadtree voxel DDA),
+  `Surface`, `Shade`, `Light`, `Sky`, `Atmos` (fog, mist, smoke, sea of cloud), `Water`, and `Passes` (the scene, vine,
+  mote, TAA, post and capture entry points).
 - `tests/StrataTests/`: the shader's contracts with the CPU (`Shader/`: probe kernels built against `Shaders/` at test time) and the bug report's `state.json` against `bugclip.sh`.
 - `tools/golden.sh`: output regression check; renders a fixed set and compares sha256s with `tests/golden/manifest.sha256` (`tests/fixtures/golden_path.txt` is its recorded-path replay).
+- `tools/`: `vrgpu` (the shared GPU lock) and `vrr` (the warm render server), the render sets `render.sh` and `golden.sh`, `mutants.py` (shows each unit test bites); `perf/` GPU and battery timing (`bench.sh`, `soak.sh`, `powersoak`); `frames/` measures and stacks rendered frame sequences; `sky/` mirrors the sky clock (VR_PATH files, the meteor schedule).

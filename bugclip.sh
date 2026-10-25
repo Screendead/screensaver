@@ -39,7 +39,7 @@ speed=$args[10]
 # the recorded hour too, so the wildlife in the air at the first frame is the recorded hour's.
 pinned=(${=$(grep -o -m1 -E -- '--phase [-0-9.]+' "$rep/replay.txt" 2>/dev/null || true)})
 
-VR_PATH=$tmp/path.txt VR_CAM=$cam VR_EXPOSURE=$exposure "$app/Contents/MacOS/voxelreverie" --screenshot "$tmp/f.png" \
+VR_PATH=$tmp/path.txt VR_CAM=$cam VR_EXPOSURE=$exposure "${0:A:h}/tools/vrgpu" -- "$app/Contents/MacOS/voxelreverie" --screenshot "$tmp/f.png" \
     --size $size --seed $seed --times $simTime --scale $scale --speed $speed $pinned ${battery:+$battery} ${nodither:+$nodither} > /dev/null
 
 # Labels, where Pillow is to hand (this ffmpeg has no drawtext).
