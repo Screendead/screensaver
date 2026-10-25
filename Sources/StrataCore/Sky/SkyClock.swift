@@ -47,9 +47,8 @@ package struct SkyClock {
 
     // The sea of cloud's amount: must match cloudSeaAmount in Saver.metal, 0 at dusk, by day and at night.
     package var cloudSea: Double {
-        func ss(_ a: Double, _ b: Double, _ x: Double) -> Double { let t = min(max((x - a) / (b - a), 0), 1); return t * t * (3 - 2 * t) }
         let e = SkyClock.elevation(phase)
-        return ss(0.5, 0.75, nightProgress) * ss(-0.24, -0.08, e) * (1 - ss(0.08, 0.30, e))
+        return smoothstep(0.5, 0.75, nightProgress) * smoothstep(-0.24, -0.08, e) * (1 - smoothstep(0.08, 0.30, e))
     }
 
     // A night keeps one index from dusk through to the morning after: it steps at mid-morning rather than at the dawn

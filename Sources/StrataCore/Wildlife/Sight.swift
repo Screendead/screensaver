@@ -83,12 +83,12 @@ package struct Sight {
         let ep = o + d * t
         let r = simd_length(SIMD2(ep.x - pos.x, ep.z - pos.z))
         if r >= worldEdge { return 0 }
-        let night = Sight.smoothstep(-0.04, -0.20, sunY)
-        var clear = 1 + (0.15 - 1) * Sight.smoothstep(0.2, 0.45, sunY)
+        let night = smoothstep(-0.04, -0.20, sunY)
+        var clear = 1 + (0.15 - 1) * smoothstep(0.2, 0.45, sunY)
         clear *= 1 + (0.35 - 1) * night
         // As the shader's airAloft: the haze thins above 120.
         let air = (K * (1 - exp(-c2 * t * t / K)) + lambda * t * t / (t + 1500)) * exp(-max(o.y + min(d.y, 0.2) * 0.75 * min(t, 2000) - 120, 0) / 400)
-        return exp(-((heightTerm + air) * clear + 6 * Sight.smoothstep(0.7 * worldEdge, worldEdge, r)))
+        return exp(-((heightTerm + air) * clear + 6 * smoothstep(0.7 * worldEdge, worldEdge, r)))
     }
 
     // True only when the segment provably passes through solid ground.
@@ -153,10 +153,5 @@ package struct Sight {
         let r = reach(size: size, at: t)
         if hiddenBehindGround(from: pos, w, extent: 0.04 * t1) { return false }
         return !hiddenBehindGround(from: w + SIMD3(0, 0.05, 0), p, extent: r + 0.04 * (t - t1))
-    }
-
-    static func smoothstep(_ a: Double, _ b: Double, _ x: Double) -> Double {
-        let t = min(max((x - a) / (b - a), 0), 1)
-        return t * t * (3 - 2 * t)
     }
 }

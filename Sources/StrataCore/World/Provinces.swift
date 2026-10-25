@@ -40,11 +40,6 @@ package enum Provinces {
         (hashf(pcg(seed)) * 50000, hashf(pcg(seed ^ 0x9e3779b9)) * 50000)
     }
 
-    static func smoothstep(_ a: Double, _ b: Double, _ x: Double) -> Double {
-        let t = min(max((x - a) / (b - a), 0), 1)
-        return t * t * (3 - 2 * t)
-    }
-
     // (jungle, old growth) at world xz.
     package static func at(_ x: Double, _ z: Double, seed: UInt32) -> (Double, Double) {
         let b = Biome.pinned(seed)

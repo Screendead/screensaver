@@ -27,7 +27,7 @@ extension Islands {
                 let s = near[i]
                 let o = 16 + i * entryBytes
                 let d = simd_length(s.pos - p)
-                let fade = 1 - Provinces.smoothstep(2400, 3000, d)
+                let fade = 1 - smoothstep(2400, 3000, d)
                 let R = s.radius, th = s.top - s.keel
                 // A ring of flattened puffs round the keel, on most bigger islands, at its flanks' lower half; the plume at a
                 // fall's foot (bounds as isleMist takes them).
