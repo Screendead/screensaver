@@ -27,38 +27,11 @@ extension Renderer {
                        active: activeLevels, giants: world.giantBuffer, isles: world.isleBuffer)
         bakeLamps(into: cb, frame: &f)
         fillLampTiles(frame: f, width: w, height: h)
-        let cam2 = SIMD2(camera.position.x, camera.position.z)
-        if provCentre.map({ simd_length($0 - cam2) > Double(Renderer.provN) * Renderer.provCell / 8 }) ?? true,
-           let enc = cb.makeComputeCommandEncoder() {
-            provCentre = cam2
-            var info = SIMD4<Int32>(Int32(floor(cam2.x / Renderer.provCell)) - Int32(Renderer.provN / 2),
-                                    Int32(floor(cam2.y / Renderer.provCell)) - Int32(Renderer.provN / 2), 0, Int32(bitPattern: world.seed))
-            enc.setComputePipelineState(provPipeline)
-            enc.setTexture(provTex, index: 0)
-            enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
-            enc.dispatchThreads(MTLSize(width: Renderer.provN, height: Renderer.provN, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
-            enc.endEncoding()
-        }
+        encodeProvinces(into: cb)
         // The shadow maps and the horizon share no data: one concurrent pass, so their short dispatches overlap.
         let bakes = cb.makeComputeCommandEncoder(dispatchType: .concurrent)
         if let bakes { bakeShadows(into: bakes, frame: &f) }
-        if Renderer.profile != "nohorizon", let enc = bakes {
-            f.shadow.z = 1
-            enc.setComputePipelineState(horizonPipeline)
-            enc.setBuffer(horizonBuf, offset: 0, index: 0)
-            enc.setBytes(&f, length: MemoryLayout<Frame>.stride, index: 1)
-            enc.setTexture(world.heightTex, index: 0)
-            enc.setTexture(clipmap.height, index: 1)
-            enc.setTexture(world.maxTex, index: 2)
-            enc.setTexture(world.gapTex, index: 3)
-            enc.setTexture(clipmap.gaps, index: 4)
-            enc.setTexture(clipmap.gaps2, index: 5)
-            enc.setTexture(world.bandTex, index: 6)
-            enc.setTexture(clipmap.band, index: 7)
-            enc.setBuffer(world.giantBuffer, offset: 0, index: 2)
-            // HORIZON_SEGS (64) threads per bin, one threadgroup each.
-            enc.dispatchThreads(MTLSize(width: 64, height: 1024, depth: 1), threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
-        }
+        if Renderer.profile != "nohorizon", let enc = bakes { encodeHorizon(into: enc, frame: &f) }
         bakes?.endEncoding()
         // The giants within the world's edge: their strand maps (baked on arrival) and the frame's table of them.
         vines.update(giants: world.terrain.giants, eye: SIMD2(camera.position.x, camera.position.z), reach: Double(f.fade.y), origin: world.origin, seed: world.seed, into: cb)
@@ -77,215 +50,234 @@ extension Renderer {
         prevCamera = (camera.position, b.fwd, b.right, b.up)
         let histIn = history[historyIndex], histOut = history[1 - historyIndex]
         historyIndex = 1 - historyIndex
-
-        let sp = MTLRenderPassDescriptor()
-        sp.colorAttachments[0].texture = sceneTex
-        sp.colorAttachments[0].loadAction = .dontCare
-        sp.colorAttachments[0].storeAction = .store
-        if let enc = cb.makeRenderCommandEncoder(descriptor: sp) {
-            // The canopies' band test only skips through cells inside the 1-voxel map's unmorphed disc (trace in
-            // Shaders/Saver.metal), so it is compiled in only while bands lie that close; islands' bands hold on every
-            // ring, needed out to isleShadeReach.
-            let cam2 = SIMD2(camera.position.x, camera.position.z)
-            let tb = camera.basis, tanV = tan(25.0 * .pi / 180) * 1.05
-            let half = atan(tanV * (1 + Double(aspect) * Double(aspect)).squareRoot())
-            // On while an island within the reach could show, off a little past it, so a camera hovering at the edge does
-            // not flick it.
-            let key = Renderer.keyLight(clock.sunDirection).0
-            let isleSpheres = Islands.spheres(world.terrain.isles, eye: camera.position, within: Renderer.isleShadeReach + (isleVariant ? 400 : 0), key: key)
-            isleVariant = Islands.inView(isleSpheres, eye: camera.position, fwd: tb.fwd, half: half, margin: isleVariant ? 0.12 : 0.06)
-            let isles = isleVariant
-            isleShapeVariant = isles || Islands.inView(Islands.spheres(world.terrain.isles, eye: camera.position, within: edgeRadius + 1000, key: key),
-                                                       eye: camera.position, fwd: tb.fwd, half: half, margin: isleShapeVariant ? 0.12 : 0.06)
-            let canopyBands = world.terrain.bandsNear(cam2, radius: Clipmap.handoff(0) + 40)
-            let noband = Renderer.profile == "noband"
-            f.shadow.w = isles && !noband ? 1 : 0
-            let isleTable = Islands.table(world.terrain.isles, near: cam2, within: 3000, view: (camera.position, tb.fwd, half))
-            var isleBytes = isleTable.bytes
-            towers.frameTable(eye: camera.position, fwd: tb.fwd, right: tb.right, up: tb.up, tanH: tanV * Double(aspect), tanV: tanV)
-            // Per tile: 1 an island's surfaces may show, 2 its shade or sky occlusion, 8 close by one within isleShadeReach,
-            // 4 its mist.
-            let T = Renderer.sceneTile, nx = (w + T - 1) / T, ny = (h + T - 1) / T
-            var tileNeed = [UInt8](repeating: 0, count: nx * ny)
-            func mark(_ list: [Islands.Box], _ bit: UInt8) {
-                for b in list {
-                    guard let t = tileRange(box: b.lo, b.hi, nx: nx, ny: ny, tw: Double(T), th: Double(T), width: w, height: h, pad: 6) else { continue }
-                    for ty in t.y0...t.y1 { for tx in t.x0...t.x1 { tileNeed[ty * nx + tx] |= bit } }
-                }
-            }
-            if isleShapeVariant {
-                mark(Islands.boxes(world.terrain.isles, eye: camera.position, within: edgeRadius + 1000, key: key, columns: true, shade: false), 1)
-            }
-            if isles {
-                let within = Renderer.isleShadeReach + 400
-                mark(Islands.boxes(world.terrain.isles, eye: camera.position, within: within, key: key, columns: true, shade: false), 8)
-                mark(Islands.boxes(world.terrain.isles, eye: camera.position, within: within, key: key, columns: false, shade: true), 2)
-                mark(isleTable.mist, 12)
-                // The sky occlusion reaches no farther than the shading table, which holds every island it darkens.
-                mark(world.terrain.isles.filter { simd_length($0.pos - cam2) < 3000 + $0.reach }.map(Islands.occlusionBox), 2)
-            }
-            // Island bands only where an island's work does: elsewhere its air is walked as any rock gap's.
-            let bandsT = canopyBands && !noband
-            let variant = tileNeed.map { need -> Int in
-                let shapeT = isleShapeVariant && need & 1 != 0
-                if isles && (need & 8 != 0 || (need & 2 != 0 && shapeT)) { return need & 4 != 0 ? 6 : 5 }
-                if isles && need & 2 != 0 { return 4 }
-                return (bandsT ? 1 : 0) + (shapeT ? 2 : 0)
-            }
-            // Rectangles of tiles of one variant, each drawn as the whole frame's triangle scissored to it: a pair of
-            // triangles per tile would shade the 2x2 quads along every diagonal twice.
-            var rects: [(v: Int, x0: Int, x1: Int, y0: Int, y1: Int)] = []
-            var open: [Int: Int] = [:]
-            for ty in 0..<ny {
-                var next: [Int: Int] = [:]
-                var tx = 0
-                while tx < nx {
-                    let v = variant[ty * nx + tx]
-                    var x1 = tx
-                    while x1 + 1 < nx && variant[ty * nx + x1 + 1] == v { x1 += 1 }
-                    if let i = open[tx], rects[i].x1 == x1, rects[i].v == v {
-                        rects[i].y1 = ty
-                        next[tx] = i
-                    } else {
-                        rects.append((v, tx, x1, ty, ty))
-                        next[tx] = rects.count - 1
-                    }
-                    tx = x1 + 1
-                }
-                open = next
-            }
-            enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
-            enc.setFragmentBuffer(birdBuf, offset: 0, index: 5)
-            enc.setFragmentBuffer(horizonBuf, offset: 0, index: 6)
-            enc.setFragmentTexture(world.heightTex, index: 0)
-            enc.setFragmentTexture(cloudTex, index: 1)
-            enc.setFragmentTexture(world.climateTex, index: 2)
-            enc.setFragmentBuffer(world.siteBuffer, offset: 0, index: 1)
-            enc.setFragmentTexture(world.structTex, index: 3)
-            enc.setFragmentTexture(lightMap, index: 4)
-            enc.setFragmentTexture(lightDir, index: 5)
-            enc.setFragmentTexture(clipmap.height, index: 6)
-            enc.setFragmentTexture(clipmap.climate, index: 7)
-            enc.setFragmentTexture(clipmap.cover, index: 8)
-            enc.setFragmentTexture(shadowMaps[0], index: 9)
-            enc.setFragmentTexture(shadowMaps[1], index: 10)
-            enc.setFragmentTexture(slowTex, index: 11)
-            enc.setFragmentTexture(world.maxTex, index: 12)
-            enc.setFragmentTexture(world.gapTex, index: 13)
-            enc.setFragmentTexture(clipmap.gaps, index: 14)
-            enc.setFragmentTexture(clipmap.gaps2, index: 17)
-            enc.setFragmentTexture(world.bandTex, index: 15)
-            enc.setFragmentTexture(provTex, index: 16)
-            enc.setFragmentTexture(clipmap.band, index: 18)
-            enc.setFragmentBuffer(lampPos, offset: 0, index: 2)
-            enc.setFragmentBuffer(lampState, offset: 0, index: 3)
-            enc.setFragmentBytes(&hazeRefs, length: 128, index: 4)
-            enc.setFragmentBytes(&tileMasks, length: tileMasks.count * 4, index: 7)
-            enc.setFragmentBuffer(world.giantBuffer, offset: 0, index: 8)
-            enc.setFragmentBytes(towers.table, length: Towers.tableBytes, index: 9)
-            enc.setFragmentBytes(&isleBytes, length: Islands.tableBytes, index: 10)
-            for v in 0..<GPU.sceneVariants.count {
-                let mine = rects.filter { $0.v == v }
-                guard !mine.isEmpty else { continue }
-                enc.setRenderPipelineState(scenePipelines[clock.cloudSea > 0 ? 1 : 0][towers.tableCount > 0 ? 1 : 0][v])
-                for r in mine {
-                    let x0 = r.x0 * T, y0 = r.y0 * T
-                    enc.setScissorRect(MTLScissorRect(x: x0, y: y0, width: min((r.x1 + 1) * T, w) - x0, height: min((r.y1 + 1) * T, h) - y0))
-                    enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-                }
-            }
-            enc.endEncoding()
-        }
+        encodeScene(into: cb, target: sceneTex, frame: &f, birds: birdBuf, width: w, height: h)
         // The giants' hanging strands over the scene (vineFragment): the scene's bindings less the birds and the lamp
         // references, plus the strand maps. VR_PROFILE=bits2048 leaves them out.
         if vines.tableCount > 0 && !(Renderer.profile.hasPrefix("bits") && (Int(Renderer.profile.dropFirst(4)) ?? 0) & 2048 != 0) {
-            let vp = MTLRenderPassDescriptor()
-            vp.colorAttachments[0].texture = sceneTex
-            vp.colorAttachments[0].loadAction = .load
-            vp.colorAttachments[0].storeAction = .store
-            if let enc = cb.makeRenderCommandEncoder(descriptor: vp) {
-                enc.setRenderPipelineState(vinePipelines[clock.cloudSea > 0 ? 1 : 0])
-                enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
-                enc.setFragmentTexture(world.heightTex, index: 0)
-                enc.setFragmentTexture(cloudTex, index: 1)
-                enc.setFragmentTexture(world.climateTex, index: 2)
-                enc.setFragmentBuffer(world.siteBuffer, offset: 0, index: 1)
-                enc.setFragmentTexture(world.structTex, index: 3)
-                enc.setFragmentTexture(lightMap, index: 4)
-                enc.setFragmentTexture(lightDir, index: 5)
-                enc.setFragmentTexture(clipmap.height, index: 6)
-                enc.setFragmentTexture(clipmap.climate, index: 7)
-                enc.setFragmentTexture(clipmap.cover, index: 8)
-                enc.setFragmentTexture(shadowMaps[0], index: 9)
-                enc.setFragmentTexture(shadowMaps[1], index: 10)
-                enc.setFragmentTexture(slowTex, index: 11)
-                enc.setFragmentTexture(world.maxTex, index: 12)
-                enc.setFragmentTexture(world.gapTex, index: 13)
-                enc.setFragmentTexture(clipmap.gaps, index: 14)
-                enc.setFragmentTexture(clipmap.gaps2, index: 17)
-                enc.setFragmentTexture(world.bandTex, index: 15)
-                enc.setFragmentTexture(provTex, index: 16)
-                enc.setFragmentBuffer(lampPos, offset: 0, index: 2)
-                enc.setFragmentBuffer(lampState, offset: 0, index: 3)
-                enc.setFragmentBytes(&tileMasks, length: tileMasks.count * 4, index: 7)
-                enc.setFragmentBuffer(world.giantBuffer, offset: 0, index: 8)
-                enc.setFragmentBytes(towers.table, length: Towers.tableBytes, index: 9)
-                enc.setFragmentBytes(vines.table, length: Vines.tableBytes, index: 10)
-                enc.setFragmentTexture(vines.fine, index: 18)
-                enc.setFragmentTexture(vines.coarse, index: 19)
-                enc.setFragmentTexture(vines.sup, index: 20)
-                enc.setFragmentTexture(vines.bands, index: 21)
-                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-                enc.endEncoding()
-            }
+            encodeVines(into: cb, target: sceneTex, frame: &f)
         }
         // In its own pass: drawn after the scene in the scene's pass, even a draw doing nothing cost a twilight scene ~0.4 ms.
-        if f.sunDir.y < Renderer.bioSun {
-            let bp = MTLRenderPassDescriptor()
-            bp.colorAttachments[0].texture = sceneTex
-            bp.colorAttachments[0].loadAction = .load
-            bp.colorAttachments[0].storeAction = .store
-            if let enc = cb.makeRenderCommandEncoder(descriptor: bp) {
-                enc.setRenderPipelineState(bioPipeline)
-                enc.setVertexBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
-                enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
-                enc.setVertexTexture(world.heightTex, index: 0)
-                enc.setVertexTexture(world.climateTex, index: 2)
-                enc.setVertexTexture(provTex, index: 16)
-                enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: Renderer.moteCount)
-                enc.endEncoding()
+        if f.sunDir.y < Renderer.bioSun { encodeBio(into: cb, target: sceneTex, frame: &f) }
+        encodeResolve(into: cb, scene: sceneTex, history: histIn, into: histOut, frame: &f, cells: (ow, oh))
+        encodePost(into: cb, history: histOut, output: output, frame: &f)
+    }
+
+    // The province fields round the camera, rebaked whole once it has moved an eighth of their window.
+    private func encodeProvinces(into cb: MTLCommandBuffer) {
+        let cam2 = SIMD2(camera.position.x, camera.position.z)
+        guard provCentre.map({ simd_length($0 - cam2) > Double(Renderer.provN) * Renderer.provCell / 8 }) ?? true,
+              let enc = cb.makeComputeCommandEncoder() else { return }
+        provCentre = cam2
+        var info = SIMD4<Int32>(Int32(floor(cam2.x / Renderer.provCell)) - Int32(Renderer.provN / 2),
+                                Int32(floor(cam2.y / Renderer.provCell)) - Int32(Renderer.provN / 2), 0, Int32(bitPattern: world.seed))
+        enc.setComputePipelineState(provPipeline)
+        enc.setTexture(provTex, index: 0)
+        enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
+        enc.dispatchThreads(MTLSize(width: Renderer.provN, height: Renderer.provN, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+        enc.endEncoding()
+    }
+
+    // The terrain horizon round the camera and the islands' tangents (bakeHorizon).
+    private func encodeHorizon(into enc: MTLComputeCommandEncoder, frame f: inout Frame) {
+        f.shadow.z = 1
+        enc.setComputePipelineState(horizonPipeline)
+        enc.setBuffer(horizonBuf, offset: 0, index: 0)
+        enc.setBytes(&f, length: MemoryLayout<Frame>.stride, index: 1)
+        enc.setTexture(world.heightTex, index: 0)
+        enc.setTexture(clipmap.height, index: 1)
+        enc.setTexture(world.maxTex, index: 2)
+        enc.setTexture(world.gapTex, index: 3)
+        enc.setTexture(clipmap.gaps, index: 4)
+        enc.setTexture(clipmap.gaps2, index: 5)
+        enc.setTexture(world.bandTex, index: 6)
+        enc.setTexture(clipmap.band, index: 7)
+        enc.setBuffer(world.giantBuffer, offset: 0, index: 2)
+        // HORIZON_SEGS (64) threads per bin, one threadgroup each.
+        enc.dispatchThreads(MTLSize(width: 64, height: 1024, depth: 1), threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
+    }
+
+    private func encodeScene(into cb: MTLCommandBuffer, target sceneTex: MTLTexture, frame f: inout Frame, birds birdBuf: MTLBuffer,
+                             width w: Int, height h: Int) {
+        guard let enc = cb.makeRenderCommandEncoder(descriptor: Renderer.pass(sceneTex, load: false)) else { return }
+        // The canopies' band test only skips through cells inside the 1-voxel map's unmorphed disc (trace in
+        // Shaders/Saver.metal), so it is compiled in only while bands lie that close; islands' bands hold on every
+        // ring, needed out to isleShadeReach.
+        let cam2 = SIMD2(camera.position.x, camera.position.z)
+        let tb = camera.basis, tanV = tan(25.0 * .pi / 180) * 1.05
+        let half = atan(tanV * (1 + Double(aspect) * Double(aspect)).squareRoot())
+        // On while an island within the reach could show, off a little past it, so a camera hovering at the edge does
+        // not flick it.
+        let key = Renderer.keyLight(clock.sunDirection).0
+        let isleSpheres = Islands.spheres(world.terrain.isles, eye: camera.position, within: Renderer.isleShadeReach + (isleVariant ? 400 : 0), key: key)
+        isleVariant = Islands.inView(isleSpheres, eye: camera.position, fwd: tb.fwd, half: half, margin: isleVariant ? 0.12 : 0.06)
+        let isles = isleVariant
+        isleShapeVariant = isles || Islands.inView(Islands.spheres(world.terrain.isles, eye: camera.position, within: edgeRadius + 1000, key: key),
+                                                   eye: camera.position, fwd: tb.fwd, half: half, margin: isleShapeVariant ? 0.12 : 0.06)
+        let canopyBands = world.terrain.bandsNear(cam2, radius: Clipmap.handoff(0) + 40)
+        let noband = Renderer.profile == "noband"
+        f.shadow.w = isles && !noband ? 1 : 0
+        let isleTable = Islands.table(world.terrain.isles, near: cam2, within: 3000, view: (camera.position, tb.fwd, half))
+        var isleBytes = isleTable.bytes
+        towers.frameTable(eye: camera.position, fwd: tb.fwd, right: tb.right, up: tb.up, tanH: tanV * Double(aspect), tanV: tanV)
+        // Per tile: 1 an island's surfaces may show, 2 its shade or sky occlusion, 8 close by one within isleShadeReach,
+        // 4 its mist.
+        let T = Renderer.sceneTile, nx = (w + T - 1) / T, ny = (h + T - 1) / T
+        var tileNeed = [UInt8](repeating: 0, count: nx * ny)
+        func mark(_ list: [Islands.Box], _ bit: UInt8) {
+            for b in list {
+                guard let t = tileRange(box: b.lo, b.hi, nx: nx, ny: ny, tw: Double(T), th: Double(T), width: w, height: h, pad: 6) else { continue }
+                for ty in t.y0...t.y1 { for tx in t.x0...t.x1 { tileNeed[ty * nx + tx] |= bit } }
             }
         }
-        let tpd = MTLRenderPassDescriptor()
-        tpd.colorAttachments[0].texture = histOut
-        tpd.colorAttachments[0].loadAction = .dontCare
-        tpd.colorAttachments[0].storeAction = .store
-        if let enc = cb.makeRenderCommandEncoder(descriptor: tpd) {
-            enc.setRenderPipelineState(taaPipeline)
-            enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
-            enc.setFragmentTexture(sceneTex, index: 0)
-            enc.setFragmentTexture(histIn, index: 1)
-            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-            let px = Int(f.planetPx.x), py = Int(f.planetPx.y)
-            if let sp = taaStarPipeline, px >= -4, py >= -4, px <= ow + 4, py <= oh + 4 {
-                let x0 = max(px - 5, 0), y0 = max(py - 5, 0)
-                enc.setRenderPipelineState(sp)
-                enc.setScissorRect(MTLScissorRect(x: x0, y: y0, width: min(px + 5, ow) - x0, height: min(py + 5, oh) - y0))
+        if isleShapeVariant {
+            mark(Islands.boxes(world.terrain.isles, eye: camera.position, within: edgeRadius + 1000, key: key, columns: true, shade: false), 1)
+        }
+        if isles {
+            let within = Renderer.isleShadeReach + 400
+            mark(Islands.boxes(world.terrain.isles, eye: camera.position, within: within, key: key, columns: true, shade: false), 8)
+            mark(Islands.boxes(world.terrain.isles, eye: camera.position, within: within, key: key, columns: false, shade: true), 2)
+            mark(isleTable.mist, 12)
+            // The sky occlusion reaches no farther than the shading table, which holds every island it darkens.
+            mark(world.terrain.isles.filter { simd_length($0.pos - cam2) < 3000 + $0.reach }.map(Islands.occlusionBox), 2)
+        }
+        // Island bands only where an island's work does: elsewhere its air is walked as any rock gap's.
+        let bandsT = canopyBands && !noband
+        let variant = tileNeed.map { need -> Int in
+            let shapeT = isleShapeVariant && need & 1 != 0
+            if isles && (need & 8 != 0 || (need & 2 != 0 && shapeT)) { return need & 4 != 0 ? 6 : 5 }
+            if isles && need & 2 != 0 { return 4 }
+            return (bandsT ? 1 : 0) + (shapeT ? 2 : 0)
+        }
+        // Rectangles of tiles of one variant, each drawn as the whole frame's triangle scissored to it: a pair of
+        // triangles per tile would shade the 2x2 quads along every diagonal twice.
+        var rects: [(v: Int, x0: Int, x1: Int, y0: Int, y1: Int)] = []
+        var open: [Int: Int] = [:]
+        for ty in 0..<ny {
+            var next: [Int: Int] = [:]
+            var tx = 0
+            while tx < nx {
+                let v = variant[ty * nx + tx]
+                var x1 = tx
+                while x1 + 1 < nx && variant[ty * nx + x1 + 1] == v { x1 += 1 }
+                if let i = open[tx], rects[i].x1 == x1, rects[i].v == v {
+                    rects[i].y1 = ty
+                    next[tx] = i
+                } else {
+                    rects.append((v, tx, x1, ty, ty))
+                    next[tx] = rects.count - 1
+                }
+                tx = x1 + 1
+            }
+            open = next
+        }
+        bindShared(enc, frame: &f)
+        enc.setFragmentBuffer(birdBuf, offset: 0, index: 5)
+        enc.setFragmentBuffer(horizonBuf, offset: 0, index: 6)
+        enc.setFragmentTexture(clipmap.band, index: 18)
+        enc.setFragmentBytes(&hazeRefs, length: 128, index: 4)
+        enc.setFragmentBytes(&isleBytes, length: Islands.tableBytes, index: 10)
+        for v in 0..<GPU.sceneVariants.count {
+            let mine = rects.filter { $0.v == v }
+            guard !mine.isEmpty else { continue }
+            enc.setRenderPipelineState(scenePipelines[clock.cloudSea > 0 ? 1 : 0][towers.tableCount > 0 ? 1 : 0][v])
+            for r in mine {
+                let x0 = r.x0 * T, y0 = r.y0 * T
+                enc.setScissorRect(MTLScissorRect(x: x0, y: y0, width: min((r.x1 + 1) * T, w) - x0, height: min((r.y1 + 1) * T, h) - y0))
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             }
-            enc.endEncoding()
         }
-        let pp = MTLRenderPassDescriptor()
-        pp.colorAttachments[0].texture = output
-        pp.colorAttachments[0].loadAction = .dontCare
-        pp.colorAttachments[0].storeAction = .store
-        if let enc = cb.makeRenderCommandEncoder(descriptor: pp) {
-            enc.setRenderPipelineState(postPipeline)
-            enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
-            enc.setFragmentTexture(histOut, index: 0)
+        enc.endEncoding()
+    }
+
+    // The fragment bindings the scene and strand passes share.
+    private func bindShared(_ enc: MTLRenderCommandEncoder, frame f: inout Frame) {
+        enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
+        enc.setFragmentTexture(world.heightTex, index: 0)
+        enc.setFragmentTexture(cloudTex, index: 1)
+        enc.setFragmentTexture(world.climateTex, index: 2)
+        enc.setFragmentBuffer(world.siteBuffer, offset: 0, index: 1)
+        enc.setFragmentTexture(world.structTex, index: 3)
+        enc.setFragmentTexture(lightMap, index: 4)
+        enc.setFragmentTexture(lightDir, index: 5)
+        enc.setFragmentTexture(clipmap.height, index: 6)
+        enc.setFragmentTexture(clipmap.climate, index: 7)
+        enc.setFragmentTexture(clipmap.cover, index: 8)
+        enc.setFragmentTexture(shadowMaps[0], index: 9)
+        enc.setFragmentTexture(shadowMaps[1], index: 10)
+        enc.setFragmentTexture(slowTex, index: 11)
+        enc.setFragmentTexture(world.maxTex, index: 12)
+        enc.setFragmentTexture(world.gapTex, index: 13)
+        enc.setFragmentTexture(clipmap.gaps, index: 14)
+        enc.setFragmentTexture(clipmap.gaps2, index: 17)
+        enc.setFragmentTexture(world.bandTex, index: 15)
+        enc.setFragmentTexture(provTex, index: 16)
+        enc.setFragmentBuffer(lampPos, offset: 0, index: 2)
+        enc.setFragmentBuffer(lampState, offset: 0, index: 3)
+        enc.setFragmentBytes(&tileMasks, length: tileMasks.count * 4, index: 7)
+        enc.setFragmentBuffer(world.giantBuffer, offset: 0, index: 8)
+        enc.setFragmentBytes(towers.table, length: Towers.tableBytes, index: 9)
+    }
+
+    private func encodeVines(into cb: MTLCommandBuffer, target sceneTex: MTLTexture, frame f: inout Frame) {
+        guard let enc = cb.makeRenderCommandEncoder(descriptor: Renderer.pass(sceneTex, load: true)) else { return }
+        enc.setRenderPipelineState(vinePipelines[clock.cloudSea > 0 ? 1 : 0])
+        bindShared(enc, frame: &f)
+        enc.setFragmentBytes(vines.table, length: Vines.tableBytes, index: 10)
+        enc.setFragmentTexture(vines.fine, index: 18)
+        enc.setFragmentTexture(vines.coarse, index: 19)
+        enc.setFragmentTexture(vines.sup, index: 20)
+        enc.setFragmentTexture(vines.bands, index: 21)
+        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        enc.endEncoding()
+    }
+
+    private func encodeBio(into cb: MTLCommandBuffer, target sceneTex: MTLTexture, frame f: inout Frame) {
+        guard let enc = cb.makeRenderCommandEncoder(descriptor: Renderer.pass(sceneTex, load: true)) else { return }
+        enc.setRenderPipelineState(bioPipeline)
+        enc.setVertexBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
+        enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
+        enc.setVertexTexture(world.heightTex, index: 0)
+        enc.setVertexTexture(world.climateTex, index: 2)
+        enc.setVertexTexture(provTex, index: 16)
+        enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: Renderer.moteCount)
+        enc.endEncoding()
+    }
+
+    // The temporal resolve into this frame's history, and again round the evening star in a scissor (STAR_FC).
+    private func encodeResolve(into cb: MTLCommandBuffer, scene sceneTex: MTLTexture, history histIn: MTLTexture, into histOut: MTLTexture,
+                               frame f: inout Frame, cells: (Int, Int)) {
+        let (ow, oh) = cells
+        guard let enc = cb.makeRenderCommandEncoder(descriptor: Renderer.pass(histOut, load: false)) else { return }
+        enc.setRenderPipelineState(taaPipeline)
+        enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
+        enc.setFragmentTexture(sceneTex, index: 0)
+        enc.setFragmentTexture(histIn, index: 1)
+        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        let px = Int(f.planetPx.x), py = Int(f.planetPx.y)
+        if let sp = taaStarPipeline, px >= -4, py >= -4, px <= ow + 4, py <= oh + 4 {
+            let x0 = max(px - 5, 0), y0 = max(py - 5, 0)
+            enc.setRenderPipelineState(sp)
+            enc.setScissorRect(MTLScissorRect(x: x0, y: y0, width: min(px + 5, ow) - x0, height: min(py + 5, oh) - y0))
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-            enc.endEncoding()
         }
+        enc.endEncoding()
+    }
+
+    private func encodePost(into cb: MTLCommandBuffer, history histOut: MTLTexture, output: MTLTexture, frame f: inout Frame) {
+        guard let enc = cb.makeRenderCommandEncoder(descriptor: Renderer.pass(output, load: false)) else { return }
+        enc.setRenderPipelineState(postPipeline)
+        enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
+        enc.setFragmentTexture(histOut, index: 0)
+        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        enc.endEncoding()
+    }
+
+    private static func pass(_ target: MTLTexture, load: Bool) -> MTLRenderPassDescriptor {
+        let d = MTLRenderPassDescriptor()
+        d.colorAttachments[0].texture = target
+        d.colorAttachments[0].loadAction = load ? .load : .dontCare
+        d.colorAttachments[0].storeAction = .store
+        return d
     }
 
     // The tiles (nx x ny of tw x th pixels over a width x height frame, rows down the screen) whose rays may cross the box
