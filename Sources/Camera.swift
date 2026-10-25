@@ -20,6 +20,7 @@ final class FlightCamera {
     private var nextPilgrim: Double = 0
     private var rimLift: Double = 0
     var sun = SIMD3<Double>(0, 1, 0)
+    var cloudSea = 0.0
     var pitchOverride: Double?
     // A fixed pose for showcase snapshots; step() leaves it alone.
     private(set) var frozen = false
@@ -681,6 +682,9 @@ final class FlightCamera {
             }
         }
         target = max(target, min(regional, FlightCamera.ceiling))
+        // At dawn the sea of cloud's top reaches up to 12 x its amount over the sea (at most 14, SEA_LID in Saver.metal):
+        // fly well over it, high enough that it reads as a surface below, rising with the amount so the lift is gentle.
+        target = max(target, 19.85 + 38 * cloudSea)
         // Under an island: below its underside all the way through, the keel's deepest ahead included.
         var under = Double.infinity
         for dist in [0.0, 30.0, 60.0, 100.0, 140.0, 180.0, 260.0, 360.0] {
