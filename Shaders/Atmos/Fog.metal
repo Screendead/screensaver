@@ -59,7 +59,7 @@ static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, 
 
 // solid: land, which even fully hazed stays a shade darker and cooler than the sky behind it, so a far range or a
 // tepui's upper wall reads as a solid layer and not a cut-out of the sky; 0 at the world's edge, which goes to sky.
-static float3 applyFogT(thread const Ctx& x, float3 col, float3 o, float3 d, float T, float solid = 0.0) {
+static float3 applyFogT(thread const Ctx& x, float3 col, float3 d, float T, float solid = 0.0) {
     // Thin haze in-scatters less than the full horizon radiance; only thick fog converges on the sky.
     // Forward scatter fades out above the horizon as the sky's does, so fully hazed land matches the sky behind it.
     float scatter = min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night) * mix(1.0, smoothstep(0.1, 0.0, d.y), smoothstep(0.5, 0.0, T));
@@ -68,5 +68,5 @@ static float3 applyFogT(thread const Ctx& x, float3 col, float3 o, float3 d, flo
 }
 
 static float3 applyFog(thread const Ctx& x, float3 col, float3 o, float3 d, float t) {
-    return applyFogT(x, col, o, d, fogTransmittance(x, o, d, t));
+    return applyFogT(x, col, d, fogTransmittance(x, o, d, t));
 }

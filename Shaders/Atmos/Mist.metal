@@ -118,6 +118,6 @@ static float4 isleMist(thread const Ctx& x, float3 o, float3 d, float tEnd) {
     lit = mix(lit, float3(0.020, 0.025, 0.040) * (0.5 + 0.7 * shadow) + x.L.skyHor * 0.7, x.L.night);
     // At night the spray round a fall's foot carries a faint turquoise glow (the shared palette's #2fe3d0).
     lit += BIO_LAND[1] * 0.035 * x.L.night * saturate(plume / tau);
-    lit = applyFogT(x, lit, o, d, fogTransmittance(x, o, d, max(dist / tau, 0.0), 0));
+    lit = applyFogT(x, lit, d, fogTransmittance(x, o, d, max(dist / tau, 0.0), 0));
     return float4(lit, a);
 }

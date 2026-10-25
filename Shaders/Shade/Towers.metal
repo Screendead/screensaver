@@ -47,7 +47,7 @@ static float3 towerWallPlane(Tower T, float2 wc, float3 n) {
         if (k >= T.K) break;
         float2 a = towerStageAxis(T, k);
         TowerPlan Pk = towerPlan(T, wc - a);
-        float Rk = tierR(T, Pk, k);
+        float Rk = tierR(T, k);
         if (Pk.reff < Rk + 0.75) { m = k; Rm = Rk; Pm = Pk; ax = a; }
     }
     // Off the stages (plinth, talus, roots) and deep in a stage (the breaks and the rubble on its treads) the masonry is

@@ -27,7 +27,7 @@ static inline Col towerShape(Col col, Tower T, float2 wf, int s, uint seed) {
     for (int k = 0; k < 6; k++) {
         if (k >= T.K) break;
         TowerPlan Pk = towerPlan(T, wf - towerStageAxis(T, k));
-        float Rk = tierR(T, Pk, k);
+        float Rk = tierR(T, k);
         out[k] = Pk.reff - Rk;
         if (Pk.reff < Rk) { m = k; Rm = Rk; Pm = Pk; }
     }
@@ -100,7 +100,7 @@ static inline Col towerShape(Col col, Tower T, float2 wf, int s, uint seed) {
     // it overhang.
     if (T.kb <= m && T.kb < T.K - 2) {
         TowerPlan Pb = towerPlan(T, wf - towerStageAxis(T, T.kb));
-        float Rk = tierR(T, Pb, T.kb);
+        float Rk = tierR(T, T.kb);
         float lobeW = 0.5 + 0.5 * cos(Pb.a - T.th1);
         float depth = T.R0 * 0.35 * smoothstep(0.82, 0.97, lobeW) * saturate(0.7 + perlin2(Pb.dir * 8.0, seed + 513u));
         if (Pb.reff > Rk - depth) {

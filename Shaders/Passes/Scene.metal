@@ -186,7 +186,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
                 open = 0.0;
                 // Land the haze all but hides needs no shading.
                 float T = fogTransmittance(x, wp, r, rh.t, 2);
-                refl = applyFogT(x, T < 0.01 || (x.prof & 8) ? float3(0.0) : shadeL(x, x.L, wp, r, rh, x.shadowMode == 1.0 ? 2 : 1, true), wp, r, T,
+                refl = applyFogT(x, T < 0.01 || (x.prof & 8) ? float3(0.0) : shadeL(x, x.L, wp, r, rh, x.shadowMode == 1.0 ? 2 : 1, true), r, T,
                                  landSolid(x, wp + r * rh.t));
             } else {
                 refl = softCloudSky(x, wp, r);
@@ -334,7 +334,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     }
     if (f.misc2.z == 3) return float4(float3(fogTransmittance(x, o, d, tSurf)), 1);
     if (seaAmt > 0.0 && (water || h.hit)) { SeaFog sea = cloudSea(x, seaAmt, o, d, water ? tw : h.t); col = col * sea.T + sea.col; }
-    if (f.misc2.z != 2) col = Tfog >= 0.0 ? applyFogT(x, col, o, d, Tfog, landSolid(x, o + d * h.t)) : applyFog(x, col, o, d, tSurf);
+    if (f.misc2.z != 2) col = Tfog >= 0.0 ? applyFogT(x, col, d, Tfog, landSolid(x, o + d * h.t)) : applyFog(x, col, o, d, tSurf);
     // A summit above the cloud base is seen through the slab in front of it.
     if (!(x.prof & 32) && !water && h.hit && o.y < CLOUD_Y0 && o.y + d.y * h.t > CLOUD_Y0) {
         CloudSample cl = cloudSheet(x, o, d, h.t, 6);

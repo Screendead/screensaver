@@ -228,7 +228,7 @@ static inline TowerPlan towerPlan(Tower T, float2 d) {
 }
 
 // Stage k's apothem. (Corner piers drew a crisp vertical line down every corner: art deco, not a ruin.)
-static inline float tierR(Tower T, TowerPlan P, int k) {
+static inline float tierR(Tower T, int k) {
     return T.R0 * towerTierScale(T, k);
 }
 

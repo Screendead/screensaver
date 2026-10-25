@@ -173,12 +173,12 @@ static inline float emergentLumps(float2 p, uint seed) {
 }
 
 // The intervals emergent e (trunk ground gt) adds to world column centre w: its trunk, and its crown's noise-edged,
-// domed pads. lod >= 1 (coarse rings): the trunk only where it fills the column.
+// domed pads. lod >= 1 (coarse rings): no limbs.
 static void emergentIntervals(float2 w, float2 ctr, float gt, float y0, float R, int pads, uint h, uint seed, int lod, thread GRuns& r) {
     float2 q = w - ctr;
     float d = length(q);
     float tr = R > 9.0 ? 1.2 : 0.75;
-    if (d < tr + (lod > 0 ? 0.0 : 0.0)) gAdd(r, gt, gt + y0, GM_WOOD);
+    if (d < tr) gAdd(r, gt, gt + y0, GM_WOOD);
     float2 p = w + seedOffset(seed);
     float lumps = emergentLumps(p, seed);
     for (int j = 0; j < pads; j++) {
