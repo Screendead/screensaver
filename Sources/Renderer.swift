@@ -259,11 +259,7 @@ struct SkyClock {
         let s = min(max((abs(y) - 0.22) / 0.35, 0), 1)
         // Linger in golden and blue hour, hurry through midday and deep night.
         let warp = y < -0.25 ? 5.0 : 0.5 + 1.5 * s * s * (3 - 2 * s)
-        // Half speed within ~4.6 degrees of the horizon, so cloud shadows cross the land at half the pace; the rest of
-        // the day keeps its pace, so a day runs about 15 minutes rather than 12 (tools/dayclock.py models it).
-        let b = min(max((abs(y) - 0.08) / 0.07, 0), 1)
-        let slow = 0.5 + 0.5 * b * b * (3 - 2 * b)
-        phase += dt / SkyClock.dayLength * warp * slow * 1.05
+        phase += dt / SkyClock.dayLength * warp * 1.05
         if phase > 1 { phase -= 1; day += 1 }
     }
 }

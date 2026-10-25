@@ -20,8 +20,6 @@ def advance(p, dt):
     e = w * (0.42 if w > 0 else 0.56) + 0.07
     s = min(max((abs(e) - 0.22) / 0.35, 0), 1)
     warp = 5.0 if e < -0.25 else 0.5 + 1.5 * s * s * (3 - 2 * s)
-    b = min(max((abs(e) - 0.08) / 0.07, 0), 1)
-    warp *= 0.5 + 0.5 * b * b * (3 - 2 * b)  # slow dawn
     return p + dt / 720 * warp * 1.05
 
 t, dt = 10.0, 1 / fps

@@ -1,7 +1,6 @@
 #!/bin/zsh
 # The standard 32-frame set: dawn, noon, sunset and night on eight seeds at 1728x1117, rendered through tools/vrr, plus
 # one 4x2 contact sheet per time of day (where Pillow is to hand). For milestones only: the baseline and the deliverable.
-# Night pins the phase master reached at 1215 s (0.535), since the clock's pace is not fixed across builds.
 # Usage: tools/render.sh <out dir> [app, default build/VoxelReverie.app] [seeds..., default 101 202 303 404 606 707 808 909]
 set -e
 here=${0:A:h}
@@ -13,7 +12,7 @@ for s in $seeds; do
   $here/vrr "$app" --screenshot $out/s${s}_dawn.png   --size 1728x1117 --times 60   --phase 0.005 --scale 1 --seed $s >/dev/null
   $here/vrr "$app" --screenshot $out/s${s}_noon.png   --size 1728x1117 --times 420  --phase 0.25  --scale 1 --seed $s >/dev/null
   $here/vrr "$app" --screenshot $out/s${s}_sunset.png --size 1728x1117 --times 800  --phase 0.49  --scale 1 --seed $s >/dev/null
-  $here/vrr "$app" --screenshot $out/s${s}_night.png  --size 1728x1117 --times 1215 --phase 0.535 --scale 1 --seed $s >/dev/null
+  $here/vrr "$app" --screenshot $out/s${s}_night.png  --size 1728x1117 --times 1215 --scale 1 --seed $s >/dev/null
 done
 python3 -I - "$out" <<'EOF' 2>/dev/null || true
 import glob, sys
