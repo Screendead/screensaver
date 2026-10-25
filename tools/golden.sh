@@ -22,7 +22,7 @@ find $out -type f -delete
 # name|seed|times|phase|env|flags; "-" for none. Poses mostly from tools/bench.sh, at short times: simulating minutes of
 # flight costs minutes. The sea of cloud (function constant 8) is compiled in only while the sky clock's cloudSea is above
 # 0: escarp (phase 0.005) and the path (phase -0.01) have it, the others don't. Seed 606 has an aurora on night 0 (day 0:
-# no scene runs the clock to its first wrap), looked at along its azimuth; 202 does not. The path fixture is a synthetic
+# no scene runs the clock to its first wrap), looked at along its azimuth; 202 does not, and its night looks at the moon (opposite the sun, at most ~20 degrees up). The path fixture is a synthetic
 # drift off the escarp pose (lines "simTime x z y yawDeg pitchDeg rollDeg exposure phase day"); a VR_PATH run prints
 # nothing, so its stdout text is empty.
 SCENES=(
@@ -33,7 +33,7 @@ SCENES=(
   "shelters_sunset|303|30|0.47|VR_CAM=300,2740,60,-90,4|-"
   "stilt_dusk|1|20|0.53|VR_SHOW=4,30,10,270,0|-"
   "aurora_night|606|30|0.75|VR_CAM=13016,5093,80,225.5,12,1|-"
-  "moon_night|202|30|0.75|VR_CAM=3706,1705,34,21.7,-0.5,1|-"
+  "moon_night|202|30|0.75|VR_CAM=3706,1705,320,141.6,16,1|-"
   "isle|303|10|0.12|VR_CAM=9822,-2224,480,180,4,1|-"
   "beach_battery|303|20|0.3|VR_CAM=6324,-945,29,10,-27.2,1|--battery"
   "cave_noon|404|30|0.25|VR_CAVE=40,6,0,0,1|-"
