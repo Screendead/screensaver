@@ -14,7 +14,8 @@ concurrency:
 
 jobs:
   test:
-    runs-on: macos-15
+    # Xcode 16's type checker times out on two StrataCore expressions that Xcode 26 builds.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
@@ -22,7 +23,12 @@ jobs:
         run: |
           xcodebuild -version
           swift --version
-          xcrun metal --version || echo "no Metal compiler"
+
+      - name: Metal toolchain
+        # Xcode 26 ships the Metal compiler as a separate component; the shader-probe tests need it.
+        run: |
+          xcrun metal --version 2>/dev/null || xcodebuild -downloadComponent MetalToolchain
+          xcrun metal --version
 
       - name: Build
         run: swift build
