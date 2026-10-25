@@ -7629,13 +7629,32 @@ constant float SEA_SOFT = 5.0;
 static inline float seaG(float u) { return u <= 0.0 ? 0.0 : u < SEA_SOFT ? u * u / (2.0 * SEA_SOFT) : u - 0.5 * SEA_SOFT; }
 
 // Closed form along the ray, no march; one noise sample where the ray meets the top sets the billows and the gaps.
+// The low ground round frame-local xz p: the least of nine taps of the coarsest level's mean heights, 80 apart, so a
+// hill narrower than that stands out of its valley's level. Means over water are the seabed.
+static inline float seaFloorAt(thread const Ctx& x, float2 p) {
+    constexpr sampler br(filter::linear, address::repeat);
+    int k = x.tr.levels - 1;
+    float w = x.tr.lod[k].w;
+    float2 base = float2(levelOrigin(x.tr, k) & (COARSE_N - 1));
+    float lo = 1e9;
+    for (int i = 0; i < 9; i++) {
+        float2 q = p + float2(i % 3 - 1, i / 3 - 1) * 80.0;
+        lo = min(lo, x.tr.ch.sample(br, (q / w + base) / float(COARSE_N), uint(k - 1), level(0)).r);
+    }
+    return max(lo, SEA);
+}
+
 static SeaFog cloudSea(thread const Ctx& x, float amt, float3 o, float3 d, float t) {
     SeaFog s = { 1.0, float3(0) };
     float burn = smoothstep(0.08, 0.30, x.L.sun.y);
-    // Burning off, the layer sinks as well as thins.
-    float top0 = SEA + mix(4.0, 15.0, amt);
     t = min(t, 3000.0);
-    float y0 = o.y, y1 = o.y + d.y * t;
+    float3 ph = o + d * t;
+    // Burning off, the layer sinks as well as thins. The closed form below needs one top per ray: the hit's.
+    float top0 = seaFloorAt(x, ph.xz) + mix(2.0, 8.0, amt);
+    // The flight may skim 7 over the ground: the layer's top stays below the eye, far below it close by, so no ray
+    // starts inside it and the flight never meets it as a wall.
+    top0 = min(top0, o.y - 6.0 - 16.0 * (1.0 - smoothstep(40.0, 320.0, length(ph.xz - o.xz))));
+    float y0 = o.y, y1 = ph.y;
     if (min(y0, y1) > top0 + 3.0) return s;
     float te = d.y < 0.0 && y0 > top0 ? min((y0 - top0) / -d.y, t) : 0.0;
     float2 q = o.xz + d.xz * te + float2(x.origin) - float2(0.35, 0.12) * x.time;

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # VR_PATH files for the sea-of-cloud proofs over seed 1's lagoon basin (t=200 pose).
-# Usage: tools/cloudsea_paths.py strip|flight > path.txt
+# Usage: tools/cloudsea_paths.py strip|flight [fps] > path.txt
 #   strip:  one held pose at eight sun elevations, each repeated 8 frames so the temporal history settles (keep the 8th)
-#   flight: 10 s at 30 fps straight over the basin at sunrise, the sky clock advancing at its live rate
+#   flight [fps]: 10 s straight over the basin at sunrise, down to the autopilot's floor, the sky clock at its live rate
 import math, sys
 
 X0, Z0, Y0, YAW, PITCH = 7236.0, 1477.0, 116.0, 26.9, -15.9
@@ -30,12 +30,17 @@ if mode == 'strip':
             print(f'{t:.4f} {X0} {Z0} {Y0} {YAW} {PITCH} 0 {exposure(ph):.4f} {ph} 0')
             t += 1 / 30
 else:
-    # Starts past the phase wrap at 1.0, where the sun's azimuth jumps half a turn.
-    ph, x, z, y = 0.0, X0, Z0, Y0
-    for i in range(300):
-        print(f'{t:.4f} {x:.3f} {z:.3f} {y:.3f} {YAW} {PITCH + 4 * i / 300:.3f} 0 {exposure(ph):.4f} {ph % 1:.6f} 0')
-        t += 1 / 30
-        x += math.sin(math.radians(YAW)) * 26 / 30
-        z += math.cos(math.radians(YAW)) * 26 / 30
-        y -= 40 / 300
-        ph += rate(ph) / 30
+    # Starts past the phase wrap at 1.0, where the sun's azimuth jumps half a turn. Descends to 15 over the water,
+    # the autopilot's floor, where a layer that reached the eye would show as a wall.
+    fps = float(sys.argv[2]) if len(sys.argv) > 2 else 30.0
+    n = int(10 * fps)
+    ph, x, z = 0.0, X0, Z0
+    for i in range(n):
+        u = i / (n - 1)
+        s = u * u * (3 - 2 * u)
+        y = Y0 - (Y0 - 35.0) * s
+        print(f'{t:.4f} {x:.3f} {z:.3f} {y:.3f} {YAW} {PITCH + 12 * s:.3f} 0 {exposure(ph):.4f} {ph % 1:.6f} 0')
+        t += 1 / fps
+        x += math.sin(math.radians(YAW)) * 26 / fps
+        z += math.cos(math.radians(YAW)) * 26 / fps
+        ph += rate(ph) / fps
