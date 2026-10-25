@@ -609,7 +609,9 @@ final class Wildlife {
         f.age += dt
         f.transit -= dt
         let arrived = f.transit <= 0
-        f.speed += (((arrived || f.kind == .starling) && !f.leaving ? f.hold ?? f.cruise : f.cruise) - f.speed) * min(1, dt * 0.3)
+        // Leaving, they go no faster than their top speed, even if they glided in faster.
+        let target = f.leaving ? min(f.cruise, fl.maxSpeed) : (arrived || f.kind == .starling ? f.hold ?? f.cruise : f.cruise)
+        f.speed += (target - f.speed) * min(1, dt * 0.3)
 
         // Anchor: a heading that drifts on the noise flow field, bends down valleys (toward the lower side ahead),
         // and for gulls toward water. Flocks flying in hold course; leaving flocks in frame turn for its nearer side.
