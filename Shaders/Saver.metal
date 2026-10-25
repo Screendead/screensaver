@@ -5209,6 +5209,14 @@ static float3 skyColor(float3 d, Light L) {
     return c;
 }
 
+// The moon's terminator steps in blocks of a 14-cell grid like the voxels: cell i's lit share. The grid is held inside
+// the rim, or a full moon's rim cells would turn half dark.
+static inline float moonCellLit(float2 i, float3 s) {
+    float2 xq = (i + 0.5) / 7.0;
+    xq *= min(1.0, 0.98 / length(xq));
+    return smoothstep(-0.05, 0.05, dot(float3(xq, sqrt(1.0 - dot(xq, xq))), s));
+}
+
 // The sky c (skyColor) with the sun's and moon's discs, and at night the stars and the Milky Way.
 static float3 skyDiscs(float3 c, float3 d, Light L, uint seed, float time) {
     float s = max(dot(d, L.sun), 0.0);
@@ -5259,24 +5267,29 @@ static float3 skyDiscs(float3 c, float3 d, Light L, uint seed, float time) {
             float twinkle = 0.7 + 0.3 * sin(time * 1.3 + hashf(pcg(h + 4)) * 40.0);
             c += float3(0.9, 0.95, 1.1) * b * twinkle * smoothstep(0.55, 0.0, dd) * L.night * smoothstep(0.0, 0.05, d.y) * (1.0 - 0.8 * dust);
         }
-        // Moon: a clean disc whose maria are Perlin noise. The terminator steps in blocks of a 14-cell grid like the
-        // voxels; the grid is held inside the rim, or a full moon's rim cells would turn half dark. The night side keeps
-        // a faint ash-blue earthshine, so a crescent still reads as a whole moon.
+        // Moon: a clean disc whose maria are Perlin noise, its terminator stepped in blocks (moonCellLit). The night
+        // side keeps a faint ash-blue earthshine, so a crescent still reads as a whole moon.
         if (md > 0.99) {
             float3 mu = normalize(cross(L.moon, float3(0, 1, 0)));
             float3 mv = cross(mu, L.moon);
             float2 xy = float2(dot(d, mu), dot(d, mv)) / 0.03;
             float disc = 1.0 - smoothstep(0.96, 1.0, length(xy));
             float lum = 0.92 - 0.3 * smoothstep(0.15, 0.55, fbm2(xy * 1.3 + 3.0, 3, 9u) + 0.25);
-            float2 xq = (floor(xy * 7.0) + 0.5) / 7.0;
-            xq *= min(1.0, 0.98 / length(xq));
-            float3 n = float3(xq, sqrt(1.0 - dot(xq, xq)));
             // The lit limb faces the sun along the great circle between them. The moon rides at the sun's opposite
             // azimuth, lower than the sun is deep once the sun is 4.6 degrees down (L.moon), so that circle runs
             // straight down through the horizon: horns up, waxing or waning. Before that, as the moon fades in, the
             // circle would run over the zenith; the limb stays down rather than flip. A real moon this far from the
             // sun would be full: the phase is licence, the orientation is not.
-            float sunlit = smoothstep(-0.05, 0.05, dot(n, float3(0.0, -abs(sin(th)), -cos(th))));
+            float sunlit = 1.0;
+            if (lit < 1.0) {
+                float3 toSun = float3(0.0, -abs(sin(th)), -cos(th));
+                // Each cell edge ramps over 4% of the radius, as the rim does: a hard edge would resnap whole pixels
+                // as the moon drifts across them.
+                float2 g = xy * 7.0 - 0.5, i = floor(g);
+                float2 w = smoothstep(0.36, 0.64, g - i);
+                sunlit = mix(mix(moonCellLit(i, toSun), moonCellLit(i + float2(1, 0), toSun), w.x),
+                             mix(moonCellLit(i + float2(0, 1), toSun), moonCellLit(i + float2(1, 1), toSun), w.x), w.y);
+            }
             float3 moonCol = mix(float3(0.55, 0.65, 0.9) * 0.144, float3(0.75, 0.80, 0.92) * 2.4, sunlit) * lum;
             c = mix(c, moonCol, L.night * disc);
         }
