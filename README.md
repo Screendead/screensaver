@@ -54,8 +54,8 @@ Live frame times are measured at `--size 3456x2234 --scale 1`: the scene renders
 
 ## Layout
 
-- `Package.swift`: three SwiftPM targets, built by `make` (`swift build -c release`) and tested by `swift test`.
-- `Sources/StrataCore/`: everything without Metal or AppKit, unit-tested in `Tests/StrataCoreTests/`.
+- `Package.swift`: three SwiftPM targets and two test targets, built by `make` (`swift build -c release`); `make test` runs `swift test` and `tools/golden.sh`.
+- `Sources/StrataCore/`: everything without Metal or AppKit, unit-tested in `tests/StrataCoreTests/` (`Support/` flies the camera and the birds over a synthetic world).
   - `Camera/`: the valley- and ridge-following autopilot, its shot director, placement and terrain sampling.
   - `Wildlife/`: the flocks (species, spawning, flight, upload), `Sight` (what a frame can show of a bird) and `PopLog`.
   - `World/`: `Terrain` (the shown map's CPU copy and what stands on it), `FarHeights`, the map's table layouts and decoders, `Provinces`, sites, giants and towers.
@@ -69,4 +69,5 @@ Live frame times are measured at `--size 3456x2234 --scale 1`: the scene renders
   - `App/`: the idle agent, power and lock probes, fullscreen windows, dismissal, prefs and the menu bar item. `BugReport/`: the B-key report. `Server/`: `--serve`.
 - `Sources/voxelreverie/main.swift`: the executable's entry point.
 - `Shaders/Saver.metal`: noise, terrain generation, the quadtree voxel DDA, shading, sky, clouds, fog, water, and the temporal and EDR post passes.
+- `tests/StrataTests/`: the shader's contracts with the CPU (`Shader/`: probe kernels built against `Shaders/` at test time) and the bug report's `state.json` against `bugclip.sh`.
 - `tools/golden.sh`: output regression check; renders a fixed set and compares sha256s with `tests/golden/manifest.sha256` (`tests/fixtures/golden_path.txt` is its recorded-path replay).

@@ -20,7 +20,12 @@ $(APP)/Contents/Info.plist: Info.plist
 	@mkdir -p "$(dir $@)"
 	cp Info.plist "$@"
 
+# The unit tests run a few small kernels, so under the GPU lock; golden.sh renders through vrr, which takes it itself.
+test: all
+	tools/vrgpu -- swift test
+	tools/golden.sh
+
 clean:
 	trash build .build
 
-.PHONY: all clean
+.PHONY: all test clean
