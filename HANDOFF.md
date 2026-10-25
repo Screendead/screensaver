@@ -6,7 +6,7 @@ STRATA is a generative macOS screensaver: an endless, slow flight over procedura
 
 ## Where things stand
 
-Statuses come from the commit history as of 2026-10-25 (master after PR #23; earlier rows as of 2026-10-24, master at 440f08b). "Merged" means the work is on master; it does not mean it has been soak-tested on real hardware unless the row says so.
+Statuses come from the commit history as of 2026-10-25 (master after PR #24; earlier rows as of 2026-10-24, master at 440f08b). "Merged" means the work is on master; it does not mean it has been soak-tested on real hardware unless the row says so.
 
 | Area | Status | Commits that prove it |
 | --- | --- | --- |
@@ -27,7 +27,7 @@ Statuses come from the commit history as of 2026-10-25 (master after PR #23; ear
 | Shader layout | PR #21, merged 2026-10-25: `Shaders/Saver.metal` is an include list over 84 topic files under `Shaders/<topic>/`; duplicates and dead code removed, output byte-identical | 79c796d |
 | Tools layout | PR #22, merged 2026-10-25: `tools/perf/` (bench, soak, powersoak), `tools/frames/`, `tools/sky/`; one-off scripts on local `archive/one-off-tools`; `bugclip.sh` under the GPU lock | f9fece0 |
 | Swift layout and unit tests | PR #23, merged 2026-10-25: three SwiftPM targets (`StrataCore` without Metal or AppKit, `Strata`, `voxelreverie`), one job per file, every VR_* switch in `Knobs`; `make test` runs 42 XCTest tests (`StrataTests` checks the CPU's ports, constants and record layouts against the shader's own; `StrataCoreTests` flies the camera and birds over a synthetic world) then `tools/golden.sh`; `tools/mutants.py` shows each test bites | 80f26c8 |
-| Cross-references | Branch `refactor/crossrefs`: comments name the new Swift and shader files, `Sight.sea` replaces the Swift copies of 19.85, `make lint` (`tools/lint.sh`) finds unused shader code (only `F_FLAT`, `M_ROOF`, kept) | |
+| Cross-references | PR #24, merged 2026-10-25: comments name the new Swift and shader files, `Sight.sea` replaces the Swift copies of 19.85, `make lint` (`tools/lint.sh`) finds unused shader code (only `F_FLAT`, `M_ROOF`, kept) | 5bd0598 |
 
 Branches with commits that master lacks (from `git branch --no-merged master`): `strata/islands2` (31 commits, floating islands), `strata/islands-fix`, `strata/islands-b`, `strata/islands`, `strata/giant-C3` and `strata/giant-C2-roots` (morph-band work from 2026-10-13, before PR #1), `strata/vines3`, `strata/waves`, `strata/tundra`, `strata/merge4`, and single-commit prototypes. None of them is described in a merge message, so whether any is still wanted is unknown.
 
