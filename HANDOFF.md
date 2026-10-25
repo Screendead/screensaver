@@ -34,7 +34,8 @@ The flight runs at twice its old speed (11-30 voxels/s by height, Jack's call 20
 ## Open questions for Jack
 
 1. **What is missing when you don't use it?** If there are days the saver isn't running, or you turn it off, say why (too hot, too slow on battery, a fault, a scene you tire of). Each answer becomes the next step.
-2. **Unmerged branches.** Should `strata/islands2` (floating islands) and the other unmerged branches above be finished or archived?
+2. **Moon phases (prototype on `strata/idea-moon-phases`, unmerged).** The moon steps through an 8-night cycle (13% crescent to full and back; the full night renders byte-identical to master, as do day frames), with a blocky 14-cell terminator, ash-blue earthshine on the dark side, a halo dimmed and the Milky Way up to 1.5x brighter by lit share. Moonlight on the land and the water glitter are unchanged. Keep, tune or drop; a second call is whether moonlight and glitter should dim on crescent nights.
+3. **Unmerged branches.** Should `strata/islands2` (floating islands) and the other unmerged branches above be finished or archived?
 
 ## Bug reports (triaged 2026-10-24)
 
