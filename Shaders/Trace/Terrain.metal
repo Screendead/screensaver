@@ -1,3 +1,6 @@
+// The DDA's coarsest max mip.
+constant int MAX_LEVEL = 8;
+
 struct Hit {
     bool hit;
     float t;

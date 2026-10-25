@@ -26,6 +26,3 @@ struct Frame {
     float4 planet;     // xyz direction to the evening or morning star
     float4 planetPx;   // xy the cell corner the star's core is centred on, unjittered; z scene pixels per cell
 };
-
-constant float SEA = 19.85;
-constant int MAX_LEVEL = 8;
