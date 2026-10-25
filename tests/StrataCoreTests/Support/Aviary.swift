@@ -6,8 +6,8 @@ final class Aviary {
     let flight: Flight
     let wildlife: Wildlife
 
-    init(seed: UInt32, phase: Double) {
-        flight = Flight(seed: seed, phase: phase)
+    init(seed: UInt32, phase: Double, relief: Double = 1) {
+        flight = Flight(seed: seed, phase: phase, relief: relief)
         wildlife = Wildlife(seed: seed)
         let terrain = flight.world.terrain
         wildlife.heightAt = { terrain.height(x: $0, z: $1) }

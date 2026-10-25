@@ -68,8 +68,13 @@ MUTANTS = [
     # The birds.
     ('WildlifeTests/testASeedRaisesTheSameBirds', S + 'Wildlife/Wildlife.swift', 'return Double((z ^ (z >> 31)) >> 11) / Double(1 << 53)',
      'return Double.random(in: 0..<1)'),
+    # Birds steer by both lookups, either alone keeps them clear: lowered together, they fly into the hills.
     ('WildlifeTests/testFlocksStayInTheAirAndInTheBuffer', S + 'Wildlife/Wildlife.swift',
-     'if let u = c.under, y < u - 12 { return c.ground }\n        return c.top', 'if let u = c.under, y < u - 12 { return c.ground }\n        return c.top - 40'),
+     '?? 200 }\n    // The ground as a bird at height y meets it: well under an island, the land beneath it; else the island\'s top.\n'
+     '    package func ground(_ x: Double, _ z: Double, at y: Double) -> Double {\n        guard let c = columnAt(x, z) else { return 200 }\n'
+     '        if let u = c.under, y < u - 12 { return c.ground }\n        return c.top\n',
+     '?? 200 - 100 }\n    package func ground(_ x: Double, _ z: Double, at y: Double) -> Double {\n        guard let c = columnAt(x, z) else { return 200 }\n'
+     '        if let u = c.under, y < u - 12 { return c.ground }\n        return c.top - 100\n'),
     ('WildlifeTests/testUploadWritesEveryBirdWhereTheShaderReadsIt', S + 'Wildlife/Wildlife+Upload.swift',
      'let birds = (Wildlife.maxFlocks + Wildlife.maxClusters) * 2', 'let birds = (Wildlife.maxFlocks + Wildlife.maxClusters) * 2 + 8'),
     ('WildlifeTests/testOnlyBatsFlyAtNight', S + 'Wildlife/Wildlife+Step.swift', 'if sunY < -0.16 { return [.bat, .bat, .bat] }',

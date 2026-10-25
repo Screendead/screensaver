@@ -1,16 +1,20 @@
 @testable import StrataCore
 import simd
 
-// Rolling hills with valleys under the sea, standing in for the GPU's map: the loaded map's CPU copy and the far heights,
+// Rolling hills with valleys under the sea (relief scales the hills about a mean of 45), standing in for the GPU's map: the loaded map's CPU copy and the far heights,
 // re-centred on the camera as World and Renderer keep them.
 final class SyntheticWorld {
     let terrain = Terrain(), far = FarHeights()
+    let relief: Double
 
-    static func ground(_ x: Double, _ z: Double) -> Double {
-        45 + 70 * sin(x / 310) * sin(z / 270) + 35 * sin((x - 2 * z) / 530) + 20 * cos(z / 150 + x / 900)
+    func ground(_ x: Double, _ z: Double) -> Double {
+        45 + relief * (70 * sin(x / 310) * sin(z / 270) + 35 * sin((x - 2 * z) / 530) + 20 * cos(z / 150 + x / 900))
     }
 
-    init(around p: SIMD2<Double>) { fill(p) }
+    init(around p: SIMD2<Double>, relief: Double) {
+        self.relief = relief
+        fill(p)
+    }
 
     // Moves the map once the camera is a quarter of it from its centre.
     func follow(_ p: SIMD2<Double>) {
@@ -25,7 +29,7 @@ final class SyntheticWorld {
         // A cell's height is the most of its corners and centre: conservative, as the GPU's max mip.
         terrain.heights = (0..<(s * s)).map { i in
             let x = Double(o.x) + Double(i % s) * cell, z = Double(o.y) + Double(i / s) * cell
-            return Float([(0.0, 0.0), (cell, 0), (0, cell), (cell, cell), (cell / 2, cell / 2)].map { SyntheticWorld.ground(x + $0.0, z + $0.1) }.max()!)
+            return Float([(0.0, 0.0), (cell, 0), (0, cell), (cell, cell), (cell / 2, cell / 2)].map { ground(x + $0.0, z + $0.1) }.max()!)
         }
         terrain.floors = terrain.heights.map { $0 - 6 }
         terrain.ground = terrain.heights
@@ -36,7 +40,7 @@ final class SyntheticWorld {
         for cz in (far.centre.y - n / 2)..<(far.centre.y + n / 2) {
             for cx in (far.centre.x - n / 2)..<(far.centre.x + n / 2) {
                 let x = Double(cx) * FarHeights.cell, z = Double(cz) * FarHeights.cell
-                h[(cz & (n - 1)) * n + (cx & (n - 1))] = Float16(SyntheticWorld.ground(x + 16, z + 16) + 30)
+                h[(cz & (n - 1)) * n + (cx & (n - 1))] = Float16(ground(x + 16, z + 16) + 30)
             }
         }
         far.heights = h
@@ -51,9 +55,9 @@ final class Flight {
     var clock = SkyClock()
     private(set) var poses: [Pose] = []
 
-    init(seed: UInt32, phase: Double) {
+    init(seed: UInt32, phase: Double, relief: Double = 1) {
         let probe = FlightCamera(seed: seed, terrain: Terrain(), far: FarHeights())
-        world = SyntheticWorld(around: probe.xz)
+        world = SyntheticWorld(around: probe.xz, relief: relief)
         camera = FlightCamera(seed: seed, terrain: world.terrain, far: world.far)
         camera.moveToOpenGround()
         world.follow(camera.xz)

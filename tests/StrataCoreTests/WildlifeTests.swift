@@ -19,10 +19,11 @@ final class WildlifeTests: XCTestCase {
         XCTAssertNotEqual(birds(a.wildlife), birds(c.wildlife))
     }
 
-    // A minute after dawn: flocks within the shader's caps, every bird above the ground under it, and the upload
+    // A minute after dawn over high hills: flocks within the shader's caps, every bird above the ground under it, and the upload
     // writing within the bird buffer.
     func testFlocksStayInTheAirAndInTheBuffer() {
-        let a = Aviary(seed: 303, phase: 0.05), terrain = a.flight.world.terrain
+        // Hills to 400 or so: the flocks' cruising height alone would not clear them.
+        let a = Aviary(seed: 303, phase: 0.05, relief: 3), terrain = a.flight.world.terrain
         var most = 0
         a.fly(seconds: 60) { w in
             XCTAssertLessThanOrEqual(w.flocks.count, Wildlife.maxFlocks)
