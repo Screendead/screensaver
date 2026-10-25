@@ -44,7 +44,7 @@ final class SyntheticWorld {
 }
 
 // The camera flown over a SyntheticWorld through the sky clock, as Renderer.simulate steps it; each step's pose.
-struct Flight {
+final class Flight {
     struct Pose: Equatable { var position: SIMD3<Double>; var yaw: Double, pitch: Double, roll: Double }
     let world: SyntheticWorld
     let camera: FlightCamera
@@ -61,7 +61,7 @@ struct Flight {
         clock.phase = phase
     }
 
-    mutating func fly(seconds: Double, dt: Double = 1.0 / 30, each: (FlightCamera, Double) -> Void = { _, _ in }) {
+    func fly(seconds: Double, dt: Double = 1.0 / 30, each: (FlightCamera, Double) -> Void = { _, _ in }) {
         for _ in 0..<Int(seconds / dt) {
             camera.sun = clock.sunDirection
             camera.nightIndex = clock.nightIndex

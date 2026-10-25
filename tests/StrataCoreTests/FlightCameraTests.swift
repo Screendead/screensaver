@@ -6,7 +6,7 @@ import simd
 // of the ground and under the clouds.
 final class FlightCameraTests: XCTestCase {
     func testASeedFliesTheSamePathEveryTime() {
-        var a = Flight(seed: 303, phase: 0.1), b = Flight(seed: 303, phase: 0.1), c = Flight(seed: 304, phase: 0.1)
+        let a = Flight(seed: 303, phase: 0.1), b = Flight(seed: 303, phase: 0.1), c = Flight(seed: 304, phase: 0.1)
         a.fly(seconds: 40)
         b.fly(seconds: 40)
         c.fly(seconds: 40)
@@ -19,7 +19,7 @@ final class FlightCameraTests: XCTestCase {
     // second; and always 15 over the ground, under the ceiling, never rolling past 0.15 rad.
     func testLongFlightsAreSmoothAndKeepTheirClearance() {
         for (seed, phase) in [(UInt32(303), 0.02), (1, 0.25), (606, 0.75)] {
-            var f = Flight(seed: seed, phase: phase)
+            let f = Flight(seed: seed, phase: phase)
             var lowest = Double.infinity
             f.fly(seconds: 150) { c, _ in lowest = min(lowest, c.position.y - c.h(c.position.x, c.position.z)) }
             let p = f.poses
