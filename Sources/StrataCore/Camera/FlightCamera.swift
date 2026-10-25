@@ -37,7 +37,7 @@ package final class FlightCamera {
     // (nil beyond, or before the first readback). The Renderer owns both (the terrain through its world) and the camera, and drops them together.
     unowned(unsafe) let terrain: Terrain
     unowned(unsafe) let far: FarHeights
-    // Flight stays this far under the cloud base (CLOUD_Y0 in Shaders/Saver.metal, 1065).
+    // Flight stays this far under the cloud base (CLOUD_Y0 in Shaders/Sky/CloudField.metal, 1065).
     package static let ceiling = 1065.0 - 80.0
     var avoidRate: Double = 0
     var nextRoute: Double = 0

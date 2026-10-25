@@ -1,6 +1,6 @@
 import simd
 
-// Must match VineBake in Shaders/Saver.metal.
+// Must match VineBake in Shaders/Life/Vines/Bake.metal.
 struct VineBake {
     var a: SIMD4<Float>
     var b: SIMD4<Int32>

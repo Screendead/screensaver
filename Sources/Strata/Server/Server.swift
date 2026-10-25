@@ -3,7 +3,7 @@ import Metal
 import QuartzCore
 import StrataCore
 
-// --serve <socket>: renders --screenshot requests (scratchpad/vrr) in one long-lived process, so the device, library and
+// --serve <socket>: renders --screenshot requests (tools/vrr) in one long-lived process, so the device, library and
 // pipelines are made once. Each request still gets a fresh Renderer, exactly as a new process would.
 //
 // Protocol: one connection per request. The client sends one JSON line {"args": [...], "env": {...}, "cwd": "..."} with its

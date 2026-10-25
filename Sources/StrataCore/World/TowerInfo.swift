@@ -1,6 +1,6 @@
 import simd
 
-// One ruined tower (Shaders/Saver.metal, MARK: Ruined towers), as placeTowers records it.
+// One ruined tower (Shaders/World/Towers/), as placeTowers records it.
 package struct TowerInfo {
     package var pos: SIMD2<Double>
     package var radius: Double      // the base shaft's apothem
@@ -13,7 +13,7 @@ package struct TowerInfo {
     package var record: (SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<UInt32>)
     package var top: Double { base + height }
 
-    // Must match TowerRec's 64 bytes in Shaders/Saver.metal.
+    // Must match TowerRec's 64 bytes in Shaders/World/Towers/Table.metal.
     package static let recordSize = 64
 
     // The towers among `count` records (a slot without one has height 0).

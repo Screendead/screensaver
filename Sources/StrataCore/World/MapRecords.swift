@@ -1,6 +1,6 @@
 import simd
 
-// One giant-table entry (Shaders/Saver.metal GiantRec): g <= 0 marks a cell without a giant.
+// One giant-table entry (GiantRec in Shaders/Life/Giants/Place.metal): g <= 0 marks a cell without a giant.
 struct GiantRec {
     package var cell = SIMD2<Int32>()
     var c = SIMD2<Float>()
@@ -10,7 +10,7 @@ struct GiantRec {
     package var kind: UInt32 = 0
 }
 
-// One cave-table entry (Shaders/Saver.metal CaveRec), kept after the giant table in its buffer.
+// One cave-table entry (CaveRec in Shaders/World/Caves/Shape.metal), kept after the giant table in its buffer.
 package struct CaveRec {
     package var cell = SIMD2<Int32>()
     package var m = SIMD2<Float>()

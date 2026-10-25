@@ -12,7 +12,7 @@ static inline float3 fogColor(thread const Ctx& x, float3 d, float T, float soli
 
 constant float LAND_SOLID = 0.5;
 
-// Share of the lowland air haze left at height y (Sources/Sight.swift ports it).
+// Share of the lowland air haze left at height y (Sources/StrataCore/Wildlife/Sight.swift ports it).
 static inline float airAloft(float y) { return exp(-max(y - 120.0, 0.0) / 400.0); }
 
 // Exponential height fog plus a slow-drifting noise modulation that pools mist in valleys.

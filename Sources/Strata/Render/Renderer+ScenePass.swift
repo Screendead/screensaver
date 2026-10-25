@@ -8,7 +8,7 @@ extension Renderer {
                              width w: Int, height h: Int) {
         guard let enc = cb.makeRenderCommandEncoder(descriptor: Renderer.pass(sceneTex, load: false)) else { return }
         // The canopies' band test only skips through cells inside the 1-voxel map's unmorphed disc (trace in
-        // Shaders/Saver.metal), so it is compiled in only while bands lie that close; islands' bands hold on every
+        // Shaders/Trace/March.metal), so it is compiled in only while bands lie that close; islands' bands hold on every
         // ring, needed out to isleShadeReach.
         let cam2 = camera.xz
         let tb = camera.basis, tanV = Renderer.tanV * 1.05

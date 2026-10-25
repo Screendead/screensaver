@@ -5,7 +5,7 @@ constant float GIANT_CELL = 1536.0;
 constant float GIANT_REACH = 210.0;
 // The table: a toroidal window of GIANT_WIN cells a side (+-18k) around the map centre, wider than the rings' disc and
 // the coarsest ring's window, so the entries a recentring rewrites are never read.
-// Must match World.giantWin in Sources/Renderer.swift.
+// Must match MapLayout.giantWin in Sources/StrataCore/World/MapLayout.swift.
 constant int GIANT_WIN = 24;
 constant float GIANT_A = -4000.0;
 constant uint ST_GIANT = 1u << 31;
@@ -20,10 +20,10 @@ constant int GM_WOOD = 0, GM_LEAF = 1, GM_VINE = 2;
 // wide there): on level 4 it would hang a pillar 16 wide. (Vines are no part of any level: traceStrands.)
 constant int GIANT_THIN_LOD = 3;
 
-// One table entry; G <= 0: no giant in the cell. Must match GiantRec in Sources/Renderer.swift.
+// One table entry; G <= 0: no giant in the cell. Must match GiantRec in Sources/StrataCore/World/MapRecords.swift.
 struct GiantRec { int2 cell; float2 c; float G; float yT; uint h; uint kind; };
 static_assert(sizeof(GiantRec) * GIANT_WIN * GIANT_WIN == CAVE_TAIL, "the cave table follows the giant table");
-static_assert(sizeof(CaveRec) == 48, "World.CaveRec");
+static_assert(sizeof(CaveRec) == 48, "CaveRec");
 static inline device const CaveRec* caveTable(device const GiantRec* giants) {
     return (device const CaveRec*)((device const uchar*)giants + CAVE_TAIL);
 }
@@ -70,7 +70,7 @@ kernel void placeGiants(device GiantRec* out [[buffer(0)]],
     uint seed = uint(info.w);
     int2 cell = info.xy + int2(gid);
     // A slot already holding this cell (the table moves a cell at a time) keeps it: placing costs a few hundred terrain
-    // columns per cell. Slots start out holding no cell (World.MapBuffer).
+    // columns per cell. Slots start out holding no cell (MapTables.clearGiantsAndCaves).
     if (all(out[giantSlot(cell)].cell == cell)) return;
     GiantRec r;
     r.cell = cell; r.c = 0; r.G = -1.0; r.yT = 0; r.h = 0; r.kind = 0;

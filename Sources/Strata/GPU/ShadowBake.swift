@@ -1,6 +1,6 @@
 import simd
 
-// Must match ShadowBake in Shaders/Saver.metal.
+// Must match ShadowBake in Shaders/Light/Shadows.metal.
 struct ShadowBake {
     var key: SIMD4<Float>
     var cam: SIMD4<Float>

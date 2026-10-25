@@ -76,7 +76,7 @@ static Light makeLight(float3 sunDir, uint seed, float nightIndex) {
     if (e > -0.02) {
         // Held at the afterglow's height until the sun clears it, and its shadows faded in: the key dropped from 0.05
         // to the sun's -0.02 at the handover, shadows switched on there and again at 0 (the maps bake only for a light
-        // above the horizon), and sunlit faces darkened by a tenth in one frame each time. Must match Renderer.keyLight.
+        // above the horizon), and sunlit faces darkened by a tenth in one frame each time. Must match SkyClock.keyLight (Sources/StrataCore/Sky/KeyLight.swift).
         L.key = e >= 0.05 ? sunDir : normalize(float3(sunDir.x, 0.05, sunDir.z));
         L.keyCol = sunCol * L.sunAmt + float3(1.3, 0.5, 0.3) * 0.4 * (1.0 - L.sunAmt);
         L.shadows = true;

@@ -30,8 +30,8 @@ package struct Sight {
         (self.pixelAngle, self.sunY, self.worldEdge, self.floorReach, self.terrain) = (pixelAngle, sunY, worldEdge, floorReach, terrain)
     }
 
-    // Must match SEA in Shaders/Saver.metal.
-    static let sea = 19.85
+    // Must match SEA in Shaders/Common/Constants.metal.
+    package static let sea = 19.85
     // A bird fogged below this transmittance differs from the sky behind it by under half of one of the 8 output
     // levels: applyFog's in-scatter darkening, the cool aerial tint and a bird anywhere from black to twice the sky's
     // radiance, through the post tonemap and sRGB (bisected offline; half a level is reached at T = 0.14).
@@ -73,7 +73,7 @@ package struct Sight {
         }.max()!
     }
 
-    // Port of fogTransmittance in Shaders/Saver.metal without the mist term (mist only lowers it).
+    // Port of fogTransmittance in Shaders/Atmos/Fog.metal without the mist term (mist only lowers it).
     func transmittance(from o: SIMD3<Double>, dir d: SIMD3<Double>, t: Double) -> Double {
         let hf = 30.0, a = 0.0009, c2 = 1.3e-6, K = 1.6, lambda = 6e-5
         let k = exp(-(o.y - Sight.sea) / hf)

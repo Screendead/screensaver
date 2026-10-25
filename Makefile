@@ -26,7 +26,11 @@ test: all
 	tools/vrgpu -- swift test
 	tools/golden.sh
 
+# Unused shader code: clang warns only in the main file, which the split leaves as an include list.
+lint:
+	tools/lint.sh
+
 clean:
 	trash build .build
 
-.PHONY: all test clean
+.PHONY: all test lint clean

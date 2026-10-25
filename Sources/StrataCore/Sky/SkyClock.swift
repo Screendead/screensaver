@@ -45,7 +45,7 @@ package struct SkyClock {
         return ph < 0.25 ? 1 - { let s = min(max((ph - 0.08) / 0.12, 0), 1); return s * s * (3 - 2 * s) }() : min(max((ph - 0.52) / 0.46, 0), 1)
     }
 
-    // The sea of cloud's amount: must match cloudSeaAmount in Saver.metal, 0 at dusk, by day and at night.
+    // The sea of cloud's amount: must match cloudSeaAmount in Shaders/Atmos/CloudSea.metal, 0 at dusk, by day and at night.
     package var cloudSea: Double {
         let e = SkyClock.elevation(phase)
         return smoothstep(0.5, 0.75, nightProgress) * smoothstep(-0.24, -0.08, e) * (1 - smoothstep(0.08, 0.30, e))

@@ -38,7 +38,7 @@ static SeaFog cloudSea(thread const Ctx& x, float amt, float3 o, float3 d, float
     float3 ph = o + d * t;
     // Burning off, the layer sinks as well as thins. The closed form below needs one top per ray: the hit's.
     // The inversion's lid: no top rises over SEA_LID, so the dawn flight (at least 38 x the amount over the sea,
-    // Camera.swift) always looks down on the layer; a ray starting under its hit's top would be fogged all its length.
+    // Sources/StrataCore/Camera/FlightCamera+Autopilot.swift) always looks down on the layer; a ray starting under its hit's top would be fogged all its length.
     // Basins well above the sea, and hillsides, stand clear of it.
     float top0 = min(seaFloorAt(x, ph.xz) + 8.0 * amt, SEA_LID);
     float y0 = o.y, y1 = ph.y;

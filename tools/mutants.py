@@ -15,7 +15,7 @@ S, C = 'Sources/StrataCore/', 'Sources/Strata/'
 MUTANTS = [
     # Shader contracts: the CPU side, and the shader side once.
     ('ShaderFunctionTests/testHashesMatchBitForBit', S + 'World/Provinces.swift', '&* 277803737', '&* 277803739'),
-    ('ShaderFunctionTests/testHashesMatchBitForBit', 'Shaders/Saver.metal', '* 1597334677u ^ pcg(uint(p.y) * 3812015801u ^ s)); }',
+    ('ShaderFunctionTests/testHashesMatchBitForBit', 'Shaders/Noise/Noise.metal', '* 1597334677u ^ pcg(uint(p.y) * 3812015801u ^ s)); }',
      '* 1597334677u ^ pcg(uint(p.y) * 3812015803u ^ s)); }'),
     ('ShaderFunctionTests/testProvincesMatchTheShader', S + 'World/Provinces.swift', 'smoothstep(0.24, 0.32,', 'smoothstep(0.25, 0.32,'),
     ('ShaderFunctionTests/testKeyLightMatchesMakeLight', S + 'Sky/KeyLight.swift', 'max(-sun.y * 0.7, 0.08)', 'max(-sun.y * 0.7, 0.10)'),

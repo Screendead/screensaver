@@ -7,7 +7,7 @@ import simd
 // decides it on the GPU for a square of world cells round the camera's; the list feeds the camera, and the records
 // nearest the camera are the shader's table (fragment buffer 9; stage 3's giants hold 8).
 final class Towers {
-    // Must match TOWER_CELL, TOWER_MEMBERS and TOWER_TABLE in Shaders/Saver.metal.
+    // Must match TOWER_CELL, TOWER_MEMBERS and TOWER_TABLE in Shaders/World/Towers/Layout.metal.
     static let cell = 9000.0, members = 4, tableSize = 16
     // Cells on a side of the square round the camera's cell: every tower out past the world's edge (13.8k).
     static let grid = 5
@@ -83,7 +83,6 @@ final class Towers {
     // masonry at the cost of one test.
     func frameTable(eye: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>, tanH: Double, tanV: Double) {
         let planes = [right - fwd * tanH, -right - fwd * tanH, up - fwd * tanV, -up - fwd * tanV, -fwd].map { simd_normalize($0) }
-        let sea = 19.85
         func inView(_ a: SIMD3<Double>, _ b: SIMD3<Double>, _ r: Double) -> Bool {
             !planes.contains { simd_dot(a - eye, $0) > r && simd_dot(b - eye, $0) > r }
         }
@@ -92,7 +91,7 @@ final class Towers {
         for t in list where simd_length(t.pos - flat) < Clipmap.handoff(Clipmap.levels) + t.radius * 1.5 {
             let r = t.radius * 1.5 + 40
             let lo = SIMD3(t.pos.x, t.base, t.pos.y), hi = SIMD3(t.pos.x, t.top, t.pos.y)
-            let mlo = SIMD3(t.pos.x, 2 * sea - t.base, t.pos.y), mhi = SIMD3(t.pos.x, 2 * sea - t.top, t.pos.y)
+            let mlo = SIMD3(t.pos.x, 2 * Sight.sea - t.base, t.pos.y), mhi = SIMD3(t.pos.x, 2 * Sight.sea - t.top, t.pos.y)
             if inView(lo, hi, r) || inView(mlo, mhi, r) { near.append(t) }
         }
         near.sort { simd_length($0.pos - flat) < simd_length($1.pos - flat) }

@@ -10,7 +10,7 @@ package final class Wildlife {
     static let maxBirds = 600
     // The shader culls by flock, then by cluster: runs of up to clusterSize birds under one bounding sphere, so a
     // pixel near a big murmuration tests a few clusters, not every bird. Must match MAX_FLOCKS and MAX_CLUSTERS in
-    // Shaders/Saver.metal.
+    // Shaders/Life/Birds.metal.
     static let maxClusters = 48, clusterSize = 16
     package static let bufferLength = ((maxFlocks + maxClusters) * 2 + maxBirds * 4) * MemoryLayout<SIMD4<Float>>.stride
 

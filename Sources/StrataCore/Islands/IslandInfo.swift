@@ -1,6 +1,6 @@
 import simd
 
-// One table slot (Shaders/Saver.metal IsleRec): r > 0 an island standing.
+// One table slot (IsleRec in Shaders/World/Islands/Shape.metal): r > 0 an island standing.
 struct IsleRec {
     package var cell = SIMD2<Int32>(Int32.min, Int32.min)
     var c = SIMD2<Float>()

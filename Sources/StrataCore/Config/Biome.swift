@@ -1,6 +1,6 @@
 import Foundation
 
-// The world as one biome: pinnedBiome in Shaders/Saver.metal reads it back from the seed.
+// The world as one biome: pinnedBiome in Shaders/World/Climate.metal reads it back from the seed.
 package enum Biome {
     // Index + 1 is the biome's number in the shader.
     package static let names = ["Grassland", "Autumn Woods", "Pine & Snow", "Desert", "Painted Hills", "Salt Flats", "Lagoons", "Jungle", "Old Growth"]

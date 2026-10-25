@@ -10,14 +10,14 @@ final class Clipmap {
     static let levels = 4, size = 2048, snap = 64, chunk = 128
     // Columns of a whole-window build per piece, so other queues' frames interleave between its dispatches.
     static let fullChunk = 32
-    // Must match Frame.lod in Shaders/Saver.metal: a level hands off to the next at 860 of its own columns,
+    // Must match Frame.lod in Shaders/Common/Frame.metal: a level hands off to the next at 860 of its own columns,
     // which keeps every read inside the window while a strip is rewritten.
     static func handoff(_ k: Int) -> Double { 860.0 * Double(1 << k) }
 
     let height: MTLTexture   // r16Float array: height; max mips (from mip 1 also bounding the next level)
     let cover: MTLTexture    // rg8Unorm array: canopy cover, depth of leaves under the top / 64 (coarseVeg)
     let climate: MTLTexture  // rgba16Float array at half resolution
-    // Must match GAP_LEVELS in Shaders/Saver.metal: levels 1...gapLevels carry one gap per column.
+    // Must match GAP_LEVELS in Shaders/Maps/Coarse.metal: levels 1...gapLevels carry one gap per column.
     static let gapLevels = 4
     // Must match GAP2_LEVELS: levels 1...gap2Levels also carry a second gap (giants' crowns).
     static let gap2Levels = 1

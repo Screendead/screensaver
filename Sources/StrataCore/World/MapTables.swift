@@ -45,7 +45,7 @@ package enum MapTables {
         let p = table.bindMemory(to: GiantRec.self, capacity: MapLayout.giantWin * MapLayout.giantWin)
         return (0..<(MapLayout.giantWin * MapLayout.giantWin)).compactMap { i in
             let r = p[i]
-            // The crown's top: giantPad's dome in Shaders/Saver.metal rises about yT + 36 + 0.55 * 56 + 9.5, the high limbs'
+            // The crown's top: giantPad's dome in Shaders/Life/Giants/Shape.metal rises about yT + 36 + 0.55 * 56 + 9.5, the high limbs'
             // clumps to about yT + 84.
             return r.g > 0 ? GiantInfo(pos: SIMD2(Double(r.c.x), Double(r.c.y)), ground: Double(r.g), top: Double(r.g + r.yT) + 85, kind: Int(r.kind), yT: Double(r.yT), h: r.h) : nil
         }

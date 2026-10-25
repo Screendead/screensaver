@@ -5,7 +5,7 @@ constant int SITE_GRID = 18;
 constant int MAX_PARTS = 32;
 constant int MAX_LAMPS = 8;
 
-// Must match the layout read in Sources/Renderer.swift (World.SiteLayout).
+// Must match MapLayout.siteStride in Sources/StrataCore/World/MapLayout.swift.
 struct Site {
     int4 head;               // xy world centre, z type, w hash
     float4 info;             // x bounding radius, y age, z part count, w lamp count

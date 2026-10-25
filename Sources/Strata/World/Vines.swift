@@ -3,10 +3,10 @@ import Metal
 import StrataCore
 import simd
 
-// A giant's hanging strands (Shaders/Saver.metal, MARK: Hanging strands): a slot per giant near the camera holding its
+// A giant's hanging strands (Shaders/Life/Vines/): a slot per giant near the camera holding its
 // baked strand maps, and the frame's table of them (vineFragment's buffer 10; the maps its textures 18 to 21).
 final class Vines {
-    // Must match VINE_SLOTS and VINE_W in Shaders/Saver.metal.
+    // Must match VINE_SLOTS and VINE_W in Shaders/Life/Vines/Bake.metal.
     static let slots = 6, window = 512
     static let recordSize = 64
     static let tableBytes = 16 + slots * recordSize

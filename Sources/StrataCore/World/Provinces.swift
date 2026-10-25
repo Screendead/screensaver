@@ -1,6 +1,6 @@
 import Foundation
 
-// CPU port of the forest-province fields (provinces, fbm2, perlin2 and their hashes in Shaders/Saver.metal), in Double:
+// CPU port of the forest-province fields (provinces in Shaders/World/Climate.metal, fbm2, perlin2 and their hashes in Shaders/Noise/Noise.metal), in Double:
 // close to the shader's floats, which is all the renderer's choices from it need.
 package enum Provinces {
     static func pcg(_ v: UInt32) -> UInt32 {
