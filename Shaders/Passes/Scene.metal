@@ -31,12 +31,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     tr.caves = f.birds.w;
     tr.caveNight = f.birds.w > 0.0 ? bioLandRamp(f.lights.x) : 0.0;
     tr.caveFire = mix(1.0, 0.02, smoothstep(-0.02, 0.05, f.lights.x)) * (1.0 - 0.75 * smoothstep(0.6, 0.66, f.lights.y));
-    Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
-            2.0 * tanH * f.resolution.z, f.misc.w, makeLight(f.sunDir.xyz, uint(f.mapInfo.w), f.lights.z),
-            pixelDither(f, in.pos.xy),
-            cloudTex, f.cloud.xyz, st, sites, lampPos, lampState, lightMap, lightDir, f.lights, shadowNear, shadowFar,
-            f.misc2.z == 14 ? 2.0 : f.shadow.x, (int(f.shadow.y) & 1) != 0, int(f.shadow.y), slowTex,
-            f.slowCloud.w == f.camRight.w ? f.slowCloud : float4(0), 0u };
+    Ctx x = makeCtx(tr, f, in.pos.xy, cloudTex, st, sites, lampPos, lampState, lightMap, lightDir, shadowNear, shadowFar,
+                    slowTex);
     {
         int2 ti = clamp(int2(in.uv * float(LAMP_TILES)), int2(0), int2(LAMP_TILES - 1));
         x.tiles = tiles[ti.y * LAMP_TILES + ti.x];

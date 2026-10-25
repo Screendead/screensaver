@@ -30,4 +30,18 @@ struct Ctx {
     constant IsleTable* isles;    // the islands nearest the camera
 };
 
+// The context of the scene and vine passes' pixel at pos; the tables (tiles, towers, isles) are left for the pass.
+static inline Ctx makeCtx(thread const Terrain& tr, constant Frame& f, float2 pos, texture2d<float> cloudTex,
+                          texture2d<uint> st, device const Site* sites, device const float4* lampPos,
+                          device const float4* lampState, texture2d<float> lightMap, texture2d<float> lightDir,
+                          texture2d<float> shadowNear, texture2d<float> shadowFar, texture2d<float> slowTex) {
+    float tanH = f.camPos.w;
+    return Ctx { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
+                 2.0 * tanH * f.resolution.z, f.misc.w, makeLight(f.sunDir.xyz, uint(f.mapInfo.w), f.lights.z),
+                 pixelDither(f, pos),
+                 cloudTex, f.cloud.xyz, st, sites, lampPos, lampState, lightMap, lightDir, f.lights, shadowNear, shadowFar,
+                 f.misc2.z == 14 ? 2.0 : f.shadow.x, (int(f.shadow.y) & 1) != 0, int(f.shadow.y), slowTex,
+                 f.slowCloud.w == f.camRight.w ? f.slowCloud : float4(0), 0u };
+}
+
 // Baked fine cloud field where it covers q, else evaluated.

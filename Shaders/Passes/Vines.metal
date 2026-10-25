@@ -19,7 +19,6 @@ fragment float4 vineFragment(VOut in [[stage_in]], float4 dst [[color(0)]], cons
                              texture2d_array<uint> vineCoarse [[texture(19)]], texture2d_array<uint> vineSuper [[texture(20)]],
                              texture2d_array<uint> vineBands [[texture(21)]]) {
     float2 ndc = screenNdc(in.uv) + f.jitter.xy;
-    float tanH = f.camPos.w;
     float3 d = viewRay(f, ndc);
     float3 o = f.camPos.xyz;
     int levels = int(f.fade.z);
@@ -27,12 +26,8 @@ fragment float4 vineFragment(VOut in [[stage_in]], float4 dst [[color(0)]], cons
     for (int k = 1; k < levels; k++) gmax = max(gmax, coarse.read(uint2(0), uint(k - 1), coarse.get_num_mip_levels() - 1).r + 1.0);
     if (int(f.shadow.y) & 2) gmax = min(gmax, 260.0);
     Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, cg2, hb, uint(f.mapInfo.w), giants, pvTex, towers, 0 };
-    Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
-            2.0 * tanH * f.resolution.z, f.misc.w, makeLight(f.sunDir.xyz, uint(f.mapInfo.w), f.lights.z),
-            pixelDither(f, in.pos.xy),
-            cloudTex, f.cloud.xyz, st, sites, lampPos, lampState, lightMap, lightDir, f.lights, shadowNear, shadowFar,
-            f.misc2.z == 14 ? 2.0 : f.shadow.x, (int(f.shadow.y) & 1) != 0, int(f.shadow.y), slowTex,
-            f.slowCloud.w == f.camRight.w ? f.slowCloud : float4(0), 0u };
+    Ctx x = makeCtx(tr, f, in.pos.xy, cloudTex, st, sites, lampPos, lampState, lightMap, lightDir, shadowNear, shadowFar,
+                    slowTex);
     x.towers = towers;
     if (f.misc2.z >= 1 && f.misc2.z != 2) return dst;
     float tSurf = abs(dst.a);
