@@ -153,7 +153,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
                                groundSmoothL(x.tr, k, p.xz + float2(0, R)) - groundSmoothL(x.tr, k, p.xz - float2(0, R))) / (2.0 * R);
             nR = normalize(float3(-gr.x, 1.0, -gr.y));
         }
-        ndlR = max(dot(nR, L.key), 0.0);
+        ndlR = max(dot(nR, L.key), 0.0) * L.shade;
     }
     float sh = 1.0, shRay = 1.0;
     if (shadows > 0 && (ndl > 0.0 || ndlR > 0.0) && L.shadows && x.shadowMode != 3.0) {
@@ -197,7 +197,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         shRay = sh;
         sh = mix(sh, 1.0, 0.3 * L.night);
         // After the lifts, which stand for light slipping between distant steps: none slips under a roof.
-        sh = min(sh, 1.0 - roofW);
+        sh = min(sh, 1.0 - roofW * L.shade);
     }
     if (!(x.prof & 32) && L.sunAmt > 0.0) sh *= mix(1.0, cloudShadow(x, p, L.key), L.sunAmt);
     float lowFill = mix(0.9, 1.0, smoothstep(0.1, 0.4, L.key.y));

@@ -5,7 +5,7 @@ struct Light {
     float3 key;     // direction to the current key light (sun, afterglow or moon)
     float3 keyCol;
     bool shadows;
-    float shade;    // how much of its shadows land: fades in with the sun from the afterglow's handover
+    float shade;    // how much of its shadows land: fades in from where they switch on, with the sun and with the moon
     float3 zenith;   // terrain/cloud fill
     float3 horizon;
     float3 skyZen;   // sky radiance, kept darker and more saturated than the fill so twilight skies hold colour
@@ -88,8 +88,10 @@ static Light makeLight(float3 sunDir, uint seed, float nightIndex) {
         float m = smoothstep(-0.09, -0.16, e);
         L.key = normalize(mix(glowDir, L.moon, m));
         L.keyCol = mix(glowCol, float3(0.60, 0.66, 0.80) * L.night * L.moonAmt, m);
+        // The moon's shadows switch on halfway through the blend (with the key near the zenith) and fade in over the rest:
+        // switched on at once they darkened every moonlit face by up to 10/255 in one frame. Must match SkyClock.keyLight.
         L.shadows = m > 0.5;
-        L.shade = 1.0;
+        L.shade = smoothstep(0.5, 1.0, m);
     }
     return L;
 }

@@ -1,7 +1,8 @@
 import simd
 
 extension SkyClock {
-    // The key light as the shader's makeLight picks it, and whether it casts shadows.
+    // The key light as the shader's makeLight picks it, and whether it casts shadows. The shader fades the shadows in
+    // (Light.shade) from where this turns true, so the maps must be baked from that frame on.
     package static func keyLight(_ sun: SIMD3<Double>) -> (SIMD3<Double>, Bool) {
         let e = sun.y
         if e >= 0.05 { return (sun, true) }
