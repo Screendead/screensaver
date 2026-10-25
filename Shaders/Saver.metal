@@ -10654,7 +10654,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         under *= float(life.underMul);
         col = mix(under, refl, fres) + float3(life.add);
         // Glitter path toward the sun or moon: the main EDR highlight.
-        col += x.L.keyCol * 6.0 * pow(max(dot(r, x.L.key), 0.0), mix(mix(900.0, 4000.0, x.L.night), 350.0, x.L.gold)) * fres * (x.L.shadows ? 1.0 : 0.3) * (1.0 + 0.5 * x.L.night) * open;
+        col += x.L.keyCol * 6.0 * pow(max(dot(r, x.L.key), 0.0), mix(mix(900.0, 7000.0, x.L.night), 350.0, x.L.gold)) * fres * (x.L.shadows ? 1.0 : 0.3) * (1.0 + 0.5 * x.L.night) * open;
         // Golden hour: a broad sheen of the aureole on the water under the sun.
         col += x.L.keyCol * 0.5 * pow(max(dot(r, x.L.key), 0.0), 40.0) * fres * x.L.gold * open;
         if (x.L.night > 0.0 && open > 0.0) {
@@ -10679,7 +10679,9 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             constexpr float az0 = 1.5 * M_PI_F + 0.9;
             const float2 mz = -float2(sin(az0), cos(az0));
             float swell = perlin3(float3(dot(ww, mz) * 0.07, (ww.x * mz.y - ww.y * mz.x) * 0.02, x.time * 0.1), x.seed + 62u);
-            float rip = mix(swell, mix(e0, fine, saturate(2.0 - fpv * 10.0)), saturate(2.0 - fpv * 1.8));
+            // An octave between the ripples and the fine facets makes the glints smaller where it resolves.
+            float e1 = mix(e0, perlin3(float3(ww * 0.6, x.time * 0.4), x.seed + 64u), saturate(2.0 - fpv * 3.75));
+            float rip = mix(swell, mix(e1, fine, saturate(2.0 - fpv * 10.0)), saturate(2.0 - fpv * 1.8));
             // The ripple noise is near-Gaussian (sd ~0.22); a logistic quantile turns cover into its threshold.
             float thr = 0.13 * log((1.0 - cover) / max(cover, 1e-4));
             // Facets brighten toward their crests rather than switching on flat, so each glint has a peak.

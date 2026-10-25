@@ -38,7 +38,7 @@ The flight runs at twice its old speed (11-30 voxels/s by height, Jack's call 20
    - **All picks in one merge: `strata/overnight-picks`** holds every branch below at its bracketed pick (cloud sea included), conflicts resolved, one PR away from master.
    - **Jack's picks: `strata/overnight-picks2`** is that bundle (with the cloud-sea gate) at Jack's answers where they differ from the brackets, marked "Jack:" below.
    - Floating islands, `strata/islands3` (master merged in, conflicts reviewed): merge now [yes]; follow-ups: birds no longer circle islands at the doubled flight speed, island tops dark at night.
-   - Moon glints, `strata/pitch-moon-glints`: A keep / B soft roll-off [B] / C finer.
+   - Moon glints, `strata/pitch-moon-glints`: A keep / B soft roll-off [B] / C finer. Jack: C.
    - Near-camera night glow, `strata/pitch-near-glow`: A keep / B 40% lower near [B] / C plus slower pulse.
    - Sunrise clock, `strata/pitch-slow-dawn`: A keep / B slow dawn in 12 min / C slow dawn, ~15-min day [C]. Jack: A, the 12-minute clock stays (slow dawn removed).
    - Archive waves, tundra, drama, mesa, noonart, texel, far2 (rename to `archive/`) [yes].
