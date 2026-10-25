@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# A VR_PATH file for a held camera with the sky clock running at its live rate.
+# A VR_PATH file for a held camera with the sky clock running at its live rate (skyclock.py, as SkyClock.advance in
+# Sources/StrataCore/Sky/SkyClock.swift).
 # Usage: tools/sky/skypath.py PHASE FRAMES FPS "x,z,y,yawDeg,pitchDeg" EXPOSURE [--warm N] [--day D] > path.txt
 # --warm adds N frames at the start phase first, so the temporal history settles before the clock moves.
 # Frame i of the clock-running part is printed after the warm frames; output names are <screenshot>_pNNNN.png.

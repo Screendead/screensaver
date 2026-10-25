@@ -54,14 +54,25 @@ Live frame times are measured at `--size 3456x2234 --scale 1`: the scene renders
 
 ## Layout
 
-- `Sources/main.swift`: idle agent, power and lock probes, fullscreen windows, dismissal.
-- `Sources/BugReport.swift`: the B-key bug report: hardware-encoded rolling capture, per-frame state, report files, note window.
-- `Sources/Renderer.swift`: world (2048² column map with max mips, async double-buffered regeneration), day clock, frame setup, TAA, snapshots.
-- `Sources/Camera.swift`: valley- and ridge-following autopilot with a pitch cycle, so the horizon sweeps the whole screen.
+- `Package.swift`: three SwiftPM targets and two test targets, built by `make` (`swift build -c release`); `make test` runs `swift test` and `tools/golden.sh`.
+- `Sources/StrataCore/`: everything without Metal or AppKit, unit-tested in `tests/StrataCoreTests/` (`Support/` flies the camera and the birds over a synthetic world).
+  - `Camera/`: the valley- and ridge-following autopilot, its shot director, placement and terrain sampling.
+  - `Wildlife/`: the flocks (species, spawning, flight, upload), `Sight` (what a frame can show of a bird) and `PopLog`.
+  - `World/`: `Terrain` (the shown map's CPU copy and what stands on it), `FarHeights`, the map's table layouts and decoders, `Provinces`, sites, giants and towers.
+  - `Islands/`: floating islands' records, bounds and shading table. `Sky/`: the day clock and the key light. `Render/`: scene tiles.
+  - `Config/`: command-line `Settings`, the `Knobs` (every VR_* switch), biomes. `Diagnostics/`: the event log. `Math/`: smoothstep.
+- `Sources/Strata/`: the GPU and the app.
+  - `GPU/`: the shader library and pipelines, and the uniform layouts the shader shares (`Frame`, `ShadowBake`, `VineBake`).
+  - `World/`: the 1-voxel map (`World`: async double-buffered regeneration in pieces, landing a finished map), the LOD rings (`Clipmap`), towers and the giants' strands.
+  - `Render/`: `Renderer` (simulation and frame setup) and its passes: bakes, scene, resolve and post, lamps, shadows, clouds, far heights, display.
+  - `Snapshot/`: `--screenshot` runs and their test modes (poses, listings, the VR_FLIGHT soak, VR_PATH replay, PNG).
+  - `App/`: the idle agent, power and lock probes, fullscreen windows, dismissal, prefs and the menu bar item. `BugReport/`: the B-key report. `Server/`: `--serve`.
+- `Sources/voxelreverie/main.swift`: the executable's entry point.
 - `Shaders/`: one Metal library. `Saver.metal` is its only translation unit and includes the rest in declaration order:
   `Common` (Frame, constants, function constants), `Noise`, `World` (climate, relief, towers, islands, caves), `Life` (trees,
   jungle, giants, vines, birds), `Sites` (hamlets, lamps), `Maps` (coarse rings, mips), `Trace` (the quadtree voxel DDA),
   `Surface`, `Shade`, `Light`, `Sky`, `Atmos` (fog, mist, smoke, sea of cloud), `Water`, and `Passes` (the scene, vine,
   mote, TAA, post and capture entry points).
+- `tests/StrataTests/`: the shader's contracts with the CPU (`Shader/`: probe kernels built against `Shaders/` at test time) and the bug report's `state.json` against `bugclip.sh`.
 - `tools/golden.sh`: output regression check; renders a fixed set and compares sha256s with `tests/golden/manifest.sha256` (`tests/fixtures/golden_path.txt` is its recorded-path replay).
-- `tools/`: `vrgpu` (the shared GPU lock) and `vrr` (the warm render server), the render sets `render.sh` and `golden.sh`; `perf/` GPU and battery timing (`bench.sh`, `soak.sh`, `powersoak`); `frames/` measures and stacks rendered frame sequences; `sky/` mirrors the sky clock (VR_PATH files, the meteor schedule).
+- `tools/`: `vrgpu` (the shared GPU lock) and `vrr` (the warm render server), the render sets `render.sh` and `golden.sh`, `mutants.py` (shows each unit test bites); `perf/` GPU and battery timing (`bench.sh`, `soak.sh`, `powersoak`); `frames/` measures and stacks rendered frame sequences; `sky/` mirrors the sky clock (VR_PATH files, the meteor schedule).

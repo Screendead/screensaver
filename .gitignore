@@ -2,3 +2,5 @@ build/
 .claude/scheduled_tasks.lock
 .claude/worktrees/
 __pycache__/
+.build/
+.swiftpm/
