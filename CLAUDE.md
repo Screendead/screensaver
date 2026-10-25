@@ -8,6 +8,7 @@ A generative macOS screensaver (Swift + one Metal shader). README.md describes b
 make            # builds build/VoxelReverie.app
 ./install.sh    # build, install to ~/Applications and (re)start the login agents
 make test       # build, then the unit tests (swift test, under the GPU lock) and the golden renders (tools/golden.sh)
+make lint       # unused shader code (tools/lint.sh); F_FLAT and M_ROOF are known and kept
 ```
 
 The unit tests are two targets in `tests/`: `StrataCoreTests` (the clock, autopilot, birds, settings and table decoders, flown over a synthetic world) and `StrataTests`, which builds `tests/StrataTests/Shader/ShaderProbes.metal` against `Shaders/` and checks the CPU's ports of shader functions, its constants and record layouts against the shader's own, and that `state.json` holds what `bugclip.sh` reads. A CPU mirror of the shader belongs in those tests; output changes belong in golden.
@@ -37,6 +38,7 @@ Run every launch of the binary through the GPU lock, `tools/vrgpu -- <binary> ..
 | `tools/vrgpu --time -- tools/perf/bench.sh ROUNDS "a=<app> b=<app>" [regex]` | A/B GPU ms over twelve fixed scenes |
 | `tools/frames/flicker.py <dir or glob> [--skip n] [--crop WxH]` | Frame-to-frame flicker of a PNG sequence (a report's decoded clip, VR_PATH or VR_FRAMES renders): flip and one-frame blink rates in dark and bright regions |
 | `tools/mutants.py [regex]` | One deliberate change per unit test to the code it guards, run against that test and reverted: shows each test bites. Add a mutant with each new test |
+| `tools/lint.sh` (`make lint`) | Unused shader functions and constants: inlines `Saver.metal`'s includes into `build/lint.metal` and runs `xcrun metal -fsyntax-only -Wunused`, since clang warns only in the main file |
 | `tools/perf/soak.sh` | Off-screen soak: frame-by-frame flight on mains and battery plus two cave approaches, with frame-time percentiles |
 | `tools/perf/powersoak [app]` | On the laptop, unplugged: baseline then the live saver until 3% battery, logging watts, battery, heat and memory |
 | `tools/frames/abstack.py <top dir> "<label>" <bottom dir> "<label>" <out dir> [box]` | Two VR_FRAMES sequences stacked and labelled for a before/after clip, with each one's mean frame-to-frame change in a box |
