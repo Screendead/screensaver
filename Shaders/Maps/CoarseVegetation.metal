@@ -14,17 +14,12 @@ static inline float coarseCombine(float a, float b, float c, float d, float s) {
 static float emergentTop(float2 w, float2 ctr, float gt, float y0, float R, int pads, uint h, uint seed) {
     float2 q = w - ctr, p = w + seedOffset(seed);
     float top = -1e9;
-    float lumps = 1.6 * perlin2(p / 3.2, seed + 332u) + 1.2 * perlin2(p / 7.0, seed + 333u);
+    float lumps = emergentLumps(p, seed);
     for (int j = 0; j < pads; j++) {
         float T;
-        float4 P = emergentPad(h, j, R, y0, T);
-        float2 dq = q - P.xz;
-        float dd = length(dq);
-        if (dd > P.w * 1.35) continue;
-        float2 u2 = dq / max(dd, 1e-3);
-        float edge = P.w * (1.0 + 0.30 * perlin2(u2 * 1.7 + float(j) * 4.1 + hashf(h) * 50.0, seed + 331u));
-        if (dd >= edge) continue;
-        float u = dd / edge;
+        float4 P;
+        float u = emergentPadAt(q, h, j, R, y0, seed, P, T);
+        if (u < 0.0) continue;
         top = max(top, floor(gt + P.y + T * 0.6 * sqrt(1.0 - u * u) + lumps * sqrt(1.0 - u * u)) + 1.0);
     }
     return top;

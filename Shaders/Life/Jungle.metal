@@ -154,6 +154,24 @@ static inline bool emergentIn(int2 cc, uint seed, float J, thread float2& ctr, t
     return true;
 }
 
+// Pad j of an emergent's crown over q (from its axis): the pad (emergentPad: P, T), and how far out q lies across its
+// noise-edged rim, in [0, 1), or -1 off it.
+static inline float emergentPadAt(float2 q, uint h, int j, float R, float y0, uint seed, thread float4& P, thread float& T) {
+    P = emergentPad(h, j, R, y0, T);
+    float2 dq = q - P.xz;
+    float dd = length(dq);
+    if (dd > P.w * 1.35) return -1.0;
+    float2 u2 = dq / max(dd, 1e-3);
+    float edge = P.w * (1.0 + 0.30 * perlin2(u2 * 1.7 + float(j) * 4.1 + hashf(h) * 50.0, seed + 331u));
+    if (dd >= edge) return -1.0;
+    return dd / edge;
+}
+
+// The lumps on an emergent's crown pads at seed-offset world position p.
+static inline float emergentLumps(float2 p, uint seed) {
+    return 1.6 * perlin2(p / 3.2, seed + 332u) + 1.2 * perlin2(p / 7.0, seed + 333u);
+}
+
 // The intervals emergent e (trunk ground gt) adds to world column centre w: its trunk, and its crown's noise-edged,
 // domed pads. lod >= 1 (coarse rings): the trunk only where it fills the column.
 static void emergentIntervals(float2 w, float2 ctr, float gt, float y0, float R, int pads, uint h, uint seed, int lod, thread GRuns& r) {
@@ -162,17 +180,12 @@ static void emergentIntervals(float2 w, float2 ctr, float gt, float y0, float R,
     float tr = R > 9.0 ? 1.2 : 0.75;
     if (d < tr + (lod > 0 ? 0.0 : 0.0)) gAdd(r, gt, gt + y0, GM_WOOD);
     float2 p = w + seedOffset(seed);
-    float lumps = 1.6 * perlin2(p / 3.2, seed + 332u) + 1.2 * perlin2(p / 7.0, seed + 333u);
+    float lumps = emergentLumps(p, seed);
     for (int j = 0; j < pads; j++) {
         float T;
-        float4 P = emergentPad(h, j, R, y0, T);
-        float2 dq = q - P.xz;
-        float dd = length(dq);
-        if (dd > P.w * 1.35) continue;
-        float2 u2 = dq / max(dd, 1e-3);
-        float edge = P.w * (1.0 + 0.30 * perlin2(u2 * 1.7 + float(j) * 4.1 + hashf(h) * 50.0, seed + 331u));
-        if (dd >= edge) continue;
-        float u = dd / edge;
+        float4 P;
+        float u = emergentPadAt(q, h, j, R, y0, seed, P, T);
+        if (u < 0.0) continue;
         // Domed and lumpy on top, a sagging, ragged underside: a cloud of leaves, not a plate.
         float top = gt + P.y + T * 0.6 * sqrt(1.0 - u * u) + lumps * sqrt(1.0 - u * u);
         float bot = gt + P.y - T * 0.55 * pow(1.0 - u * u, 0.7) + 1.2 * perlin2(p / 4.5, seed + 334u);
