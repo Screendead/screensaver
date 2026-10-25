@@ -1,13 +1,16 @@
 APP      := build/VoxelReverie.app
 BIN      := $(APP)/Contents/MacOS/voxelreverie
 RES      := $(APP)/Contents/Resources
-SOURCES  := $(wildcard Sources/*.swift)
+SOURCES  := $(shell find Sources -name '*.swift') Package.swift
 
 all: $(BIN) $(RES)/Saver.metallib $(APP)/Contents/Info.plist
 
+# Copied to a new file and moved over the old: the kernel kills a signed binary rewritten in place.
 $(BIN): $(SOURCES)
 	@mkdir -p "$(dir $@)"
-	swiftc -O -target arm64-apple-macos14 -framework AppKit -framework Metal -framework MetalKit -framework IOKit -framework AVFoundation -framework CoreMedia -framework CoreVideo -framework VideoToolbox $(SOURCES) -o "$@"
+	swift build -c release --product voxelreverie
+	cp "$$(swift build -c release --show-bin-path)/voxelreverie" "$@.new"
+	mv -f "$@.new" "$@"
 
 $(RES)/Saver.metallib: Shaders/Saver.metal
 	@mkdir -p "$(RES)"
@@ -18,6 +21,6 @@ $(APP)/Contents/Info.plist: Info.plist
 	cp Info.plist "$@"
 
 clean:
-	trash build
+	trash build .build
 
 .PHONY: all clean
