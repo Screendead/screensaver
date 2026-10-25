@@ -13,14 +13,14 @@ static inline float3 bioHue(float2 w, uint seed) {
     h = mix(h, float3(0.42, 0.10, 1.0), smoothstep(0.16, 0.36, v));
     h = mix(h, float3(0.75, 0.10, 0.75), 0.5 * smoothstep(0.28, 0.48, v));
     // Blue and violet lifted a little toward teal's brightness (x1.2 at most): more reads as a saturated floodlight.
-    return h * mix(1.0, 0.5 / max(dot(h, float3(0.3, 0.59, 0.11)), 0.05), 0.3);
+    return h * mix(1.0, 0.5 / max(dot(h, LUMA), 0.05), 0.3);
 }
 
 // Slow swells of light that travel across a grove (a front ~70 voxels apart, bent by warp, a noise in about
 // [-0.75, 0.75] over ~150 voxels, every ~8 s) over a slower breathing per region: from about half to full, never a flicker.
 static inline float bioPulse(float2 w, float t, uint seed, float warp) {
     float a0 = float(seed & 1023u) * 0.00614;
-    float ph = dot(w, float2(cos(a0), sin(a0))) * (6.2831853 / 70.0) + 4.0 * warp - t * 0.75;
+    float ph = dot(w, float2(cos(a0), sin(a0))) * (TAU / 70.0) + 4.0 * warp - t * 0.75;
     float sw = 0.5 + 0.5 * sin(ph);
     return (0.5 + 0.5 * sw * sw) * (0.85 + 0.15 * sin(t * 0.45 + dot(w, float2(0.013, 0.01))));
 }

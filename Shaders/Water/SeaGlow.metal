@@ -49,7 +49,7 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
             // Two swells from directions fixed per seed, one or the other ruling each region with a calm seam between.
             // Each swell's crests are narrow ridges bent by the warp; a second train at an angle groups them, so only
             // stretches of uneven length and spacing are lit.
-            float a0 = hashf(pcg(x.seed + 73u)) * 6.2831853;
+            float a0 = hashf(pcg(x.seed + 73u)) * TAU;
             float2 wd1 = float2(cos(a0), sin(a0)), wd2 = float2(wd1.x * 0.765 - wd1.y * 0.644, wd1.x * 0.644 + wd1.y * 0.765);
             float2 wd1b = float2(wd1.x * 0.765 + wd1.y * 0.644, -wd1.x * 0.644 + wd1.y * 0.765);
             float2 wd2b = float2(wd2.x * 0.814 + wd2.y * 0.581, -wd2.x * 0.581 + wd2.y * 0.814);
@@ -104,7 +104,7 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
             int2 cell = int2(floor(q / 16.0));
             uint h = hash2i(cell, x.seed + 75u);
             if (hashf(h) < 0.07) {
-                float ph = hashf(pcg(h)) * 6.2831853;
+                float ph = hashf(pcg(h)) * TAU;
                 float dj = 0.8 + 2.2 * hashf(pcg(h + 2u));
                 float2 cc = (float2(cell) + 0.5) * 16.0 + 4.5 * float2(sin(t * 0.05 + ph), cos(t * 0.037 + ph * 1.7)) - slant * (dj - 1.9);
                 float fj = 0.0;
@@ -139,7 +139,7 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
             int2 cell = int2(floor(q / 48.0));
             uint h = hash2i(cell, x.seed + 76u);
             if (hashf(h) < 0.12) {
-                float ph = hashf(pcg(h)) * 6.2831853;
+                float ph = hashf(pcg(h)) * TAU;
                 float2 cc = (float2(cell) + 0.5) * 48.0 + 11.0 * float2(sin(t * 0.03 + ph), cos(t * 0.023 + ph * 1.3));
                 float R = 5.0 + 3.0 * hashf(pcg(h + 1u));
                 float2 v = q - cc;
@@ -167,7 +167,7 @@ static float3 seaGlow(thread const Ctx& x, float3 d, float3 wp, float2 ww, int k
             int2 cell = int2(floor(q / 140.0));
             uint h = hash2i(cell, x.seed + 78u);
             if (hashf(h) < 0.22) {
-                float ph = hashf(pcg(h)) * 6.2831853;
+                float ph = hashf(pcg(h)) * TAU;
                 float dir = (h & 128u) ? 1.0 : -1.0;
                 float an = t * 0.012 * dir + ph;
                 float2 cc = (float2(cell) + 0.5) * 140.0 + 38.0 * float2(cos(an), sin(an));

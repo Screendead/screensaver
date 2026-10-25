@@ -130,11 +130,11 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     float3 alb = h.normal.y == 0 ? mix(s.albedo, s.tread, max(wf * (1.0 - keep), lone)) : mix(s.albedo, s.face, wf * sus);
     float deep = L.night * smoothstep(0.32, 0.45, -L.sun.y);
     // Moonlight drains colour.
-    alb = mix(alb, float3(dot(alb, float3(0.3, 0.59, 0.11))), 0.4 * L.night + 0.1 * deep);
+    alb = mix(alb, float3(dot(alb, LUMA)), 0.4 * L.night + 0.1 * deep);
     // Canopies would otherwise drop to cut-out silhouettes under the moon: lifted toward the luminance of a lifted
     // green crown, never past it, or fall foliage, already several times brighter, glows like candy.
     if (s.mat == 1 || s.mat == 2) {
-        float l = dot(alb, float3(0.3, 0.59, 0.11));
+        float l = dot(alb, LUMA);
         alb = mix(alb, float3(l), 0.4 * L.night * s.autumn);
         alb *= 1.0 + L.night * (clamp(0.17 / max(l, 1e-3), 1.0, 2.4) - 1.0);
     }
@@ -142,7 +142,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // above mid-tone, not a cut keyed to the material, so tones keep their order: a stone riser never outshines
     // its sand tread.
     float kn = 4.5 * L.night;
-    alb *= (1.0 + 0.1 * kn) / (1.0 + kn * dot(alb, float3(0.3, 0.59, 0.11)));
+    alb *= (1.0 + 0.1 * kn) / (1.0 + kn * dot(alb, LUMA));
     // Low light: leaves this dark under a warm key and a violet dome go to brown mud. Light passed and scattered through
     // a crown takes the leaf's own hue, so the lift saturates as it brightens (autumn crowns are bright already).
     float dusk = s.mat == 1 ? L.gold * (1.0 - L.night) * mix(0.5, 1.0, L.sunAmt) : 0.0;
@@ -150,7 +150,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // turns them mustard. A golden-hour sun, and the afterglow, a broad patch of sky, light them lifted like the dome.
     float3 albK = alb;
     if (dusk > 0.0) {
-        float la = max(dot(alb, float3(0.3, 0.59, 0.11)), 1e-4);
+        float la = max(dot(alb, LUMA), 1e-4);
         alb *= mix(float3(1.0), clamp(1.5 * sqrt(alb / la), 0.7, 2.0), dusk * (1.0 - 0.6 * s.autumn));
         albK = mix(albK, la * float3(1.5, 0.95, 0.55), 0.5 * dusk * (1.0 - 0.6 * s.autumn)) * (1.0 + 0.3 * dusk);
         albK = mix(alb, albK, smoothstep(-0.04, 0.0, L.sun.y) * (1.0 - L.sunAmt));
@@ -318,7 +318,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         float fr = min(0.02 + 0.98 * pow(1.0 - saturate(-d.y), 5.0), mix(1.0, 0.06, L.night));
         float gloss = 0.2 * wash.x + 0.8 * wash.y;
         col += (env * fr + L.keyCol * 0.8 * pow(max(dot(rv, L.key), 0.0), 24.0) * fr * sh) * gloss * sv;
-        float3 irr = col / max(dot(alb, float3(0.3, 0.59, 0.11)), 0.02);
+        float3 irr = col / max(dot(alb, LUMA), 0.02);
         // Foam is pale: under the moon it takes the same knee as the sand's albedo.
         col = mix(col, irr * 0.6 * (1.0 + 0.1 * kn) / (1.0 + 0.6 * kn), 0.8 * saturate(wash.z));
     }

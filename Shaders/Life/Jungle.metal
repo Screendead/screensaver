@@ -134,7 +134,7 @@ static inline float4 emergentPad(uint h, int j, float R, float y0, thread float&
     T = 8.0 + 4.0 * hashf(pcg(h + 10u));
     if (j == 0) return float4(0.0, y0, 0.0, R);
     uint hj = pcg(h + 20u + uint(j) * 7u);
-    float a = (float(j) + 0.6 * hashf(hj)) * 2.3999632 + hashf(h) * 6.2831853;
+    float a = (float(j) + 0.6 * hashf(hj)) * 2.3999632 + hashf(h) * TAU;
     float2 o = float2(cos(a), sin(a)) * R * (0.55 + 0.3 * hashf(pcg(hj)));
     T *= 0.85;
     return float4(o.x, y0 - 5.0 + 7.0 * hashf(pcg(hj + 1u)), o.y, R * (0.55 + 0.25 * hashf(pcg(hj + 2u))));

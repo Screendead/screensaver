@@ -135,7 +135,7 @@ static BirdHit traceBirds(device const float4* B, int nFlocks, float3 o, float3 
 
 // Birds are lit like small matte objects: key light (with cloud shadow), sky fill from above, ground bounce from below.
 static float3 shadeBird(thread const Ctx& x, float3 p, BirdHit b) {
-    float3 alb = mix(b.albedo, float3(dot(b.albedo, float3(0.3, 0.59, 0.11))), 0.4 * x.L.night);
+    float3 alb = mix(b.albedo, float3(dot(b.albedo, LUMA)), 0.4 * x.L.night);
     float ndl = max(dot(b.n, x.L.key), 0.0);
     float sh = mix(1.0, cloudShadow(x, p, x.L.key), x.L.sunAmt);
     float deep = x.L.night * smoothstep(0.32, 0.45, -x.L.sun.y);

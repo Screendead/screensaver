@@ -213,7 +213,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
                 float3 glow = (x.L.zenith * 0.6 + x.L.keyCol * max(x.L.key.y, 0.0) * 0.12) * float3(0.06, 0.30, 0.50);
                 float3 lag = lit * T + glow * (1.0 - T.g);
                 // Keep the shallows soft rather than swimming-pool cyan; moonlit, only a hint of colour remains.
-                lag = mix(lag, float3(dot(lag, float3(0.3, 0.59, 0.11))), 0.35 + 0.25 * x.L.night) * 0.9;
+                lag = mix(lag, float3(dot(lag, LUMA)), 0.35 + 0.25 * x.L.night) * 0.9;
                 under = mix(under, lag, lagoon);
             }
         }
@@ -298,7 +298,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         if (f.misc2.z == 8) {
             const float3 tint[5] = { float3(1, 0.3, 0.3), float3(0.3, 1, 0.3), float3(0.3, 0.5, 1), float3(1, 1, 0.3), float3(1, 0.3, 1) };
             float w = morphAt(x.tr, h.level, (o + d * h.t).xz);
-            float l = dot(col, float3(0.3, 0.59, 0.11));
+            float l = dot(col, LUMA);
             return float4(mix(tint[h.level], tint[min(h.level + 1, 4)], w) * (0.15 + l), h.t);
         }
     } else {

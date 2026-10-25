@@ -107,7 +107,7 @@ static void structureSurface(thread Surface& s, thread const Terrain& tr, textur
             a *= 1.0 - 0.25 * joint * (1.0 - smoothstep(0.03, 0.08, fp));
         }
         if (P.kind == P_FIRE) a = mix(a, float3(0.16, 0.135, 0.10), 0.75) * (0.8 + 0.35 * hashf(hash2i(v.xz + mapOrigin, seed + 344u)));
-        else if (chim) a = mix(a, float3(dot(a, float3(0.3, 0.59, 0.11))), 0.5) * (wy > Ht - 0.4 ? 0.3 : 0.6);
+        else if (chim) a = mix(a, float3(dot(a, LUMA)), 0.5) * (wy > Ht - 0.4 ? 0.3 : 0.6);
         else if (P.kind != P_HENGE && P.kind != P_BOX) a *= house && ha.f.flat ? 0.6 : 0.85;
     } else if (vm == M_TIMBER) {
         a = (P.kind == P_PROP ? float3(0.17, 0.125, 0.08) : float3(0.10, 0.075, 0.055)) * (1.0 + 0.15 * sin(wy * 9.0 + perlin2(wq * 3.0, seed + 311u) * 3.0) * (1.0 - smoothstep(0.02, 0.06, fp)));
@@ -176,7 +176,7 @@ static void structureSurface(thread Surface& s, thread const Terrain& tr, textur
         // A painted door in a yurt's wall.
         if (P.kind == P_ROUND && style != ST_TIPI && n.y == 0) {
             float2 dq = wq - float2(mapOrigin) - float2(sc + P.o) - 0.5;
-            float da = hashf(pcg(sh + pk)) * 6.2831853;
+            float da = hashf(pcg(sh + pk)) * TAU;
             if (dot(normalize(dq), float2(cos(da), sin(da))) > 0.96 && fy < 1.6) { a = float3(0.30, 0.12, 0.03); doorM = 0.6; }
         }
         // An A-frame's flap stands open on the gable facing the fire.

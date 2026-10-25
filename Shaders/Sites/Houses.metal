@@ -147,7 +147,7 @@ static inline float3 houseDoor(Part P, uint sh, int k, bool path) {
     int style = (P.flags >> 12) & 15;
     if (P.kind == P_ROUND) {
         if (style != ST_YURT) return 0;
-        float da = hashf(pcg(sh + uint(k))) * 6.2831853;
+        float da = hashf(pcg(sh + uint(k))) * TAU;
         return float3(float2(P.o) + 0.5 + float2(cos(da), sin(da)) * (float(P.sz.x) * 0.5 + 1.0), 1.0);
     }
     if (P.kind != P_HOUSE || (P.flags & F_TENT) != 0) return 0;

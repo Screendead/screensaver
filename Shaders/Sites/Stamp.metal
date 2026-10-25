@@ -221,7 +221,7 @@ static Claim stampPart(Part P, int2 q, int2 c, float g, texture2d<float, access:
         near = true;
         if (r < R - 3.0) return noClaim();
         if (g < SEA + 1.0) return noClaim();
-        float stepA = 6.2831853 / float(N);
+        float stepA = TAU / float(N);
         int k = int(round(atan2(dq.y, dq.x) / stepA));
         k = (k % N + N) % N;
         float ang = float(k) * stepA;
@@ -287,7 +287,7 @@ static Claim stampPart(Part P, int2 q, int2 c, float g, texture2d<float, access:
         if (r < float(P.sz.y) + 3.0) near = true;
         if (r < float(P.sz.x) - 0.3 || r > float(P.sz.y) + 0.3 || g < SEA + 1.0) return noClaim();
         // A toppled tower: a ring of wall whose broken top falls from one side to the other.
-        float th0 = hashf(uint(P.y1)) * 6.2831853;
+        float th0 = hashf(uint(P.y1)) * TAU;
         float k = 0.5 + 0.5 * cos(atan2(dq.y, dq.x) - th0);
         float hgt = 1.0 + round(float(P.y2) * k * k + perlin2(dq * 0.7, hash + 301u));
         return solidClaim(g + max(hgt, 1.0), g, mat | S_FLAT);

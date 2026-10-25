@@ -49,7 +49,7 @@ static inline Col towerShape(Col col, Tower T, float2 wf, int s, uint seed) {
         H = max(y0 + 3.0, H - floor(min((H - y0) * (0.15 + 0.01 * bite), 25.0 + 2.0 * bite) / 5.0) * 5.0);
     // Chunks bitten out of the corners, part of a stage's height, their edges ragged. (Stepped down toward the corner,
     // they drew more setbacks.)
-    float seg = 6.2831853 / float(T.N);
+    float seg = TAU / float(T.N);
     uint ch = hash3i(int3((Pm.face + (Pm.am > 0.0 ? 1 : 0)) % T.N, m, int(T.h & 1023u)), seed + 515u);
     if (hashf(ch) < 0.65) {
         float hf = Rm * tan(0.5 * seg);
@@ -67,7 +67,7 @@ static inline Col towerShape(Col col, Tower T, float2 wf, int s, uint seed) {
     if (hashf(hc) < 0.75) {
         float thc = T.th0 + 0.9 * (hashf(pcg(hc)) - 0.5);
         float da = P0.a - thc;
-        da -= 6.2831853 * floor(da / 6.2831853 + 0.5);
+        da -= TAU * floor(da / TAU + 0.5);
         float u = abs(da) / (0.3 + 0.4 * hashf(pcg(hc + 1u))) + 0.25 * perlin2(wf / 23.0, seed + 525u);
         if (u < 1.0) {
             float yF = T.Hb + T.Ht * (0.3 + 0.35 * hashf(pcg(hc + 2u)));
@@ -210,7 +210,7 @@ static inline float towerWet(Climate c) {
 // smoothly along the face, a whole column at a time on the 1-voxel map (q quantised by the caller).
 static inline float towerIvyDrop(float2 w, float2 c, float rot, int N, uint th, float rim, float room, float wet, uint seed) {
     float2 d = w - c;
-    float seg = 6.2831853 / float(N);
+    float seg = TAU / float(N);
     float a = atan2(d.y, d.x) - rot;
     float fi = floor(a / seg);
     float t = length(d) * sin(a - seg * fi - 0.5 * seg) + 97.0 * fi;

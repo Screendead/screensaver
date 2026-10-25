@@ -70,7 +70,7 @@ static inline SeaLife seaLife(thread const Ctx& x, float3 o, float3 d, Hit h, fl
                             float2 pd = pq - float2(pc) - float2(byteOf(ph, 0), byteOf(ph, 1));
                             float k = saturate(1.0 - dot(pd, pd) / (R * R));
                             pt += step(byteOf(ph, 2), occ) * (0.45 + 0.55 * byteOf(ph, 3))
-                                * (0.75 + 0.25 * sin(x.time * 0.7 + 6.2831853 * byteOf(ph, 3))) * (k * k * k + 0.3 * k);
+                                * (0.75 + 0.25 * sin(x.time * 0.7 + TAU * byteOf(ph, 3))) * (k * k * k + 0.3 * k);
                         }
                     // Energy kept as the kernel widens; far off, where points near a pixel, their mean.
                     pt = mix(pt * (0.13 / 1.3) / (R * R), 0.068 * occ, smoothstep(0.45, 0.5, Rw)) + 0.02 * occ;

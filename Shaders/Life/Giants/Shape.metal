@@ -123,7 +123,7 @@ static void giantIntervals(thread const Giant& g, float2 wq, float gl, int lod, 
     // the ground and dives back in.
     for (int i = 0; i < GIANT_FLANGES; i++) {
         uint hi = pcg(g.h + uint(i) * 7919u);
-        float phi = (float(i) + 0.6 * hashf(hi)) * 6.2831853 / float(GIANT_FLANGES);
+        float phi = (float(i) + 0.6 * hashf(hi)) * TAU / float(GIANT_FLANGES);
         float2 dir = float2(cos(phi), sin(phi));
         float along = dot(q, dir);
         if (along < 8.0) continue;

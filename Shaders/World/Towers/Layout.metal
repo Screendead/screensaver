@@ -70,8 +70,8 @@ static inline Tower towerMember(TowerGroup g, int m) {
     T.K = T.kind == 2 ? 3 + int(pcg(h + 4u) % 2u) : st == 1 ? 4 + int(pcg(h + 4u) % 2u) : st == 2 ? 3 + int(pcg(h + 4u) % 2u)
         : 3 + int(pcg(h + 4u) % 3u);
     T.N = T.kind == 0 ? (hashf(pcg(h + 5u)) < 0.5 ? 6 : 8) : 12;
-    T.rot = hashf(pcg(h + 6u)) * 6.2831853 / float(T.N);
-    T.th0 = hashf(pcg(h + 7u)) * 6.2831853;
+    T.rot = hashf(pcg(h + 6u)) * TAU / float(T.N);
+    T.th0 = hashf(pcg(h + 7u)) * TAU;
     T.th1 = T.th0 + 2.0 + 2.0 * hashf(pcg(h + 8u));
     T.kb = 1 + int(pcg(h + 9u) % 2u);
     T.Sy = floor(16.0 + 6.0 * hashf(pcg(h + 10u)));
@@ -80,7 +80,7 @@ static inline Tower towerMember(TowerGroup g, int m) {
     T.c = floor(g.c) + 0.5;
     if (m > 0) {
         // Round the first, each in its own sector, far enough that no two reaches meet.
-        float a = hashf(pcg(g.h + 21u)) * 6.2831853 + float(m - 1) * 6.2831853 / float(max(g.n - 1, 1))
+        float a = hashf(pcg(g.h + 21u)) * TAU + float(m - 1) * TAU / float(max(g.n - 1, 1))
                 + 0.6 * (hashf(pcg(h + 13u)) - 0.5);
         float d = 2.8 * (T.R0 + TOWER_R_MAX) + 500.0 + 600.0 * hashf(pcg(h + 14u));
         T.c = floor(g.c + float2(cos(a), sin(a)) * d) + 0.5;
@@ -205,7 +205,7 @@ static inline float2 towerStageAxis(Tower T, int k) {
     int j = min(k, T.K - 2);
     if (j <= 0) return T.c;
     uint h = pcg(T.h + 40u + uint(j));
-    float a = hashf(pcg(T.h + 39u)) * 6.2831853 + 1.6 * (hashf(h) - 0.5);
+    float a = hashf(pcg(T.h + 39u)) * TAU + 1.6 * (hashf(h) - 0.5);
     return T.c + float2(cos(a), sin(a)) * T.R0 * (1.0 - towerTierScale(T, j)) * (0.2 + 0.3 * hashf(pcg(h)));
 }
 
@@ -218,7 +218,7 @@ static inline TowerPlan towerPlan(Tower T, float2 d) {
     P.r = length(d);
     P.dir = P.r > 1e-3 ? d / P.r : float2(1, 0);
     P.a = atan2(d.y, d.x);
-    float seg = 6.2831853 / float(T.N);
+    float seg = TAU / float(T.N);
     float fi = floor((P.a - T.rot) / seg);
     P.face = (int(fi) % T.N + T.N) % T.N;
     P.am = P.a - T.rot - seg * fi - 0.5 * seg;
@@ -257,7 +257,7 @@ static inline float crownY(Tower T, TowerPlan P, float y0, float y1, uint seed) 
     if (towerStyle(T.h) == 2 || cr < 0.35) g = 0.15 + 0.3 * up + 0.5 * perlin2(P.dir * 3.3 + float(T.h & 63u), seed + 548u);
     else if (cr > 0.75) g = 1.15 * pow(up, 6.0) - 0.05 + 0.2 * nz;
     // Masonry breaks in blocks: one or two courses up or down per 16th of the round.
-    uint sh = hash2i(int2(int(floor((P.a + 3.14159265) / 6.2831853 * 24.0)), int(T.h & 1023u)), seed + 545u);
+    uint sh = hash2i(int2(int(floor((P.a + 3.14159265) / TAU * 24.0)), int(T.h & 1023u)), seed + 545u);
     float y = y0 + (y1 - y0) * saturate(g) + 5.0 * floor(3.0 * hashf(sh) - 1.0);
     return clamp(floor(y / 5.0) * 5.0, y0 + 3.0, y1);
 }
@@ -289,7 +289,7 @@ static inline bool towerBayFallen(uint h, int k, int face, float bay) {
 static inline float towerErosion(Tower T, TowerPlan P, float R, float y, uint seed) {
     float3 q = float3(P.dir.x * R, y * 0.7, P.dir.y * R);
     float n = perlin3(q / 34.0, seed + 541u) + 0.4 * perlin3(q / 12.0, seed + 542u);
-    float corner = smoothstep(0.3, 0.5, abs(P.am) * float(T.N) / 6.2831853);
+    float corner = smoothstep(0.3, 0.5, abs(P.am) * float(T.N) / TAU);
     float zone = saturate(perlin3(float3(P.dir * 1.6, y / 170.0), seed + 543u) * 2.0 + 0.2);
     float e = 16.0 * saturate((n + 0.3 * corner) * 2.0 - 0.5) * zone;
     // At least 6 deep wherever the face is worn at all: a depth from zero would follow the jogs of a diagonal face and
@@ -325,8 +325,8 @@ static inline float towerRootH(Tower T, TowerPlan P, uint seed) {
     for (int i = 0; i < 4; i++) {
         if (i >= nf) break;
         uint h = pcg(T.h + 151u + uint(i) * 7u);
-        float da = P.a - hashf(h) * 6.2831853;
-        da -= 6.2831853 * floor(da / 6.2831853 + 0.5);
+        float da = P.a - hashf(h) * TAU;
+        da -= TAU * floor(da / TAU + 0.5);
         float t = da * T.R0;
         // A fan widening as it runs out, its edge wandering.
         float hw = 9.0 + 7.0 * hashf(pcg(h + 3u)) + 0.5 * e + 4.0 * perlin2(float2(e / 14.0, float(i) * 3.3), seed + 571u);

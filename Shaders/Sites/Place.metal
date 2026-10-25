@@ -195,7 +195,7 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
         addPart(G, hp, float(R) + 3.0);
         // A heel stone outside the ring.
         if (((hb >> 16) & 1u) != 0u) {
-            float a = hashf(pcg(hb)) * 6.2831853;
+            float a = hashf(pcg(hb)) * TAU;
             int2 o = int2(round(float2(cos(a), sin(a)) * float(R + 7)));
             if (!colArch(hm, c + o) && colH(hm, c + o) > SEA + 2.0)
                 addPart(G, makePart(P_BOX, M_STONE, o, int2(1), 4, 0, 0, F_REL), float(R + 9));
@@ -209,7 +209,7 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
         ok = true;
     } else if (type == T_RUINS) {
         float2 gr = float2(colH(hm, c + int2(6, 0)) - colH(hm, c - int2(6, 0)), colH(hm, c + int2(0, 6)) - colH(hm, c - int2(0, 6)));
-        float ga = length(gr) > 0.5 ? atan2(gr.y, gr.x) : hashf(hb) * 6.2831853;
+        float ga = length(gr) > 0.5 ? atan2(gr.y, gr.x) : hashf(hb) * TAU;
         float2 up = float2(cos(ga), sin(ga)), along = float2(-up.y, up.x);
         int runs = 2 + int(hb % 3u);
         for (int i = 0; i < runs; i++) {
@@ -269,7 +269,7 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
         int lamp = addLamp(G, float3(0.5, g + 1.5, 0.5), L_FIRE, 1.0);
         addPart(G, makePart(P_FIRE, M_FIRE, int2(-1), int2(3), 0, 0, 0, F_REL | ((lamp + 1) << 8)), 3.0);
         int tents = 1 + int(hb % 2u);
-        float a0 = hashf(hb >> 4) * 6.2831853;
+        float a0 = hashf(hb >> 4) * TAU;
         int4 rects[4];
         int nr = 0;
         rects[nr++] = int4(c - 1, c + 2);

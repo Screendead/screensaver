@@ -6,7 +6,7 @@ static bool buildHamlet(texture2d<float, access::read> hm, thread SiteGen& G, in
     int nr = 0;
     rects[nr++] = int4(c - 2, c + 3);
     int houses = 0, want = 3 + int(h % 3u);
-    float a0 = hashf(pcg(h + 1u)) * 6.2831853;
+    float a0 = hashf(pcg(h + 1u)) * TAU;
     bool stilt = style == ST_STILT, pueblo = style == ST_PUEBLO, yurt = style == ST_YURT;
     float rIn = stilt || pueblo ? 5.0 : 8.0, rSpan = pueblo ? 12.0 : 26.0;
     for (int k = 0; k < 64 && houses < want && G.np < MAX_PARTS - 8 && G.nl < MAX_LAMPS - 3; k++) {
@@ -123,7 +123,7 @@ static bool tryProp(texture2d<float, access::read> hm, thread SiteGen& G, int2 c
 // A prop somewhere on a ring round the site centre, lying along the ring.
 static bool ringProp(texture2d<float, access::read> hm, thread SiteGen& G, int2 c, int type, int mat, int style, float ref,
                      int Lp, int Dp, float r0, uint ph) {
-    float a0 = hashf(ph) * 6.2831853;
+    float a0 = hashf(ph) * TAU;
     for (int t = 0; t < 12; t++) {
         float a = a0 + float(t) * 2.39996, r = r0 + float(t % 3);
         float2 dir = float2(cos(a), sin(a));
@@ -181,7 +181,7 @@ static void hamletProps(texture2d<float, access::read> hm, thread SiteGen& G, in
         int fl = H.y0;
         float3 door = houseDoor(H, uint(G.s.head.w), k, true);
         int2 dc = int2(floor(door.xy));
-        float da = hashf(pcg(uint(G.s.head.w) + uint(k))) * 6.2831853;
+        float da = hashf(pcg(uint(G.s.head.w) + uint(k))) * TAU;
         for (int pi = 0; pi < 2; pi++) {
             PropKind pk = propFor(style, hh >> (pi * 5));
             if (pi == 1 && pk.type == propFor(style, hh).type) continue;

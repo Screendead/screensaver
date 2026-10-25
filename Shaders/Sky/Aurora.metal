@@ -9,7 +9,7 @@ static float3 aurora(thread const Ctx& x, float3 d) {
     uint n = uint(max(int(x.lights.z), 0));
     if (x.L.night <= 0.0 || d.y < 0.02 || hashf(pcg(n * 7919u + x.seed + 900u)) >= 0.25) return 0;
     float env = x.L.night * smoothstep(0.05, 0.2, x.lights.y) * smoothstep(0.97, 0.86, x.lights.y);
-    float a = hashf(pcg(x.seed + 901u)) * 6.2831853;
+    float a = hashf(pcg(x.seed + 901u)) * TAU;
     float2 P = float2(sin(a), cos(a)), Q = float2(-P.y, P.x);
     float dp = dot(d.xz, P);
     if (env <= 0.0 || dp <= 0.0) return 0;

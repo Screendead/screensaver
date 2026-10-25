@@ -95,7 +95,7 @@ kernel void bakeLights(texture2d<float, access::write> lm [[texture(0)]],
                 float dd = length(p - lp.xz);
                 if (dd >= R || all(ls.rgb == 0.0)) continue;
                 float3 e = ls.rgb * LAMP_I[int(lp.w)] / (1.0 + (dd / (0.25 * R)) * (dd / (0.25 * R))) * smoothstep(R, 0.6 * R, dd);
-                float wgt = dot(e, float3(0.3, 0.59, 0.11));
+                float wgt = dot(e, LUMA);
                 E += e;
                 P += float4(lp.xyz, 1.0) * wgt;
             }

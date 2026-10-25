@@ -15,7 +15,7 @@ static float4 smoke(thread const Ctx& x, device const Site* sites, device const 
         int kind = int(lp.w);
         float strength = kind == L_WINDOW ? 0.4 : 0.8;
         // Beacons and ritual fires smoke only on the nights they burn.
-        if (kind == L_BEACON || kind == L_RITUAL) strength *= saturate(dot(state[li].rgb, float3(0.3, 0.59, 0.11)) * 4.0);
+        if (kind == L_BEACON || kind == L_RITUAL) strength *= saturate(dot(state[li].rgb, LUMA) * 4.0);
         if (strength <= 0.0) continue;
         // The whole plume lies within 16 of a point 14 up and 6 downwind.
         float3 mid = b0 + float3(wind.x * 6.0, 14.0, wind.y * 6.0) - o;

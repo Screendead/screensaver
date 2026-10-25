@@ -36,7 +36,7 @@ static inline Tower towerFromRec(TowerRec R) {
 // the wall, or into the court). A jog's face nearly across the plane would otherwise turn to the light on its own and
 // rule the wall with a line per jog.
 static float3 towerWallPlane(Tower T, float2 wc, float3 n) {
-    float seg = 6.2831853 / float(T.N);
+    float seg = TAU / float(T.N);
     float2 d0 = wc - T.c;
     // The highest stage whose plan holds the column (none: the plinth, the base's polygon).
     int m = -1;
@@ -137,7 +137,7 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
     // Along a side face, the distance along the plan's face it lies on: by the face's own axis, the faces of each jog of
     // a diagonal face would take different stone.
     float2 dq = wq - R.a.xy;
-    float aq = atan2(dq.y, dq.x) - R.b.w, sq = 6.2831853 / R.b.z;
+    float aq = atan2(dq.y, dq.x) - R.b.w, sq = TAU / R.b.z;
     float fq = floor(aq / sq);
     float along = n.y != 0 ? wq.x : length(dq) * sin(aq - sq * fq - 0.5 * sq) + 97.0 * fq;
     Climate c = climateL(x.tr, k, (float2(v.xz) + 0.5) * cs);
@@ -145,7 +145,7 @@ static void towerSurface(thread const Ctx& x, thread Surface& s, int k, int3 v, 
     float dry = smoothstep(0.35, 0.7, desertAmount(c));
     // The plan at the column: out from the base's face, and whether the column stands outside the base (roots).
     float2 dc0 = w + 0.5 * cs - R.a.xy;
-    float seg = 6.2831853 / R.b.z;
+    float seg = TAU / R.b.z;
     float ang = atan2(dc0.y, dc0.x) - R.b.w;
     float am = ang - seg * floor(ang / seg) - 0.5 * seg;
     float reff = length(dc0) * cos(am);

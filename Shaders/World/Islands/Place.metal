@@ -27,7 +27,7 @@ static void isleFallPlace(thread IsleRec& r, float floor0, uint seed) {
     r.fa = 0;
     r.f = 0;
     if (r.R < 60.0 || hashf(pcg(r.h + 16u)) >= 0.45) return;
-    float az = hashf(pcg(r.h + 17u)) * 6.2831853;
+    float az = hashf(pcg(r.h + 17u)) * TAU;
     float2 u = float2(cos(az), sin(az));
     float re = isleReach(r.R, r.h);
     float2 lip = 0;

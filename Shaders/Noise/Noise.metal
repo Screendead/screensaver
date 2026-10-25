@@ -8,7 +8,7 @@ static inline uint hash3i(int3 p, uint s) { return pcg(uint(p.x) * 1597334677u ^
 static inline float hashf(uint h) { return float(h & 0xffffffu) / 16777215.0; }
 
 static inline float2 grad2(int2 c, uint s) {
-    float a = hashf(hash2i(c, s)) * 6.2831853;
+    float a = hashf(hash2i(c, s)) * TAU;
     return float2(cos(a), sin(a));
 }
 
@@ -26,7 +26,7 @@ static inline float perlin2(float2 p, uint s) {
 static inline float3 grad3(int3 c, uint s) {
     uint h = hash3i(c, s);
     float z = hashf(h) * 2.0 - 1.0;
-    float a = hashf(pcg(h)) * 6.2831853;
+    float a = hashf(pcg(h)) * TAU;
     float r = sqrt(max(0.0, 1.0 - z * z));
     return float3(r * cos(a), r * sin(a), z);
 }

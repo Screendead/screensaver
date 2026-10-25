@@ -110,7 +110,7 @@ static inline float3 isleSpan(IsleRec r, float2 p, uint seed, int s, thread uint
     int form = isleForm(R, h);
     if (form == 1) top += isleCrag(R, h) * (1.0 - d) * (1.0 - d) * (0.7 + 0.3 * perlin2(p / 15.0, seed + 729u));
     if (form == 2) {
-        float th1 = hashf(pcg(h + 32u)) * 6.2831853;
+        float th1 = hashf(pcg(h + 32u)) * TAU;
         top -= isleTilt(R, h) * 0.5 * (1.0 + clamp(dot(q, float2(cos(th1), sin(th1))) / isleReach(R, h), -1.0, 1.0));
     }
     float tl = floor(top / 5.0);
@@ -123,7 +123,7 @@ static inline float3 isleSpan(IsleRec r, float2 p, uint seed, int s, thread uint
     // A spire: steep flanks half its depth, then a long taper to a point.
     float t = form == 1 ? 0.5 * pow(1.0 - d, 0.3) + 0.5 * pow(1.0 - d, 1.3) : pow(1.0 - d, mix(mix(0.5, 0.9, hashf(pcg(h + 34u))), 1.0, small));
     if (form == 3) {
-        float th2 = hashf(pcg(h + 33u)) * 6.2831853;
+        float th2 = hashf(pcg(h + 33u)) * TAU;
         t = pow(1.0 - length(ql - float2(cos(th2), sin(th2)) * 0.35 * R) / (max(e, 4.0) + 0.35 * R), 0.55);
     }
     float rag = 0.6 + 0.4 * ridged2(p / (0.3 * R + 8.0), 2, seed + 705u);
@@ -134,7 +134,7 @@ static inline float3 isleSpan(IsleRec r, float2 p, uint seed, int s, thread uint
         int n = 2 + int(pcg(h + 14u) % 2u);
         for (int i = 0; i < n; i++) {
             uint hi = pcg(h + 20u + uint(i));
-            float a = hashf(hi) * 6.2831853, rd = R * (0.15 + 0.35 * hashf(pcg(hi)));
+            float a = hashf(hi) * TAU, rd = R * (0.15 + 0.35 * hashf(pcg(hi)));
             float2 sc = r.c + float2(cos(a), sin(a)) * rd;
             float f = max(0.0, 1.0 - length(p - sc) / (18.0 + 10.0 * hashf(pcg(hi + 1u))));
             th += r.D * 0.3 * f * f;
@@ -180,7 +180,7 @@ static inline float3 isleSpan(IsleRec r, float2 p, uint seed, int s, thread uint
                         float Lr = 5.0 + 20.0 * pow(hashf(pcg(gh + 3u)), 2.0), r0 = 1.2 + 1.4 * hashf(pcg(gh + 4u));
                         dr = max(dr, Lr * pow(saturate(1.0 - length(p - c1) / r0), 1.6));
                         if (hashf(pcg(gh + 5u)) < 0.4) {
-                            float an = hashf(pcg(gh + 6u)) * 6.2831853;
+                            float an = hashf(pcg(gh + 6u)) * TAU;
                             float2 c2 = c1 + float2(cos(an), sin(an)) * 1.3 * r0;
                             dr = max(dr, 0.55 * Lr * pow(saturate(1.0 - length(p - c2) / (0.7 * r0)), 1.6));
                         }

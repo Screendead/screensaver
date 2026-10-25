@@ -97,7 +97,7 @@ static inline float3 coralColour(Coral cr) {
              : cr.kind == CORAL_STAG ? (warm ? float3(0.34, 0.20, 0.13) : mix(float3(0.27, 0.18, 0.19), float3(0.28, 0.17, 0.12), k))
              : cr.kind == CORAL_TABLE ? mix(float3(0.15, 0.22, 0.17), float3(0.26, 0.23, 0.15), k)
              : (warm ? float3(0.38, 0.15, 0.22) : mix(float3(0.31, 0.14, 0.17), float3(0.27, 0.15, 0.24), k));
-    c = mix(float3(dot(c, float3(0.3, 0.59, 0.11))), c, 1.1);
+    c = mix(float3(dot(c, LUMA)), c, 1.1);
     return mix(c, c * 1.08, cr.tip);
 }
 
@@ -114,7 +114,7 @@ static inline float3 coralGlowCode(uint code, float time) {
     if ((code & 16u) == 0u) return 0;
     uint gh = reefMix((code >> 8) ^ 0x5bd1e995u);
     if (byteOf(gh, 0) >= 0.24) return 0;
-    return coralGlowHue(gh) * (0.7 + 0.3 * sin(time * (0.4 + 0.3 * byteOf(gh, 2)) + 6.2831853 * byteOf(gh, 3))) * ((code & 128u) != 0u ? 1.0 : 0.4);
+    return coralGlowHue(gh) * (0.7 + 0.3 * sin(time * (0.4 + 0.3 * byteOf(gh, 2)) + TAU * byteOf(gh, 3))) * ((code & 128u) != 0u ? 1.0 : 0.4);
 }
 
 // The reef floor between colonies: sand under algal turf and rubble.

@@ -22,7 +22,7 @@ kernel void bakeHorizon(device float* out [[buffer(0)]],
     int levels = int(f.fade.z);
     Terrain tr { hm, coarse, coarse, coarse, hm, f.lod, f.mapInfo.xy, f.mapInfo.z, levels,
                  f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, 0.0, hx, gx, cg, cg2, hb, uint(f.mapInfo.w), giants, hx, nullptr, 0, cb };
-    float a = (float(gid) + 0.5) * 6.2831853 / float(HORIZON_BINS);
+    float a = (float(gid) + 0.5) * TAU / float(HORIZON_BINS);
     float2 dir = float2(sin(a), cos(a));
     float3 o = f.camPos.xyz;
     float best = -1e9, iLo = 1e9, iHi = -1e9;
@@ -72,7 +72,7 @@ static inline bool aboveHorizon(device const float* hz, float3 d) {
     float l = length(d.xz);
     if (l < 1e-4) return d.y > 0.0;
     float a = atan2(d.x, d.z);
-    int i = int(floor((a < 0.0 ? a + 6.2831853 : a) / 6.2831853 * float(HORIZON_BINS)));
+    int i = int(floor((a < 0.0 ? a + TAU : a) / TAU * float(HORIZON_BINS)));
     int i0 = (i + HORIZON_BINS - 1) % HORIZON_BINS, i1 = i % HORIZON_BINS, i2 = (i + 1) % HORIZON_BINS;
     float t = max(max(hz[i0], hz[i1]), hz[i2]);
     float e = d.y / l;

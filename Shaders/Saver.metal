@@ -6,6 +6,7 @@ using namespace metal;
 // own: each is included once, in this order, which puts every declaration before its use.
 
 #include "Common/Frame.metal"
+#include "Common/Constants.metal"
 #include "Common/FunctionConstants.metal"
 #include "Common/Color.metal"
 #include "Noise/Noise.metal"

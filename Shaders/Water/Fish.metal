@@ -8,7 +8,7 @@ struct FishSample { float wake; float body; float shade; float glint; };
 
 static inline float2 fishWander(float t, uint h) {
     uint g = pcg(h + 1u);
-    float4 ph = float4(byteOf(g, 0), byteOf(g, 1), byteOf(g, 2), byteOf(g, 3)) * 6.2831853;
+    float4 ph = float4(byteOf(g, 0), byteOf(g, 1), byteOf(g, 2), byteOf(g, 3)) * TAU;
     return 5.5 * float2(sin(0.31 * t + ph.x) + 0.45 * sin(0.83 * t + ph.y), sin(0.27 * t + ph.z) + 0.45 * sin(0.71 * t + ph.w));
 }
 
@@ -18,7 +18,7 @@ static inline float2 fishDart(float t, uint h, float period) {
     float k = floor(u), f = u - k;
     uint hk = hash2i(int2(int(k), 7), h);
     if (hashf(hk) > 0.65) return 0;
-    float a = hashf(pcg(hk)) * 6.2831853;
+    float a = hashf(pcg(hk)) * TAU;
     return float2(cos(a), sin(a)) * 4.5 * (smoothstep(0.0, 0.08, f) - smoothstep(0.3, 1.0, f));
 }
 
@@ -52,7 +52,7 @@ static inline FishSample fishAt(thread const Ctx& x, float2 q, float2 bs, bool s
     int n = single ? 1 : 4 + int((h >> 4) % 4u);
     float L = single ? 1.3 : 0.55;
     uint hs = pcg(h + 9u);
-    float sa = byteOf(hs, 0) * 6.2831853;
+    float sa = byteOf(hs, 0) * TAU;
     float2 rot = float2(cos(sa), sin(sa)) * spread;
     if (wake) {
         // Calm water stays dark: unless a dart's outward rush or a fin flick fell within the last second, nothing is
@@ -116,7 +116,7 @@ static inline FishSample fishAt(thread const Ctx& x, float2 q, float2 bs, bool s
         float2 hd = normalize(c0 - (C + fishWander(t - 0.12, h) + fishDart(t - 0.12, h, per)) + float2(1e-4, 0));
         for (int i = 0; i < n; i++) {
             uint hi = pcg(h + uint(i) * 31u + 11u);
-            float wf = 0.8 + 0.5 * byteOf(hi, 3), pf = 6.2831853 * byteOf(hi, 2);
+            float wf = 0.8 + 0.5 * byteOf(hi, 3), pf = TAU * byteOf(hi, 2);
             float2 sp = FISH_SPOTS[i] * (0.75 + 0.5 * byteOf(hi, 0));
             float2 P0 = c0 + float2(sp.x * rot.x - sp.y * rot.y, sp.x * rot.y + sp.y * rot.x);
             float2 a = q - P0;

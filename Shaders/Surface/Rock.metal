@@ -101,11 +101,11 @@ static inline float3 sandRipples(int2 v, float2 uv, float2 w, float fp, float ti
     float psi = dot(uv, wind) + 7.0 * perlin2(q / 26.0, seed + 60u) + 1.6 * perlin2(q / 7.0, seed + 61u);
     float phase = ipm / (5.0 * lambda) + psi / lambda - time * 0.02;
     // Low dune swells, five ripples apart, carry the pattern into the middle distance.
-    float swell = sin((ipm / 20.0 + psi / 4.0 - time * 0.004) * 6.2831853) * (1.0 - smoothstep(0.4, 1.4, fp));
-    float x = phase * 6.2831853;
+    float swell = sin((ipm / 20.0 + psi / 4.0 - time * 0.004) * TAU) * (1.0 - smoothstep(0.4, 1.4, fp));
+    float x = phase * TAU;
     // Long gentle stoss, short steep lee.
     float r = sin(x) + 0.35 * sin(2.0 * x - 0.9);
-    float dr = (cos(x) + 0.7 * cos(2.0 * x - 0.9)) * 6.2831853 / lambda;
+    float dr = (cos(x) + 0.7 * cos(2.0 * x - 0.9)) * TAU / lambda;
     float calm = fp < 0.24 ? smoothstep(-0.35, 0.35, perlin2(q / 48.0, seed + 62u)) : 0.0;
     float amp = mix(0.25, 1.0, calm) * (1.0 - smoothstep(0.08, 0.24, fp));
     // Streaks drawn out along the wind give broad plains a calm grain at any distance.
