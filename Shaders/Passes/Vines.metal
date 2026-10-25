@@ -18,11 +18,9 @@ fragment float4 vineFragment(VOut in [[stage_in]], float4 dst [[color(0)]], cons
                              constant VineTable* vines [[buffer(10)]], texture2d_array<float> vineFine [[texture(18)]],
                              texture2d_array<uint> vineCoarse [[texture(19)]], texture2d_array<uint> vineSuper [[texture(20)]],
                              texture2d_array<uint> vineBands [[texture(21)]]) {
-    float2 ndc = in.uv * 2.0 - 1.0;
-    ndc.y = -ndc.y;
-    ndc += f.jitter.xy;
+    float2 ndc = screenNdc(in.uv) + f.jitter.xy;
     float tanH = f.camPos.w;
-    float3 d = normalize(f.camFwd.xyz + f.camRight.xyz * ndc.x * tanH * f.camFwd.w + f.camUp.xyz * ndc.y * tanH);
+    float3 d = viewRay(f, ndc);
     float3 o = f.camPos.xyz;
     int levels = int(f.fade.z);
     float gmax = f.misc.y;
@@ -31,7 +29,7 @@ fragment float4 vineFragment(VOut in [[stage_in]], float4 dst [[color(0)]], cons
     Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, cg2, hb, uint(f.mapInfo.w), giants, pvTex, towers, 0 };
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
             2.0 * tanH * f.resolution.z, f.misc.w, makeLight(f.sunDir.xyz, uint(f.mapInfo.w), f.lights.z),
-            fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
+            pixelDither(f, in.pos.xy),
             cloudTex, f.cloud.xyz, st, sites, lampPos, lampState, lightMap, lightDir, f.lights, shadowNear, shadowFar,
             f.misc2.z == 14 ? 2.0 : f.shadow.x, (int(f.shadow.y) & 1) != 0, int(f.shadow.y), slowTex,
             f.slowCloud.w == f.camRight.w ? f.slowCloud : float4(0), 0u };

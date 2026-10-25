@@ -18,11 +18,9 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
                               device const float4* birds [[buffer(5)]], device const float* horizon [[buffer(6)]],
                               constant uint* tiles [[buffer(7)]], device const GiantRec* giants [[buffer(8)]], constant TowerTable* towers [[buffer(9)]],
                               constant IsleTable* isleTab [[buffer(10)]]) {
-    float2 ndc = in.uv * 2.0 - 1.0;
-    ndc.y = -ndc.y;
-    ndc += f.jitter.xy;
+    float2 ndc = screenNdc(in.uv) + f.jitter.xy;
     float tanH = f.camPos.w;
-    float3 d = normalize(f.camFwd.xyz + f.camRight.xyz * ndc.x * tanH * f.camFwd.w + f.camUp.xyz * ndc.y * tanH);
+    float3 d = viewRay(f, ndc);
     float3 o = f.camPos.xyz;
 
     int levels = int(f.fade.z);
@@ -35,7 +33,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     tr.caveFire = mix(1.0, 0.02, smoothstep(-0.02, 0.05, f.lights.x)) * (1.0 - 0.75 * smoothstep(0.6, 0.66, f.lights.y));
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
             2.0 * tanH * f.resolution.z, f.misc.w, makeLight(f.sunDir.xyz, uint(f.mapInfo.w), f.lights.z),
-            fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
+            pixelDither(f, in.pos.xy),
             cloudTex, f.cloud.xyz, st, sites, lampPos, lampState, lightMap, lightDir, f.lights, shadowNear, shadowFar,
             f.misc2.z == 14 ? 2.0 : f.shadow.x, (int(f.shadow.y) & 1) != 0, int(f.shadow.y), slowTex,
             f.slowCloud.w == f.camRight.w ? f.slowCloud : float4(0), 0u };

@@ -59,11 +59,8 @@ vertex MoteOut bioVertex(uint vid [[vertex_id]], uint iid [[instance_id]], const
 
 // Adds a bug's glow along the pixel's ray up to the depth the scene left in alpha.
 fragment float4 bioFragment(MoteOut in [[stage_in]], float4 dst [[color(0)]], constant Frame& f [[buffer(0)]]) {
-    float2 ndc = in.pos.xy * f.resolution.zw * 2.0 - 1.0;
-    ndc.y = -ndc.y;
-    ndc += f.jitter.xy;
-    float tanH = f.camPos.w;
-    float3 d = normalize(f.camFwd.xyz + f.camRight.xyz * ndc.x * tanH * f.camFwd.w + f.camUp.xyz * ndc.y * tanH);
+    float2 ndc = screenNdc(in.pos.xy * f.resolution.zw) + f.jitter.xy;
+    float3 d = viewRay(f, ndc);
     float3 v = in.m - f.camPos.xyz;
     float tm = dot(v, d);
     if (tm > abs(dst.a)) return dst;

@@ -43,7 +43,7 @@ using namespace metal;
 #include "Trace/Terrain.metal"
 #include "Trace/March.metal"
 #include "Sky/Horizon.metal"
-#include "Passes/Fullscreen.metal"
+#include "Passes/Screen.metal"
 #include "Sky/Light.metal"
 #include "Sky/Sky.metal"
 #include "Light/BioHue.metal"

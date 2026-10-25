@@ -78,10 +78,9 @@ fragment float4 taaFragment(VOut in [[stage_in]], texture2d<float> cur [[texture
         return fresh;
     }
 
-    float2 ndc = in.uv * 2.0 - 1.0;
-    ndc.y = -ndc.y;
+    float2 ndc = screenNdc(in.uv);
     float tanH = f.camPos.w;
-    float3 d = normalize(f.camFwd.xyz + f.camRight.xyz * ndc.x * tanH * f.camFwd.w + f.camUp.xyz * ndc.y * tanH);
+    float3 d = viewRay(f, ndc);
     float3 wp = f.camPos.xyz + d * min(depth, 1e5);
     float3 v = wp - f.prevPos.xyz;
     float z = dot(v, f.prevFwd.xyz);
