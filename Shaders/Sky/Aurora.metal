@@ -37,7 +37,7 @@ static float3 aurora(thread const Ctx& x, float3 d) {
 
 // Shooting stars on a dark night: one in each 30 s slot of the clock, everything about it hashed from the slot, so
 // nothing is kept between frames. The clock is wall time and dark sky lasts about 2 minutes of each 12-minute day, so
-// that is 3 to 5 a night, never two within 10 s; tools/meteors.py mirrors the schedule. It is placed on the screen's
+// that is 3 to 5 a night, never two within 10 s; tools/sky/meteors.py mirrors the schedule. It is placed on the screen's
 // 864-cell dither grid and starts in the upper part of the frame, where the sky is. Its width is at least a cell and
 // at least a scene sample, so the battery path's coarser scene still draws it unbroken.
 static float3 meteor(constant Frame& f, float night, float3 d, float time, uint seed) {

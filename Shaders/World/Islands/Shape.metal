@@ -5,7 +5,7 @@
 // toroidal windows round the map's middle wider than the coarsest ring's window plus a massif's reach.
 constant float ISLE_CELL = 640.0;
 constant float ISLE_MCELL = 3200.0;
-// Must match Islands.win and Islands.mwin in Sources/Islands.swift.
+// Must match Islands.win and Islands.mwin in Sources/StrataCore/Islands/Islands.swift.
 constant int ISLE_WIN = 60;
 constant int ISLE_MWIN = 13;
 constant int ISLE_SLOTS = ISLE_WIN * ISLE_WIN + ISLE_MWIN * ISLE_MWIN;
@@ -13,7 +13,7 @@ constant int ISLE_SLOTS = ISLE_WIN * ISLE_WIN + ISLE_MWIN * ISLE_MWIN;
 // c: centre (world xz); R: radius (> 0 standing, < 0 dropped for a neighbour it would overlap, 0 none); A: the top at
 // the rim's line; D: the keel's depth; B: the highest ground under it; K: a bound under its lowest underside; h: hash.
 // A waterfall (f.w > 0): fa its bearing out from the lip and half its width; f the lip column's centre, the water's top
-// there and the fall's foot. Must match IsleRec in Sources/Islands.swift.
+// there and the fall's foot. Must match IsleRec in Sources/StrataCore/Islands/IslandInfo.swift.
 struct IsleRec { int2 cell; float2 c; float R; float A; float D; float B; float K; uint h; float2 fa; float4 f; };
 
 static inline int isleSlot(int2 cell, bool massif) {
@@ -30,7 +30,7 @@ static inline float isleReach(float R, uint h) { return isleStretch(R, h) * (1.4
 
 // Its form by hash: 0 a lens; 1 a spire (one in five of the smaller ones), sheer flanks over a keel twice as deep and a
 // crag on top up to isleCrag; 2 tilted, its top and keel dropping toward one side by up to isleTilt; 3 a prow, its keel's
-// deepest point off toward one side. Must match Islands.form in Sources/Islands.swift.
+// deepest point off toward one side. Must match Islands.form in Sources/StrataCore/Islands/Islands.swift.
 static inline int isleForm(float R, uint h) {
     float c = hashf(pcg(h + 30u));
     return R >= 30.0 && R <= 130.0 && c < 0.2 ? 1 : c < 0.45 ? 2 : c < 0.7 ? 3 : 0;
@@ -40,7 +40,7 @@ static inline float isleDepth(float R, uint h) {
     float u = hashf(pcg(h + 5u));
     return isleForm(R, h) == 1 ? R * mix(1.8, 2.6, u) + 20.0 : R < 55.0 ? R * mix(0.6, 1.0, u) + 6.0 : R * mix(0.7, 1.4, u) + 10.0;
 }
-// Must match Islands.crag in Sources/Islands.swift.
+// Must match Islands.crag in Sources/StrataCore/Islands/Islands.swift.
 static inline float isleCrag(float R, uint h) { return isleForm(R, h) == 1 ? 0.3 * R : 0.0; }
 static inline float isleTilt(float R, uint h) { return isleForm(R, h) == 2 ? min(R * (0.12 + 0.28 * hashf(pcg(h + 31u))), 45.0) : 0.0; }
 
@@ -206,7 +206,7 @@ static inline float3 isleSpan(IsleRec r, float2 p, uint seed, int s, thread uint
 }
 
 // How far out from its lip (lipD from the centre) a fall's foot lands (drop L), its whole sheet inside the island's
-// reach. Must match Islands.fallOut in Sources/Islands.swift.
+// reach. Must match Islands.fallOut in Sources/StrataCore/Islands/Islands.swift.
 static inline float isleFallOut(float L, float reach, float lipD) { return clamp(min(0.09 * L, reach - 6.0 - lipD), 2.0, 24.0); }
 // The side a fall drifts to and its spray blows, by its lip. Must match Islands.fallSide.
 static inline float isleFallSide(float2 lip) { return (int(floor(lip.x + lip.y)) & 1) != 0 ? 1.0 : -1.0; }

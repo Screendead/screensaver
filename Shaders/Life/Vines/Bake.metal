@@ -8,16 +8,16 @@
 // map: bottom, top; top <= bottom holds none), cells of 8 (coarse) and of 32 (super) summing them.
 constant int VINE_W = 512;
 constant int VINE_FINE = VINE_W / 2, VINE_COARSE = VINE_W / 8, VINE_SUPER = VINE_W / 32;
-// Must match Vines.slots in Sources/Vines.swift.
+// Must match Vines.slots in Sources/Strata/World/Vines.swift.
 constant int VINE_SLOTS = 6;
 
-// Must match VineRec in Sources/Vines.swift. a: axis xz (map-local), G, yT; b: the strands' box (map-local) in xz
+// Must match the records Vines writes (Vines.recordSize, Sources/Strata/World/Vines.swift). a: axis xz (map-local), G, yT; b: the strands' box (map-local) in xz
 // (lo) and the strands' lowest bottom and highest top; c: hash, kind, slice; d: window origin xz (world), the box's
 // hi xz (map-local).
 struct VineRec { float4 a; float4 b; uint4 c; int4 d; };
 struct VineTable { int4 n; VineRec r[VINE_SLOTS]; };
 
-// Must match VineBake in Sources/Vines.swift. a: axis xz (world), G, yT; b: window origin xz (world); c: hash, kind,
+// Must match VineBake in Sources/Strata/GPU/VineBake.swift. a: axis xz (world), G, yT; b: window origin xz (world); c: hash, kind,
 // seed, slice.
 struct VineBake { float4 a; int4 b; uint4 c; };
 

@@ -7,7 +7,7 @@ import simd
 // decides it on the GPU for a square of world cells round the camera's; the list feeds the camera, and the records
 // nearest the camera are the shader's table (fragment buffer 9; stage 3's giants hold 8).
 final class Towers {
-    // Must match TOWER_CELL, TOWER_MEMBERS and TOWER_TABLE in Shaders/Saver.metal.
+    // Must match TOWER_CELL, TOWER_MEMBERS and TOWER_TABLE in Shaders/World/Towers/Layout.metal.
     static let cell = 9000.0, members = 4, tableSize = 16
     // Cells on a side of the square round the camera's cell: every tower out past the world's edge (13.8k).
     static let grid = 5

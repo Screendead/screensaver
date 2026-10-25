@@ -9,7 +9,7 @@ static inline float2 seedOffset(uint seed) {
 // that holds giants hundreds of voxels across, so these regions come from their own fields, 2 km and more across
 // (jungle about a tenth of the land, old growth about a twentieth). p is seed-offset world position. The textures
 // bake only the climate they push; the fields are evaluated wherever they are read.
-// A biome chosen from the menu rides in the seed: top byte 0xFF, then the biome (1-9, Biome in Sources/Menu.swift); 0 is
+// A biome chosen from the menu rides in the seed: top byte 0xFF, then the biome (1-9, Biome in Sources/StrataCore/Config/Biome.swift); 0 is
 // the whole world. The world is then that biome everywhere, its climate fields squeezed into the biome's ranges.
 static inline uint pinnedBiome(uint seed) { return seed >> 24 == 0xFFu ? (seed >> 20) & 15u : 0u; }
 
@@ -78,7 +78,7 @@ kernel void bakeClimate(texture2d<float, access::write> out [[texture(0)]],
 }
 
 // The province fields baked around the camera (bakeProvinces): PROV_N texels a side, PROV_CELL voxels each, held
-// toroidally by world texel. Must match Renderer.provN and provCell in Sources/Renderer.swift.
+// toroidally by world texel. Must match Renderer.provN and provCell in Sources/Strata/Render/Renderer.swift.
 constant int PROV_N = 512;
 constant float PROV_CELL = 96.0;
 

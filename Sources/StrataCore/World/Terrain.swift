@@ -18,7 +18,7 @@ package final class Terrain {
     package var isles: [IslandInfo] = []
     // The caves of the cave table (placeCaves), world xz of each mouth.
     package var caves: [CaveRec] = []
-    // Whether the jungle's roof (Shaders/Saver.metal jungleCanopy) may stand on this map.
+    // Whether the jungle's roof (jungleCanopy in Shaders/Life/Jungle.metal) may stand on this map.
     package var jungle = false
     // The jungle's extent on this map: whether the province reaches each point of a 64-voxel grid over it.
     package var jungleGrid: [Bool] = []

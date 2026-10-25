@@ -31,7 +31,7 @@ extension Renderer {
             let bands = Renderer.shadowBands[c], rows = Renderer.shadowN / bands
             let todo = full ? bands : 1
             for _ in 0..<todo {
-                // 96: SHADOW_NEAR in Shaders/Saver.metal, the traced ray's reach.
+                // 96: SHADOW_NEAR in Shaders/Light/Shadows.metal, the traced ray's reach.
                 var b = ShadowBake(key: SIMD4(Float(key.x), Float(key.y), Float(key.z), Float(max(0.8 * 96 * cosE, cell))),
                                    cam: SIMD4(Float(cam.x), Float(cam.y), Float(cell), Float(levels)),
                                    rows: SIMD4(Int32(shadowBand[c] * rows), Int32(floor(cam.x / cell)), Int32(floor(cam.y / cell)), 0))

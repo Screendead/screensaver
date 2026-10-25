@@ -10,7 +10,7 @@ extension Renderer {
             cloudTex = device.makeTexture(descriptor: td)
         }
         guard let cloudTex else { return }
-        // Must match CLOUD_DRIFT in Shaders/Saver.metal.
+        // Must match CLOUD_DRIFT in Shaders/Sky/CloudField.metal.
         let drift = SIMD2(cos(0.6), sin(0.6)) * 4.8 * Double(Float(simTime))
         let cam = camera.xz - drift
         if cloudCenter.map({ simd_length(cam - $0) > span * 0.2 }) ?? true,

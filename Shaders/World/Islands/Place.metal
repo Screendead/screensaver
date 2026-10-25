@@ -170,7 +170,7 @@ kernel void resolveIslands(device IsleRec* T [[buffer(0)]],
     T[gid].R = drop ? -R : R;
 }
 
-// The shading table (fragment buffer 10; towers hold 9, giants 8): the islands nearest the camera (Sources/Islands.swift).
+// The shading table (fragment buffer 10; towers hold 9, giants 8): the islands nearest the camera (Sources/StrataCore/Islands/Islands.swift).
 // a: centre xz, reach, the underside's mean height; b: radius, top, keel, its mist's fade; c: its fall's lip xz, top and
 // foot (zero: none); mb: its mist bank's bounding sphere (radius 0: none), mp its puffs (centre, radius); o.x the square of
 // how far its sky occlusion reaches (Islands.occlusionReach). World coordinates.

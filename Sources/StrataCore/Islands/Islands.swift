@@ -1,11 +1,11 @@
 import simd
 
 package enum Islands {
-    // Must match ISLE_WIN, ISLE_MWIN and ISLE_SLOTS (and IsleRec's 64 bytes) in Shaders/Saver.metal.
+    // Must match ISLE_WIN, ISLE_MWIN and ISLE_SLOTS (and IsleRec's 64 bytes) in Shaders/World/Islands/Shape.metal.
     static let win = 60, mwin = 13
     package static let slots = win * win + mwin * mwin
     package static let recordSize = 64
-    // Must match ISLE_TABLE and IsleShade in Shaders/Saver.metal: the islands the shading reads, nearest the camera first.
+    // Must match ISLE_TABLE and IsleShade in Shaders/World/Islands/Place.metal: the islands the shading reads, nearest the camera first.
     static let tableSize = 16
     static let mistPuffs = 6
     static let entryBytes = 80 + mistPuffs * 16
@@ -15,10 +15,10 @@ package enum Islands {
         (r > 40 && (r <= 210 || r >= 420) && Provinces.hashf(Provinces.pcg(h &+ 10)) < 0.33) ? 1.5 : 1.0
     }
 
-    // How far out from its lip (lipD from the centre) a fall's foot lands. Must match isleFallOut in Shaders/Saver.metal.
+    // How far out from its lip (lipD from the centre) a fall's foot lands. Must match isleFallOut in Shaders/World/Islands/Shape.metal.
     static func fallOut(_ L: Double, _ reach: Double, _ lipD: Double) -> Double { max(2, min(24, min(0.09 * L, reach - 6 - lipD))) }
 
-    // Its form (Shaders/Saver.metal isleForm) and the crag a spire carries over its top (isleCrag).
+    // Its form (isleForm in Shaders/World/Islands/Shape.metal) and the crag a spire carries over its top (isleCrag).
     static func form(_ r: Double, _ h: UInt32) -> Int {
         let c = Provinces.hashf(Provinces.pcg(h &+ 30))
         return r >= 30 && r <= 130 && c < 0.2 ? 1 : c < 0.45 ? 2 : c < 0.7 ? 3 : 0

@@ -15,7 +15,7 @@ final class World {
     // not the column's 8), and the CPU copy the camera steers by.
     final class Buffer {
         let tex: MTLTexture
-        // Up to two more gaps per column below the column texture's (Shaders/Saver.metal packGaps).
+        // Up to two more gaps per column below the column texture's (packGaps in Shaders/World/Column.metal).
         let gx: MTLTexture
         let hmax: MTLTexture
         let hmax0: MTLTexture
@@ -31,7 +31,7 @@ final class World {
         let giants: MTLBuffer
         // The island table around this map (placeIslands).
         let isles: MTLBuffer
-        // Band mips (bandTop in Shaders/Saver.metal), one view per mip.
+        // Band mips (bandTop in Shaders/Maps/Mips.metal), one view per mip.
         let band: MTLTexture
         let bandViews: [MTLTexture]
         var origin = SIMD2<Int32>(Int32.min, Int32.min)

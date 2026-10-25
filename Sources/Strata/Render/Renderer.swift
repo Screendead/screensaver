@@ -19,7 +19,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     // The glowing bugs (bioFragment), drawn over the scene in a pass of their own from sunset.
     let bioPipeline: MTLRenderPipelineState
     let cloudPipeline: MTLComputePipelineState
-    // Shadow-height maps (see bakeShadowHeight in Shaders/Saver.metal): near and far cascades, a band rebaked per frame.
+    // Shadow-height maps (see bakeShadowHeight in Shaders/Light/Shadows.metal): near and far cascades, a band rebaked per frame.
     let shadowPipeline: MTLComputePipelineState
     let shadowMaps: [MTLTexture]
     static let shadowN = 1024, shadowCell = 8.0
@@ -31,7 +31,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     // the islands skip the trace.
     let horizonPipeline: MTLComputePipelineState
     let horizonBuf: MTLBuffer
-    // The province fields around the camera (bakeProvinces in Shaders/Saver.metal: jungle, old growth, islands), which
+    // The province fields around the camera (bakeProvinces in Shaders/World/Climate.metal: jungle, old growth, islands), which
     // shading samples rather than evaluating per pixel; rebaked whole once the camera has moved an eighth of the window
     // (+-24.6k), so the coarsest ring (13.8k) never reads past it.
     let provPipeline: MTLComputePipelineState
@@ -64,17 +64,17 @@ final class Renderer: NSObject, MTKViewDelegate {
     var hazeRefs = [Int32](repeating: 0, count: 32)
     static let smokePlumes = 12
     var smokeCount = 0
-    // Per screen tile (LAMP_TILES x LAMP_TILES in Shaders/Saver.metal), the haze lamps (bits 0-15) and smoke plumes
+    // Per screen tile (LAMP_TILES x LAMP_TILES in Shaders/Passes/Scene.metal), the haze lamps (bits 0-15) and smoke plumes
     // (bits 16-27) whose bounding spheres the tile's rays may cross; the shader loops only over those.
     static let lampTiles = 16
-    static let lampReach: [Double] = [1, 20, 16, 7, 10, 24, 22, 6]   // LAMP_R in Shaders/Saver.metal
+    static let lampReach: [Double] = [1, 20, 16, 7, 10, 24, 22, 6]   // LAMP_R in Shaders/Sites/Lamps.metal
     var tileMasks = [UInt32](repeating: 0, count: 16 * 16)
     static let ditherCells = 864.0
     // The vertical half field of view's tangent: the shader casts its rays by it (Frame.camPos.w).
     static let tanV = tan(25.0 * .pi / 180)
-    // Sun height the glowing bugs start from (BIO_SUN in Shaders/Saver.metal).
+    // Sun height the glowing bugs start from (BIO_SUN in Shaders/Light/Bio.metal).
     static let bioSun: Float = 0.07
-    // Bug sprites: one per cube of the MOTE_N^3 block round the camera (bioVertex in Shaders/Saver.metal).
+    // Bug sprites: one per cube of the MOTE_N^3 block round the camera (bioVertex in Shaders/Passes/Motes.metal).
     static let moteCount = 23 * 23 * 23
     // Islands farther than this need no band test (past it the coarsest rings' columns are wide enough to walk under
     // them), shade without their sky occlusion and cast no island shade (only a long dusk shadow reaches back).

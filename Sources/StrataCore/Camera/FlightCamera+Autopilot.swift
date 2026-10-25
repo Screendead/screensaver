@@ -277,7 +277,7 @@ extension FlightCamera {
             }
         }
         target = max(target, min(regional, FlightCamera.ceiling))
-        // At dawn the sea of cloud's top reaches up to 12 x its amount over the sea (at most 14, SEA_LID in Saver.metal):
+        // At dawn the sea of cloud's top reaches up to 12 x its amount over the sea (at most 14, SEA_LID in Shaders/Atmos/CloudSea.metal):
         // fly well over it, high enough that it reads as a surface below, rising with the amount so the lift is gentle.
         target = max(target, 19.85 + 38 * cloudSea)
         // Under an island: below its underside all the way through, the keel's deepest ahead included.

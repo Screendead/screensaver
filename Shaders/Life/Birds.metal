@@ -1,4 +1,4 @@
-// Bird buffer (Sources/Wildlife.swift): MAX_FLOCKS pairs (bounding sphere; first cluster, cluster count), then
+// Bird buffer (Sources/StrataCore/Wildlife/Wildlife+Upload.swift): MAX_FLOCKS pairs (bounding sphere; first cluster, cluster count), then
 // MAX_CLUSTERS pairs (bounding sphere; first bird, count), then four float4s per bird: (map-local position, wingspan),
 // (unit heading, arm angle up from level), (bank, kind, tint, wing extension), (hand angle, hand sweep, -, -).
 

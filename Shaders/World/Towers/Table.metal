@@ -1,4 +1,4 @@
-// The shading table (fragment buffer 9; stage 3's giants hold 8): the towers standing nearest the camera (Sources/Towers.swift fills it from placeTowers).
+// The shading table (fragment buffer 9; stage 3's giants hold 8): the towers standing nearest the camera (Sources/Strata/World/Towers.swift fills it from placeTowers).
 // a: axis xz, R0, Hb; b: Ht, K, N, rot; c: th0, th1, Sy, bw; d: hash, kind, lit at night, member index | moisture << 8 |
 // temperature << 16 (bytes; for listings).
 struct TowerRec { float4 a; float4 b; float4 c; uint4 d; };

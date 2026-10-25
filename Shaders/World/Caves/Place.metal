@@ -102,7 +102,7 @@ kernel void placeCaves(device CaveRec* out [[buffer(0)]],
     if (gid.x >= uint(CAVE_WIN) || gid.y >= uint(CAVE_WIN)) return;
     uint seed = uint(info.w);
     int2 cell = info.xy + int2(gid);
-    // A slot already holding this cell keeps it (World.Buffer starts every slot with no cell).
+    // A slot already holding this cell keeps it (MapTables.clearGiantsAndCaves starts every slot with no cell).
     if (all(out[caveSlot(cell)].cell == cell)) return;
     CaveRec r;
     r.cell = cell; r.m = 0; r.u = 0; r.yF = 0; r.W = 0; r.L = 0; r.Hc = 0; r.h = 0; r.flags = 0;

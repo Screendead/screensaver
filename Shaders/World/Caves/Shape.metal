@@ -5,7 +5,7 @@
 // level 4 none (its window is wider than the table).
 constant float CAVE_CELL = 256.0;
 constant float CAVE_REACH = 64.0;
-// Must match World.caveWin in Sources/Renderer.swift.
+// Must match MapLayout.caveWin in Sources/StrataCore/World/MapLayout.swift.
 constant int CAVE_WIN = 96;
 // The table lies in the giant table's buffer after its GIANT_WIN^2 records, so whatever has the giants has the caves.
 constant int CAVE_TAIL = 24 * 24 * 32;
@@ -13,7 +13,7 @@ constant int CAVE_TAIL = 24 * 24 * 32;
 constant int CAVE_MAX_S = 8;
 
 // m: the mouth's centre (world xz), u: into the rock, yF: the floor, W: the mouth's half width, L: depth, Hc: height at
-// the mouth's middle. Must match World.CaveRec in Sources/Renderer.swift.
+// the mouth's middle. Must match CaveRec in Sources/StrataCore/World/MapRecords.swift.
 struct CaveRec { int2 cell; float2 m; float2 u; float yF; float W; float L; float Hc; uint h; uint flags; };
 constant uint CV_ON = 1u, CV_HOME = 2u, CV_GROTTO = 4u, CV_LOW = 8u;
 

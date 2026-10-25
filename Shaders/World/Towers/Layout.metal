@@ -10,7 +10,7 @@ constant float TOWER_GROUP_R = 2250.0;
 constant int TOWER_MEMBERS = 4;
 // The widest base apothem any member can draw (drums), for spacing a group.
 constant float TOWER_R_MAX = 150.0;
-// Records in the shading table (fragment buffer 9); must match Towers.tableSize in Sources/Towers.swift.
+// Records in the shading table (fragment buffer 9); must match Towers.tableSize in Sources/Strata/World/Towers.swift.
 constant int TOWER_TABLE = 16;
 
 

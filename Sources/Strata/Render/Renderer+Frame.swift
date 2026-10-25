@@ -17,7 +17,7 @@ extension Renderer {
         f.sunDir = SIMD4(SIMD3<Float>(clock.sunDirection), Float(clock.phase))
         f.planet = SIMD4(SIMD3<Float>(clock.planetDirection), 0)
         // The cell corner nearest the planet, projected as the shader casts its rays (without the jitter); off screen
-        // while the sun is up (planetAmt in Shaders/Saver.metal).
+        // while the sun is up (planetOf in Shaders/Sky/Light.metal).
         let pv = clock.planetDirection, pz = simd_dot(pv, b.fwd), tanH = Double(f.camPos.w)
         f.planetPx = SIMD4(-1e4, -1e4, Float(size.width / cells.width), 0)
         if pz > 0.01 && clock.sunDirection.y < 0.02 {

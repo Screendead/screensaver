@@ -1,6 +1,6 @@
 import simd
 
-// Must match `Frame` in Shaders/Saver.metal.
+// Must match `Frame` in Shaders/Common/Frame.metal.
 struct Frame {
     var camPos = SIMD4<Float>()
     var camFwd = SIMD4<Float>()

@@ -72,7 +72,7 @@ extension FlightCamera {
     }
 
     // Hearths, camp fires and jetty lanterns burn every night; a henge is only worth a night shot when its
-    // rite is lit, and a beacon adds to its hamlet. Mirrors lampLevel in Shaders/Saver.metal.
+    // rite is lit, and a beacon adds to its hamlet. Mirrors lampLevel in Shaders/Sites/Lamps.metal.
     func litInterest(_ site: SiteInfo) -> Double {
         func burns(_ l: SiteInfo.Lamp, _ chance: Double) -> Bool {
             let h = Provinces.pcg(site.id &+ UInt32(l.index % MapLayout.maxLamps) &* 7717)

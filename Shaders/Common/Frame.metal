@@ -1,4 +1,4 @@
-// Must match `Frame` in Sources/Renderer.swift.
+// Must match `Frame` in Sources/Strata/GPU/Frame.swift.
 struct Frame {
     float4 camPos;     // xyz map-local position, w tan(fovY/2)
     float4 camFwd;     // w aspect

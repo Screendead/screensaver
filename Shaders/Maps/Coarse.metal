@@ -10,7 +10,7 @@ constant float COVER_GAIN = 2.5;
 constant int GAP_LEVELS = 4;
 // Of those, levels 1...GAP2_LEVELS also carry a second gap below it (a giant's crown: the air under it, with the gap
 // between its tiers as the principal one); further out a giant keeps only the air under its crown. Must match
-// Clipmap.gap2Levels in Sources/Renderer.swift.
+// Clipmap.gap2Levels in Sources/Strata/World/Clipmap.swift.
 constant int GAP2_LEVELS = 1;
 
 static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantRec* giants, device const IsleRec* isles, thread float2& g2, thread float& depth) {
