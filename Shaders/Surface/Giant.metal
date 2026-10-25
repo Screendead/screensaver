@@ -1,27 +1,3 @@
-// 0..1 where world xz w lies among mega relief, from the coarsest ring's max over ~128-voxel cells (lowland rarely rises
-// past ~190). Interpolated between cell corners, each the max of the four cells meeting there, so every column rates at
-// least its own cell's relief and the field stays continuous: interpolated between cell centres, a wall's foot columns
-// past a cell edge rated partly as lowland, and a jogging face crossfaded column by column between the formations and the
-// lowland's 16-voxel beds, which near eye level line up with the beds on every rock behind and read as see-through rock.
-// Wider cells would carry the walls' rock a whole cell out over the lowland at their feet.
-static inline float megaWall(thread const Terrain& tr, float2 w) {
-    int kc = tr.levels - 1;
-    if (kc < 1) return 0.0;
-    int m = max(7 - kc, 0), mask = (COARSE_N >> m) - 1;
-    float2 q = w / float(1 << (kc + m));
-    int2 c = int2(floor(q));
-    float2 f = q - float2(c);
-    uint sl = uint(kc - 1), mp = uint(m);
-    #define MW(i, j) tr.ch.read(uint2((c + int2(i, j)) & mask), sl, mp).r
-    float a0 = MW(-1, -1), a1 = MW(0, -1), a2 = MW(1, -1);
-    float b0 = MW(-1, 0), b1 = MW(0, 0), b2 = MW(1, 0);
-    float c0 = MW(-1, 1), c1 = MW(0, 1), c2 = MW(1, 1);
-    #undef MW
-    float v00 = max(max(a0, a1), max(b0, b1)), v10 = max(max(a1, a2), max(b1, b2));
-    float v01 = max(max(b0, b1), max(c0, c1)), v11 = max(max(b1, b2), max(c1, c2));
-    return smoothstep(190.0, 270.0, mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y));
-}
-
 // A giant's bark, leaves or vines (surfaceAt), returned before the ground's shading: none of its tones apply.
 static Surface giantSurface(thread const Terrain& tr, Surface s, int k, int3 v, int3 n, float2 uv, float fp, float2 wq,
                                    float wy, float3 col, uint gsb, float gLoc, Giant gi, float cs, int2 mapOrigin, uint seed) {
