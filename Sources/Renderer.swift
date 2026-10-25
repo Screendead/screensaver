@@ -194,9 +194,15 @@ struct SkyClock {
         return w * (w > 0 ? 0.42 : 0.56) + 0.07
     }
 
+    // Out by day and back by night (az 0.9 at dawn, 2.57 at dusk, as before), so the sun and the moon opposite it are
+    // continuous across the wrap; a full turn a day doubles the day arc and the moon's pace.
+    static func azimuth(_ phase: Double) -> Double {
+        0.9 + 0.834 * (1 - cos(2 * .pi * phase))
+    }
+
     var sunDirection: SIMD3<Double> {
         let el = asin(SkyClock.elevation(phase))
-        let az = 2 * .pi * phase * 0.5 + 0.9
+        let az = SkyClock.azimuth(phase)
         return SIMD3(cos(el) * sin(az), sin(el), cos(el) * cos(az))
     }
 

@@ -40,6 +40,7 @@ The flight runs at twice its old speed (11-30 voxels/s by height, Jack's call 20
    - Moon glints, `strata/pitch-moon-glints`: A keep / B soft roll-off [B] / C finer.
    - Near-camera night glow, `strata/pitch-near-glow`: A keep / B 40% lower near [B] / C plus slower pulse.
    - Sunrise clock, `strata/pitch-slow-dawn`: A keep / B slow dawn in 12 min / C slow dawn, ~15-min day [C].
+   - Sun wrap fix, `strata/fix-sun-wrap`: the sun jumped half a turn at every dawn wrap (and the moon and light with it). A full turn a day / B catch up in deep night (moon up to 7 deg/s) / C out by day and back by night [C, on the branch: the sun matches master at dawn, noon and sunset but runs up to 9 deg behind mid-morning and 14 deg ahead mid-afternoon; moon peak 2.2 deg/s vs 1.3, drifting the opposite way to the day sun]. Media: `build/overnight/sun-wrap/`.
    - Archive waves, tundra, drama, mesa, noonart, texel, far2 (rename to `archive/`) [yes].
    - Sun jumps half a turn at every dawn wrap (a bug on master since the clock was written), `strata/fix-sun-wrap`: A full turn a day / B catch up at night / C out by day, back by night [C].
    - Prototypes, each reviewed and passed: `strata/idea-aurora-nights`, `strata/idea-moon-phases`, `strata/idea-shooting-stars`, `strata/idea-evening-star`, `strata/idea-wet-sand` [merge each]. `strata/idea-crepuscular-rays` was dropped (beams never form). `strata/idea-cloud-sea` (dawn sea of cloud in basins) is still being tuned: it must not change with the camera's height.
