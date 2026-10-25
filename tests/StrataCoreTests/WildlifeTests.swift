@@ -22,14 +22,14 @@ final class WildlifeTests: XCTestCase {
     // A minute after dawn: flocks within the shader's caps, every bird above the ground under it, and the upload
     // writing within the bird buffer.
     func testFlocksStayInTheAirAndInTheBuffer() {
-        let a = Aviary(seed: 303, phase: 0.05)
+        let a = Aviary(seed: 303, phase: 0.05), terrain = a.flight.world.terrain
         var most = 0
         a.fly(seconds: 60) { w in
             XCTAssertLessThanOrEqual(w.flocks.count, Wildlife.maxFlocks)
             for f in w.flocks {
                 for b in f.birds {
                     XCTAssertTrue(b.pos.x.isFinite && b.pos.y.isFinite && b.pos.z.isFinite)
-                    XCTAssertGreaterThan(b.pos.y, w.ground(b.pos.x, b.pos.z, at: b.pos.y), "\(f.kind)")
+                    XCTAssertGreaterThan(b.pos.y, terrain.height(x: b.pos.x, z: b.pos.z)!, "\(f.kind)")
                 }
             }
             most = max(most, w.flocks.map(\.birds.count).reduce(0, +))
