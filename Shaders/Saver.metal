@@ -9118,7 +9118,7 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float tEn
 // edge-on (the path through it lengthens as 1/sin of the angle to the sheet), which draws the folds. The path saturates
 // smoothly at the sheet's thickness; a hard cap draws flat-topped bars. It spans about 55 degrees of azimuth, full over
 // the middle 25, and the fold and ray scales stay several cells wide so a turning camera doesn't make them shimmer in
-// the dither. Radiance stays near the Milky Way's.
+// the dither. Its brightest folds stay under the Milky Way's brightest parts.
 static float3 aurora(thread const Ctx& x, float3 d) {
     uint n = uint(max(int(x.lights.z), 0));
     if (x.L.night <= 0.0 || d.y < 0.02 || hashf(pcg(n * 7919u + x.seed + 900u)) >= 0.25) return 0;
@@ -9146,7 +9146,7 @@ static float3 aurora(thread const Ctx& x, float3 d) {
     float prof = smoothstep(0.0, 0.05, z) * exp(-4.0 * max(z, 0.0));
     float rays = 0.6 + 0.4 * saturate(perlin2(float2(k * (D / 2400.0), t * 0.03), x.seed + 904u) + 0.5);
     float3 col = mix(float3(0.2, 1.0, 0.45), float3(0.7, 0.25, 0.9), smoothstep(0.1, 0.7, z));
-    return col * 0.029 * fold * prof * rays * span * env * smoothstep(0.02, 0.06, d.y);
+    return col * 0.052 * fold * prof * rays * span * env * smoothstep(0.02, 0.06, d.y);
 }
 
 // Shooting stars on a dark night: one in each 30 s slot of the clock, everything about it hashed from the slot, so
