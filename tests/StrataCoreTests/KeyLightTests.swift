@@ -13,8 +13,13 @@ final class KeyLightTests: XCTestCase {
         }
     }
 
+    // In the twilight between, the afterglow leads the blend toward the moon and casts none.
     func testOnlyTheSunOrTheMoonCastsShadows() {
         XCTAssertTrue(SkyClock.keyLight(SkyClock.direction(0.25)).1)
         XCTAssertTrue(SkyClock.keyLight(SkyClock.direction(0.75)).1)
+        for y in [-0.03, -0.08, -0.12] {
+            let c = (1 - y * y).squareRoot()
+            XCTAssertFalse(SkyClock.keyLight(SIMD3(c * 0.6, y, c * 0.8)).1, "sun.y \(y)")
+        }
     }
 }

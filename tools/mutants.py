@@ -42,6 +42,7 @@ MUTANTS = [
     ('KeyLightTests/testKeyLightHasNoStepAtItsHandovers', S + 'Sky/KeyLight.swift', 'if e > -0.02 { return (simd_normalize(SIMD3(sun.x, 0.05,',
      'if e > -0.02 { return (simd_normalize(SIMD3(sun.x, 0.06,'),
     ('KeyLightTests/testOnlyTheSunOrTheMoonCastsShadows', S + 'Sky/KeyLight.swift', 'm > 0.5)', 'm > 1.5)'),
+    ('KeyLightTests/testOnlyTheSunOrTheMoonCastsShadows', S + 'Sky/KeyLight.swift', 'm > 0.5)', 'm > 0.3)'),
     # Settings.
     ('SettingsTests/testParsesASnapshotCommand', S + 'Config/Settings.swift', 'CGSize(width: p[0], height: p[1])', 'CGSize(width: p[1], height: p[0])'),
     ('SettingsTests/testDefaultsLeaveTheSaversChoices', S + 'Config/Settings.swift', 'package var phase: Double?', 'package var phase: Double? = 0'),
