@@ -1,14 +1,5 @@
 #include <metal_stdlib>
 
-// Moon glints on water: 0 as shipped, 1 soft roll-off of the peaks, 2 that plus finer, smaller glints.
-#ifndef MOON_GLINT
-#define MOON_GLINT 0
-#endif
-#if MOON_GLINT >= 2
-#define MOON_LOBE 7000.0
-#else
-#define MOON_LOBE 4000.0
-#endif
 using namespace metal;
 
 // Must match `Frame` in Sources/Renderer.swift.
@@ -5945,6 +5936,9 @@ vertex VOut fullscreenVertex(uint vid [[vertex_id]]) {
 
 // MARK: - Sky & light
 
+// Moonlight's strength at new moon (lit share 0), as a share of full moon's.
+constant float MOON_FLOOR = 0.35;
+
 struct Light {
     float3 key;     // direction to the current key light (sun, afterglow or moon)
     float3 keyCol;
@@ -5958,6 +5952,9 @@ struct Light {
     float sunAmt;
     float night;
     float gold;     // golden and blue hour; 0 at noon and deep night
+    float moonTh;   // the sun's angle around the moon as seen from here: pi is full
+    float moonLit;  // the moon's lit share, exactly 1 at full
+    float moonAmt;  // moonlight's strength on land, cloud and water: floored so thin-moon nights stay readable
 };
 
 // Keyframes by sun elevation: night, blue hour, sunrise, golden, midday.
@@ -5971,7 +5968,8 @@ static inline float3 key5(float e, float3 a, float3 b, float3 c, float3 d, float
 
 static inline float goldAmount(float e) { return smoothstep(0.30, 0.12, e) * smoothstep(-0.16, -0.04, e); }
 
-static Light makeLight(float3 sunDir) {
+// nightIndex is Frame.lights.z.
+static Light makeLight(float3 sunDir, uint seed, float nightIndex) {
     Light L;
     float e = sunDir.y;
     L.sun = sunDir;
@@ -5990,6 +5988,12 @@ static Light makeLight(float3 sunDir) {
     L.sunAmt = smoothstep(-0.02, 0.05, e);
     L.night = smoothstep(-0.04, -0.20, e);
     L.gold = goldAmount(e);
+    // An 8-night cycle of phases with full moon at k = 4. It stops short of new moon (lit share 0.13), which would
+    // leave no moon at all. Full is pinned to 1 so full-moon nights render exactly as before phases.
+    uint k = (uint(int(nightIndex) + 8000) + pcg(seed + 5u)) & 7u;
+    L.moonTh = 3.14159265 + 0.6 * (float(k) - 4.0);
+    L.moonLit = k == 4u ? 1.0 : 0.5 - 0.5 * cos(L.moonTh);
+    L.moonAmt = 1.0 - (1.0 - MOON_FLOOR) * (1.0 - L.moonLit);
     if (e > -0.02) {
         L.key = sunDir;
         L.keyCol = sunCol * L.sunAmt + float3(1.3, 0.5, 0.3) * 0.4 * (1.0 - L.sunAmt);
@@ -6000,7 +6004,7 @@ static Light makeLight(float3 sunDir) {
         float3 glowCol = float3(1.3, 0.5, 0.3) * 0.4 * smoothstep(-0.20, -0.02, e);
         float m = smoothstep(-0.09, -0.16, e);
         L.key = normalize(mix(glowDir, L.moon, m));
-        L.keyCol = mix(glowCol, float3(0.60, 0.66, 0.80) * L.night, m);
+        L.keyCol = mix(glowCol, float3(0.60, 0.66, 0.80) * L.night * L.moonAmt, m);
         L.shadows = m > 0.5;
     }
     return L;
@@ -6033,6 +6037,14 @@ static float3 skyColor(float3 d, Light L) {
     return c;
 }
 
+// The moon's terminator steps in blocks of a 14-cell grid like the voxels: cell i's lit share. The grid is held inside
+// the rim, or a full moon's rim cells would turn half dark.
+static inline float moonCellLit(float2 i, float3 s) {
+    float2 xq = (i + 0.5) / 7.0;
+    xq *= min(1.0, 0.98 / length(xq));
+    return smoothstep(-0.05, 0.05, dot(float3(xq, sqrt(1.0 - dot(xq, xq))), s));
+}
+
 // The sky c (skyColor) with the sun's and moon's discs, and at night the stars and the Milky Way.
 static float3 skyDiscs(float3 c, float3 d, Light L, uint seed, float time) {
     float s = max(dot(d, L.sun), 0.0);
@@ -6043,7 +6055,8 @@ static float3 skyDiscs(float3 c, float3 d, Light L, uint seed, float time) {
 
     if (L.night > 0.0) {
         float md = max(dot(d, L.moon), 0.0);
-        c += float3(0.10, 0.13, 0.22) * (pow(md, 24.0) * 0.6 + pow(md, 400.0) * 1.5) * L.night;
+        float lit = L.moonLit, th = L.moonTh;
+        c += float3(0.10, 0.13, 0.22) * (pow(md, 24.0) * 0.6 + pow(md, 400.0) * 1.5) * L.night * lit;
         // Stars: one hashed point per cell, thinned by low-frequency noise into clusters and voids and
         // denser along a band (a galactic plane at a seed-dependent tilt).
         float3 q = d * 260.0;
@@ -6064,7 +6077,8 @@ static float3 skyDiscs(float3 c, float3 d, Light L, uint seed, float time) {
         float dust = saturate(rift * 0.6 + murk * 0.4);
         float3 mwCol = mix(float3(0.55, 0.62, 0.90), float3(0.95, 0.88, 0.78), saturate(core * (0.5 + 0.8 * n2)));
         float horizonFade = smoothstep(0.0, 0.12, d.y);
-        float mw = glow * (1.0 - dust) * L.night * horizonFade;
+        // A thin moon leaves the sky darker, so the Milky Way stands out.
+        float mw = glow * (1.0 - dust) * L.night * horizonFade * (1.6 - 0.6 * lit);
         c += mwCol * mw * 0.07;
         if (mw > 0.02) {
             float3 fq = d * 500.0;
@@ -6081,14 +6095,31 @@ static float3 skyDiscs(float3 c, float3 d, Light L, uint seed, float time) {
             float twinkle = 0.7 + 0.3 * sin(time * 1.3 + hashf(pcg(h + 4)) * 40.0);
             c += float3(0.9, 0.95, 1.1) * b * twinkle * smoothstep(0.55, 0.0, dd) * L.night * smoothstep(0.0, 0.05, d.y) * (1.0 - 0.8 * dust);
         }
-        // Moon: a clean disc whose maria are Perlin noise.
+        // Moon: a clean disc whose maria are Perlin noise, its terminator stepped in blocks (moonCellLit). The night
+        // side keeps a faint ash-blue earthshine, so a crescent still reads as a whole moon.
         if (md > 0.99) {
             float3 mu = normalize(cross(L.moon, float3(0, 1, 0)));
             float3 mv = cross(mu, L.moon);
             float2 xy = float2(dot(d, mu), dot(d, mv)) / 0.03;
             float disc = 1.0 - smoothstep(0.96, 1.0, length(xy));
             float lum = 0.92 - 0.3 * smoothstep(0.15, 0.55, fbm2(xy * 1.3 + 3.0, 3, 9u) + 0.25);
-            c = mix(c, float3(0.75, 0.80, 0.92) * 2.4 * lum, L.night * disc);
+            // The lit limb faces the sun along the great circle between them. The moon rides at the sun's opposite
+            // azimuth, lower than the sun is deep once the sun is 4.6 degrees down (L.moon), so that circle runs
+            // straight down through the horizon: horns up, waxing or waning. Before that, as the moon fades in, the
+            // circle would run over the zenith; the limb stays down rather than flip. A real moon this far from the
+            // sun would be full: the phase is licence, the orientation is not.
+            float sunlit = 1.0;
+            if (lit < 1.0) {
+                float3 toSun = float3(0.0, -abs(sin(th)), -cos(th));
+                // Each cell edge ramps over 4% of the radius, as the rim does: a hard edge would resnap whole pixels
+                // as the moon drifts across them.
+                float2 g = xy * 7.0 - 0.5, i = floor(g);
+                float2 w = smoothstep(0.36, 0.64, g - i);
+                sunlit = mix(mix(moonCellLit(i, toSun), moonCellLit(i + float2(1, 0), toSun), w.x),
+                             mix(moonCellLit(i + float2(0, 1), toSun), moonCellLit(i + float2(1, 1), toSun), w.x), w.y);
+            }
+            float3 moonCol = mix(float3(0.55, 0.65, 0.9) * 0.144, float3(0.75, 0.80, 0.92) * 2.4, sunlit) * lum;
+            c = mix(c, moonCol, L.night * disc);
         }
     }
     return c;
@@ -8833,7 +8864,7 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float tEn
     float toSun = 0.5 + 0.5 * dot(dh, sh2);
     float2 sunStep = x.L.key.xz / max(x.L.key.y, 0.2) * 14.0 * CLOUD_S;
     float3 ambient = x.L.zenith * 1.0 + x.L.horizon * 0.35;
-    float3 moonGlow = float3(0.10, 0.13, 0.22) * pow(saturate(dot(d, x.L.moon)), 16.0) * 0.9;
+    float3 moonGlow = float3(0.10, 0.13, 0.22) * pow(saturate(dot(d, x.L.moon)), 16.0) * 0.9 * x.L.moonAmt;
     float glowAmt = lowSun * smoothstep(-0.14, -0.02, x.L.sun.y);
     float T = 1.0;
     float3 acc = 0;
@@ -8902,7 +8933,7 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float tEn
     // the moon.
     float cm = dot(d, x.L.moon);
     float fringe = silver / max(cover, 1e-3) * (1.0 - cover);
-    c.col += float3(0.70, 0.80, 1.0) * x.L.night * min(hg(cm, 0.92) * 0.25, 1.5) * fringe;
+    c.col += float3(0.70, 0.80, 1.0) * x.L.night * min(hg(cm, 0.92) * 0.25, 1.5) * fringe * x.L.moonAmt;
     c.col *= mix(1.0, 0.9, smoothstep(0.3, 0.5, x.L.sun.y));
     c.a = cover * mix(1.0, 0.6, x.L.night) * exp(-t0 / (3000.0 * CLOUD_S)) * smoothstep(7000.0 * CLOUD_S, 2500.0 * CLOUD_S, t0) * smoothstep(0.02, 0.1, d.y);
     return c;
@@ -8967,7 +8998,7 @@ static float3 softCloudSky(thread const Ctx& x, float3 o, float3 r) {
     float2 q = o.xz + r.xz * t + float2(x.origin);
     // Soft coverage, blurred as if by ripples, matching the volumetric sky.
     float dens = smoothstep(0.0, 0.3, cloudDensity(q, x.seed, x.time, x.cover) - 0.07 * x.L.night);
-    float3 lit = mix(x.L.keyCol * 0.4 + x.L.zenith * 1.2 + x.L.horizon * 0.4, float3(0.04, 0.047, 0.07), x.L.night);
+    float3 lit = mix(x.L.keyCol * 0.4 + x.L.zenith * 1.2 + x.L.horizon * 0.4, float3(0.04, 0.047, 0.07) * x.L.moonAmt, x.L.night);
     return mix(sky, lit, dens * 0.4 * exp(-t / (2600.0 * CLOUD_S)));
 }
 
@@ -10163,7 +10194,7 @@ fragment float4 vineFragment(VOut in [[stage_in]], float4 dst [[color(0)]], cons
     if (int(f.shadow.y) & 2) gmax = min(gmax, 260.0);
     Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, cg2, hb, uint(f.mapInfo.w), giants, pvTex, towers, 0 };
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
-            2.0 * tanH * f.resolution.z, f.misc.w, makeLight(f.sunDir.xyz),
+            2.0 * tanH * f.resolution.z, f.misc.w, makeLight(f.sunDir.xyz, uint(f.mapInfo.w), f.lights.z),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
             cloudTex, f.cloud.xyz, st, sites, lampPos, lampState, lightMap, lightDir, f.lights, shadowNear, shadowFar,
             f.misc2.z == 14 ? 2.0 : f.shadow.x, (int(f.shadow.y) & 1) != 0, int(f.shadow.y), slowTex,
@@ -10218,7 +10249,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     tr.caveNight = f.birds.w > 0.0 ? bioLandRamp(f.lights.x) : 0.0;
     tr.caveFire = mix(1.0, 0.02, smoothstep(-0.02, 0.05, f.lights.x)) * (1.0 - 0.75 * smoothstep(0.6, 0.66, f.lights.y));
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
-            2.0 * tanH * f.resolution.z, f.misc.w, makeLight(f.sunDir.xyz),
+            2.0 * tanH * f.resolution.z, f.misc.w, makeLight(f.sunDir.xyz, uint(f.mapInfo.w), f.lights.z),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
             cloudTex, f.cloud.xyz, st, sites, lampPos, lampState, lightMap, lightDir, f.lights, shadowNear, shadowFar,
             f.misc2.z == 14 ? 2.0 : f.shadow.x, (int(f.shadow.y) & 1) != 0, int(f.shadow.y), slowTex,
@@ -10405,7 +10436,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         under *= float(life.underMul);
         col = mix(under, refl, fres) + float3(life.add);
         // Glitter path toward the sun or moon: the main EDR highlight.
-        col += x.L.keyCol * 6.0 * pow(max(dot(r, x.L.key), 0.0), mix(mix(900.0, MOON_LOBE, x.L.night), 350.0, x.L.gold)) * fres * (x.L.shadows ? 1.0 : 0.3) * (1.0 + 0.5 * x.L.night) * open;
+        col += x.L.keyCol * 6.0 * pow(max(dot(r, x.L.key), 0.0), mix(mix(900.0, 4000.0, x.L.night), 350.0, x.L.gold)) * fres * (x.L.shadows ? 1.0 : 0.3) * (1.0 + 0.5 * x.L.night) * open;
         // Golden hour: a broad sheen of the aureole on the water under the sun.
         col += x.L.keyCol * 0.5 * pow(max(dot(r, x.L.key), 0.0), 40.0) * fres * x.L.gold * open;
         if (x.L.night > 0.0 && open > 0.0) {
@@ -10430,25 +10461,13 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             constexpr float az0 = 0.75 * M_PI_F + 0.9;
             const float2 mz = -float2(sin(az0), cos(az0));
             float swell = perlin3(float3(dot(ww, mz) * 0.07, (ww.x * mz.y - ww.y * mz.x) * 0.02, x.time * 0.1), x.seed + 62u);
-#if MOON_GLINT >= 2
-            // An octave between the ripples and the fine facets makes the glints smaller where it resolves.
-            float e1 = mix(e0, perlin3(float3(ww * 0.6, x.time * 0.4), x.seed + 64u), saturate(2.0 - fpv * 3.75));
-#else
-            float e1 = e0;
-#endif
-            float rip = mix(swell, mix(e1, fine, saturate(2.0 - fpv * 10.0)), saturate(2.0 - fpv * 1.8));
+            float rip = mix(swell, mix(e0, fine, saturate(2.0 - fpv * 10.0)), saturate(2.0 - fpv * 1.8));
             // The ripple noise is near-Gaussian (sd ~0.22); a logistic quantile turns cover into its threshold.
             float thr = 0.13 * log((1.0 - cover) / max(cover, 1e-4));
-#if MOON_GLINT >= 1
             // Facets brighten toward their crests rather than switching on flat, so each glint has a peak.
             float glint = mix(cover, smoothstep(thr - 0.08, thr + 0.40, rip), saturate(2.0 - fpv * 0.43));
-            col += float3(0.75, 0.82, 1.0) * x.L.night * (0.05 * cover + 0.8 * glint);
-#else
-            float glint = mix(cover, smoothstep(thr - 0.08, thr + 0.16, rip), saturate(2.0 - fpv * 0.43));
-            col += float3(0.75, 0.82, 1.0) * x.L.night * (0.05 * cover + 0.55 * glint);
-#endif
+            col += float3(0.75, 0.82, 1.0) * x.L.night * (0.05 * cover + 0.8 * glint) * x.L.moonAmt;
         }
-#if MOON_GLINT >= 1
         if (x.L.night > 0.0) {
             // Moonlit water rolls off toward a peak just under white (post-exposure 1.25, about half the dither
             // cells at the top level) instead of clipping: the glints keep a falloff rather than a flat plateau.
@@ -10456,7 +10475,6 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             float m = max3(col.r, col.g, col.b);
             if (m > k) col *= mix(1.0, (k + (P - k) * (1.0 - exp(-(m - k) / (P - k)))) / m, x.L.night);
         }
-#endif
         // Water past the 1-voxel map lies beyond the light map, which would clamp its edge onto it.
         if (x.lights.w > 0.0 && all(wp.xz > 0.0) && all(wp.xz < float(x.tr.size))) {
             // Lamplight on the water: a soft pool, and a broken streak drawn toward the viewer as ripples
