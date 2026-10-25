@@ -54,6 +54,7 @@ using namespace metal;
 #include "Surface/Props.metal"
 #include "Surface/Cave.metal"
 #include "Surface/Island.metal"
+#include "Surface/Structure.metal"
 #include "Surface/SurfaceAt.metal"
 #include "Light/Occlusion.metal"
 #include "Sky/CloudField.metal"
