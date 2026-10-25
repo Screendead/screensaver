@@ -8,7 +8,7 @@ extension Renderer {
     private func pickHazeLamps() {
         let cam = SIMD2(camera.position.x, camera.position.z)
         var near: [(Double, Int)] = []
-        for site in world.sites {
+        for site in world.terrain.sites {
             for l in site.lamps where l.kind != 3 && l.kind != 7 {
                 let d = simd_length(SIMD2(l.pos.x, l.pos.z) - cam)
                 if d < 1200 { near.append((d, l.index)) }
@@ -24,7 +24,7 @@ extension Renderer {
         let cam = camera.position
         let fwd = camera.basis.fwd
         var near: [(Double, Int)] = []
-        for site in world.sites {
+        for site in world.terrain.sites {
             for l in site.lamps where l.rise > 0 {
                 let v = l.smoke - cam
                 let d = simd_length(v)
@@ -62,7 +62,7 @@ extension Renderer {
             }
             for ty in y0...y1 { for tx in x0...x1 { tileMasks[ty * n + tx] |= bit } }
         }
-        let lamps = world.lamps
+        let lamps = world.terrain.lamps
         for i in 0..<Int(f.refs.x) {
             guard let l = lamps[Int(hazeRefs[i])] else { continue }
             mark(l.pos, 3 * Renderer.lampReach[min(l.kind, 7)] + 0.5, 1 << UInt32(i))

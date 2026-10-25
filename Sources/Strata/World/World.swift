@@ -35,17 +35,6 @@ final class World {
         let bandViews: [MTLTexture]
         var origin = SIMD2<Int32>(Int32.min, Int32.min)
         var globalMax: Float = 255
-        var siteList: [SiteInfo] = []
-        // siteList's lamps by Lamp.index.
-        var lamps: [Int: SiteInfo.Lamp] = [:]
-        var giantList: [GiantInfo] = []
-        var isleList: [IslandInfo] = []
-        // The caves of the cave table (placeCaves), world xz of each mouth.
-        var caveList: [CaveRec] = []
-        // Whether the jungle's roof (Shaders/Saver.metal jungleCanopy) may stand on this map.
-        var jungle = false
-        // The jungle's extent on this map: whether the province reaches each point of a 64-voxel grid over it.
-        var jungleGrid: [Bool] = []
 
         init?(device: MTLDevice) {
             let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: MapLayout.size, height: MapLayout.size, mipmapped: false)
@@ -129,13 +118,8 @@ final class World {
     let cpuMips: [MTLTexture]
     var buffers: [Buffer?]
     var active = 0
-    // The active map's CPU copy, held here so the camera's many lookups read it directly.
-    var cpuOrigin = SIMD2<Int32>(Int32.min, Int32.min)
-    var cpuHeights: [Float] = []
-    var cpuFloors: [Float] = []
-    // Per CPU cell, the highest ground islands aside and the lowest island underside (4096: none).
-    var cpuGround: [Float] = []
-    var cpuUnder: [Float] = []
+    // The map shown, as the CPU reads it.
+    let terrain = Terrain()
     var job: (index: Int, origin: SIMD2<Int32>, next: Int, t0: CFTimeInterval)?
     var pending = false
     var synchronous = false
@@ -152,27 +136,6 @@ final class World {
     var bandTex: MTLTexture { shown.band }
     var giantBuffer: MTLBuffer { shown.giants }
     var isleBuffer: MTLBuffer { shown.isles }
-    var caves: [CaveRec] { shown.caveList }
-    var sites: [SiteInfo] { shown.siteList }
-    var lamps: [Int: SiteInfo.Lamp] { shown.lamps }
-    var giants: [GiantInfo] { shown.giantList }
-    var isles: [IslandInfo] { shown.isleList }
-    // Whether a flagged cell of the active map's band mips (under a giant's crown or the jungle's roof) may lie within r
-    // of world xz p.
-    func bandsNear(_ p: SIMD2<Double>, radius r: Double) -> Bool {
-        let b = shown
-        if b.giantList.contains(where: { simd_length($0.pos - p) < r + GiantInfo.reach }) { return true }
-        guard b.jungle else { return false }
-        let n = MapLayout.size / 64 + 1
-        for z in 0..<n {
-            for x in 0..<n where b.jungleGrid[z * n + x] {
-                let q = SIMD2(Double(Int(b.origin.x) + x * 64), Double(Int(b.origin.y) + z * 64))
-                if simd_length(q - p) < r + 64 { return true }
-            }
-        }
-        return false
-    }
-
     init?(gpu: GPU, seed: UInt32) {
         let device = gpu.device
         let pipeline = gpu.pipeline as (String) -> MTLComputePipelineState?
@@ -277,41 +240,11 @@ final class World {
         enc.endEncoding()
         cb.commit()
         cb.waitUntilCompleted()
-        buf.giantList = World.readGiants(buf.giants)
+        terrain.giants = World.readGiants(buf.giants)
     }
 
     static func mapOrigin(_ center: SIMD2<Double>) -> SIMD2<Int32> {
         let half = Double(MapLayout.size / 2)
         return SIMD2<Int32>(Int32(floor((center.x - half) / 64)) * 64, Int32(floor((center.y - half) / 64)) * 64)
-    }
-
-    // Conservative (4x4 max) height in world coords.
-    func height(x: Double, z: Double) -> Double? {
-        let s = MapLayout.size >> MapLayout.cpuLevel
-        let cx = Int(floor((x - Double(cpuOrigin.x)) / Double(1 << MapLayout.cpuLevel)))
-        let cz = Int(floor((z - Double(cpuOrigin.y)) / Double(1 << MapLayout.cpuLevel)))
-        guard cx >= 0, cz >= 0, cx < s, cz < s, !cpuHeights.isEmpty else { return nil }
-        return Double(cpuHeights[cz * s + cx])
-    }
-
-    // The 4x4 cell under world (x, z) as islands shape it: its highest top, its highest ground islands aside, and the
-    // lowest island underside over it (nil: no island).
-    func column(x: Double, z: Double) -> (top: Double, ground: Double, under: Double?)? {
-        let s = MapLayout.size >> MapLayout.cpuLevel
-        let cx = Int(floor((x - Double(cpuOrigin.x)) / Double(1 << MapLayout.cpuLevel)))
-        let cz = Int(floor((z - Double(cpuOrigin.y)) / Double(1 << MapLayout.cpuLevel)))
-        guard cx >= 0, cz >= 0, cx < s, cz < s, !cpuUnder.isEmpty else { return nil }
-        let i = cz * s + cx
-        let u = Double(cpuUnder[i])
-        return (Double(cpuHeights[i]), Double(cpuGround[i]), u < 4000 ? u : nil)
-    }
-
-    // Lower bound in world coords: every column of the 4x4 cell is solid from the ground up to at least this.
-    func solidFloor(x: Double, z: Double) -> Double? {
-        let s = MapLayout.size >> MapLayout.cpuLevel
-        let cx = Int(floor((x - Double(cpuOrigin.x)) / Double(1 << MapLayout.cpuLevel)))
-        let cz = Int(floor((z - Double(cpuOrigin.y)) / Double(1 << MapLayout.cpuLevel)))
-        guard cx >= 0, cz >= 0, cx < s, cz < s, !cpuFloors.isEmpty else { return nil }
-        return Double(cpuFloors[cz * s + cx])
     }
 }

@@ -203,7 +203,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         vinePipelines = vineStates
         // Spec offset displays by 90 s of the same flight; steering reads GPU heights, so displays
         // instead start at different places in the same world.
-        camera = FlightCamera(seed: seed &+ UInt32(screenIndex) &* 7919, world: world, far: far)
+        camera = FlightCamera(seed: seed &+ UInt32(screenIndex) &* 7919, terrain: world.terrain, far: far)
         wildlife = Wildlife(seed: seed &+ UInt32(screenIndex) &* 7919)
         birdBuffers = (0..<3).compactMap { _ in device.makeBuffer(length: Wildlife.bufferLength, options: .storageModeShared) }
         guard birdBuffers.count == 3 else { return nil }
@@ -212,12 +212,13 @@ final class Renderer: NSObject, MTKViewDelegate {
         renderScale = battery ? 0.7 : 1.0
         edgeRadius = Clipmap.handoff(battery ? Clipmap.levels - 1 : Clipmap.levels)
         super.init()
-        wildlife.heightAt = { [unowned(unsafe) world] x, z in world.height(x: x, z: z) }
-        wildlife.giantsAt = { [unowned(unsafe) world] in world.giants }
-        wildlife.columnAt = { [unowned(unsafe) world] x, z in world.column(x: x, z: z) }
-        wildlife.islesAt = { [unowned(unsafe) world] in world.isles }
+        let terrain = world.terrain
+        wildlife.heightAt = { [unowned(unsafe) terrain] x, z in terrain.height(x: x, z: z) }
+        wildlife.giantsAt = { [unowned(unsafe) terrain] in terrain.giants }
+        wildlife.columnAt = { [unowned(unsafe) terrain] x, z in terrain.column(x: x, z: z) }
+        wildlife.islesAt = { [unowned(unsafe) terrain] in terrain.isles }
         camera.towersAt = { [unowned(unsafe) towers] in towers.list }
-        camera.islesAt = { [unowned(unsafe) world] in world.isles }
+        camera.islesAt = { [unowned(unsafe) terrain] in terrain.isles }
         // VR_START=x,z,yawDeg: the flight starts there (tests).
         if let v = Knobs.current.env["VR_START"]?.split(separator: ",").compactMap({ Double($0) }), v.count >= 3 {
             camera.start(at: SIMD2(v[0], v[1]), yaw: v[2] * .pi / 180)
@@ -276,7 +277,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             wildlife.step(dt: step, camera: camera, sight: sight(), sunY: clock.sunDirection.y, phase: clock.phase)
             popLog?.check(wildlife, sight: sight(), time: simTime + dt * timeScale - remaining + step, dt: step,
                           period: PopLog.period(sunY: clock.sunDirection.y, phase: clock.phase))
-            if Renderer.logTiming, let g = world.height(x: camera.position.x, z: camera.position.z), camera.position.y < g + 2 {
+            if Renderer.logTiming, let g = world.terrain.height(x: camera.position.x, z: camera.position.z), camera.position.y < g + 2 {
                 print(String(format: "camera low: y=%.1f ground=%.1f", camera.position.y, g))
             }
             clock.advance(step)
@@ -311,7 +312,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         return Sight(pos: camera.position, fwd: b.fwd, right: b.right, up: b.up, tanV: tanV, aspect: Double(aspect),
                      pixelAngle: 2 * tanV / Double(max(sceneSize.height, 1)), sunY: clock.sunDirection.y,
                      worldEdge: Clipmap.handoff(Clipmap.levels), floorReach: min(880, edge) - 140 - 6 - abs(Double(Renderer.lodShift)),
-                     world: world)
+                     terrain: world.terrain)
     }
 
     // Scene and history sizes for an output size: the retro dither shows one flat colour per cell, so the temporal

@@ -13,7 +13,7 @@ extension FlightCamera {
                 let d2 = SIMD2(sin(heading + off), cos(heading + off))
                 let q = SIMD2(position.x, position.z) + (off == 0 ? dir : d2) * dist
                 // An island the flight will pass beneath is no wall; far off it is a vista like any relief.
-                guard let g = dist < 1000 ? (dist < 300 ? (world.height(x: q.x, z: q.y) != nil ? h(q.x, q.y) : nil) : hFar(q.x, q.y))
+                guard let g = dist < 1000 ? (dist < 300 ? (terrain.height(x: q.x, z: q.y) != nil ? h(q.x, q.y) : nil) : hFar(q.x, q.y))
                                           : far.height(x: q.x, z: q.y) else { continue }
                 let e = atan2(g - position.y, dist)
                 if dist >= 1000 { best = max(best, e) } else { near = max(near, e) }
@@ -36,7 +36,7 @@ extension FlightCamera {
         let p = SIMD2(position.x, position.z)
         var sum = 0.0, best = 0.0
         var top: SiteInfo?
-        for site in world.sites {
+        for site in terrain.sites {
             if let t = framedAt[site.id], time - t < 240 { continue }
             let v = site.pos - p
             let d = simd_length(v)
@@ -167,7 +167,7 @@ extension FlightCamera {
     private func giantInterest(_ heading: Double) -> Double {
         let p = SIMD2(position.x, position.z)
         var best = 0.0
-        for g in world.giants {
+        for g in terrain.giants {
             let v = g.pos - p, d = simd_length(v)
             // Not once close: framing it from a few hundred off would circle the flight in under its crown.
             guard d > 700, d < 9000 else { continue }

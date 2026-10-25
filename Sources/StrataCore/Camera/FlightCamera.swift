@@ -34,8 +34,8 @@ final class FlightCamera {
     }
 
     // Heights in world coords: the loaded map's (nil outside it), and the coarse 32-voxel max heights out to about 7.7k
-    // (nil beyond, or before the first readback). The Renderer owns both and the camera, and drops them together.
-    unowned(unsafe) let world: World
+    // (nil beyond, or before the first readback). The Renderer owns both (the terrain through its world) and the camera, and drops them together.
+    unowned(unsafe) let terrain: Terrain
     unowned(unsafe) let far: FarHeights
     // Flight stays this far under the cloud base (CLOUD_Y0 in Shaders/Saver.metal, 1065).
     static let ceiling = 1065.0 - 80.0
@@ -61,8 +61,8 @@ final class FlightCamera {
     // The pilgrim is a big island, flown beneath rather than beside.
     var pilgrimIsle = false
 
-    init(seed: UInt32, world: World, far: FarHeights) {
-        self.world = world
+    init(seed: UInt32, terrain: Terrain, far: FarHeights) {
+        self.terrain = terrain
         self.far = far
         let s = Double(seed % 100_000)
         position = SIMD3(s * 7.31, 70, s * 3.17)

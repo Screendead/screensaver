@@ -4,10 +4,10 @@ import simd
 extension FlightCamera {
     // A flight starting over 3.5k from every giant moves to 2.5k short of the nearest (on the line from it to the start, so
     // the start stays as near its own country as it can), facing it: it reaches the landmark within minutes. True if
-    // it moved. world.giants is the table round the start's map (+-18k).
+    // it moved. terrain.giants is the table round the start's map (+-18k).
     func startNearGiant() -> Bool {
         let p = SIMD2(position.x, position.z)
-        guard let g = world.giants.min(by: { simd_length($0.pos - p) < simd_length($1.pos - p) }) else { return false }
+        guard let g = terrain.giants.min(by: { simd_length($0.pos - p) < simd_length($1.pos - p) }) else { return false }
         let d = simd_length(g.pos - p)
         guard d > 3500 else { return false }
         let q = g.pos + (p - g.pos) / d * 2500

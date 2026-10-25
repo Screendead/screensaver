@@ -188,36 +188,37 @@ extension World {
         let finish = { (r: (heights: [Float], floors: [Float], ground: [Float], under: [Float], top: Float)) in
             buf.origin = o
             buf.globalMax = r.top + 1
-            buf.siteList = World.readSites(buf.sites)
-            buf.lamps = Dictionary(buf.siteList.flatMap { $0.lamps.map { ($0.index, $0) } }, uniquingKeysWith: { $1 })
-            buf.giantList = World.readGiants(buf.giants)
-            buf.isleList = Islands.parse(buf.isles)
-            buf.caveList = World.readCaves(buf.giants)
+            let terrain = self.terrain
+            terrain.sites = World.readSites(buf.sites)
+            terrain.lamps = Dictionary(terrain.sites.flatMap { $0.lamps.map { ($0.index, $0) } }, uniquingKeysWith: { $1 })
+            terrain.giants = World.readGiants(buf.giants)
+            terrain.isles = Islands.parse(buf.isles)
+            terrain.caves = World.readCaves(buf.giants)
             if let e = Knobs.current.env["VR_CAVES"] {
                 let mid = SIMD2<Float>(Float(o.x), Float(o.y)) + Float(MapLayout.size / 2)
                 let r = Float(e) ?? 1500
-                for c in buf.caveList.filter({ simd_length($0.m - mid) < r }).sorted(by: { simd_length($0.m - mid) < simd_length($1.m - mid) }) {
+                for c in terrain.caves.filter({ simd_length($0.m - mid) < r }).sorted(by: { simd_length($0.m - mid) < simd_length($1.m - mid) }) {
                     print(String(format: "cave at (%.0f, %.0f) floor %.0f in (%.2f, %.2f) W %.1f L %.0f H %.0f%@%@%@", c.m.x, c.m.y, c.yF, c.u.x, c.u.y, c.w, c.l, c.hc,
                                  c.flags & 2 != 0 ? " home" : "", c.flags & 4 != 0 ? " grotto" : "", c.flags & 8 != 0 ? " lowland" : ""))
                 }
-                print("caves in table: \(buf.caveList.count) (lowland \(buf.caveList.filter { $0.flags & 8 != 0 }.count)), within \(Int(r)): \(buf.caveList.filter { simd_length($0.m - mid) < r }.count)")
+                print("caves in table: \(terrain.caves.count) (lowland \(terrain.caves.filter { $0.flags & 8 != 0 }.count)), within \(Int(r)): \(terrain.caves.filter { simd_length($0.m - mid) < r }.count)")
             }
-            buf.jungleGrid = stride(from: 0, through: MapLayout.size, by: 64).flatMap { z in
+            terrain.jungleGrid = stride(from: 0, through: MapLayout.size, by: 64).flatMap { z in
                 stride(from: 0, through: MapLayout.size, by: 64).map { x in
                     Provinces.at(Double(Int(o.x) + x), Double(Int(o.y) + z), seed: self.seed).0 > 0.1
                 }
             }
-            buf.jungle = buf.jungleGrid.contains(true)
+            terrain.jungle = terrain.jungleGrid.contains(true)
             if World.logSites {
-                for g in buf.giantList { print(String(format: "giant at (%.0f, %.0f) ground %.0f top %.0f kind %d", g.pos.x, g.pos.y, g.ground, g.top, g.kind)) }
+                for g in terrain.giants { print(String(format: "giant at (%.0f, %.0f) ground %.0f top %.0f kind %d", g.pos.x, g.pos.y, g.ground, g.top, g.kind)) }
             }
             if World.logSites {
                 var counts = [Int](repeating: 0, count: 8)
-                for site in buf.siteList { counts[site.kind.rawValue] += 1 }
+                for site in terrain.sites { counts[site.kind.rawValue] += 1 }
                 if Knobs.current.env["VR_SITES"] == "3" {
                     // Parts as kind (2 house, 10 round) and dwelling style.
                     let raw = buf.sites.contents()
-                    for site in buf.siteList {
+                    for site in terrain.sites {
                         let base = raw + site.index * MapLayout.siteStride
                         let np = Int((base + 16).load(as: SIMD4<Float>.self).z)
                         var desc = ""
@@ -229,17 +230,17 @@ extension World {
                         print("  site \(site.kind) \(Int(site.pos.x)),\(Int(site.pos.y)) r\(Int(site.radius)) lamps \(site.lamps.count)\(desc)")
                     }
                 }
-                print("sites at (\(o.x),\(o.y)): henge \(counts[1]) cairn \(counts[2]) ruins \(counts[3]) hamlet \(counts[4]) jetty \(counts[5]) camp \(counts[6]) cave \(counts[7]) total \(buf.siteList.count)")
+                print("sites at (\(o.x),\(o.y)): henge \(counts[1]) cairn \(counts[2]) ruins \(counts[3]) hamlet \(counts[4]) jetty \(counts[5]) camp \(counts[6]) cave \(counts[7]) total \(terrain.sites.count)")
             }
             // Frames in flight hold the map they read until they complete.
             if index != self.active { self.buffers[self.active] = nil }
             self.active = index
             self.scratch = nil
-            self.cpuOrigin = o
-            self.cpuHeights = r.heights
-            self.cpuFloors = r.floors
-            self.cpuGround = r.ground
-            self.cpuUnder = r.under
+            terrain.origin = o
+            terrain.heights = r.heights
+            terrain.floors = r.floors
+            terrain.ground = r.ground
+            terrain.under = r.under
             self.pending = false
             if Renderer.logTiming { print(String(format: "world regen %.1f ms (%@)", (CACurrentMediaTime() - t0) * 1000, wait ? "sync" : "async")) }
         }

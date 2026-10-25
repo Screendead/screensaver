@@ -18,8 +18,8 @@ struct Sight {
     // The 1-voxel map, which the floor heights describe, is drawn unmorphed this far around the camera; past it the
     // coarse levels' mean heights can dip below the floor.
     var floorReach: Double
-    // The Renderer owns the world and outlives every Sight it makes.
-    unowned(unsafe) let world: World
+    // The Renderer owns the world, and so its terrain, and outlives every Sight it makes.
+    unowned(unsafe) let terrain: Terrain
     // > 0 for decisions that must hold however the bird moves in the next instant (spawning, retiring): occlusion
     // needs the sightline this far inside the ground, water anywhere within a few voxels counts, fog must be thicker.
     var slack = 0.0
@@ -93,7 +93,7 @@ struct Sight {
         let n = Int(len / step)
         for i in 1..<n {
             let q = a + v * (Double(i) / Double(n))
-            if simd_length(SIMD2(q.x - pos.x, q.z - pos.z)) < floorReach, let f = world.solidFloor(x: q.x, z: q.z), q.y < f - 0.5 - slack { return true }
+            if simd_length(SIMD2(q.x - pos.x, q.z - pos.z)) < floorReach, let f = terrain.solidFloor(x: q.x, z: q.z), q.y < f - 0.5 - slack { return true }
         }
         return false
     }
@@ -136,7 +136,7 @@ struct Sight {
         let s = (pos.y - Sight.sea) / (pos.y - m.y)
         let w = pos + v * s
         let near = [SIMD2(0.0, 0), SIMD2(4, 0), SIMD2(-4, 0), SIMD2(0, 4), SIMD2(0, -4)]
-        if near.allSatisfy({ world.solidFloor(x: w.x + $0.x, z: w.z + $0.y).map { $0 > Sight.sea + 0.5 } ?? false }) { return false }
+        if near.allSatisfy({ terrain.solidFloor(x: w.x + $0.x, z: w.z + $0.y).map { $0 > Sight.sea + 0.5 } ?? false }) { return false }
         let d = v / t
         let t1 = t * s
         let up = SIMD3(0.0, 1, 0) * reach(size: size, at: t)

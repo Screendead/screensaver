@@ -60,7 +60,7 @@ extension FlightCamera {
             // moon still frames it.
             if nightW > 0.5 {
                 let p = SIMD2(position.x, position.z)
-                for site in world.sites where litInterest(site) > 0 {
+                for site in terrain.sites where litInterest(site) > 0 {
                     let v = site.pos - p
                     let b = atan2(v.x, v.y)
                     if simd_length(v) < 450, abs(FlightCamera.angleDiff(b, moonYaw)) < 1.0 { headings.append(b) }
@@ -124,7 +124,7 @@ extension FlightCamera {
         // A giant whose crown the heading would pass under or climb over: turn for its nearer side early, while a
         // gentle turn still clears it (at most 0.09 rad/s, a radius of ~170 at top speed).
         var steerGiant = 0.0
-        for g in world.giants where g.top > position.y - 25 {
+        for g in terrain.giants where g.top > position.y - 25 {
             let v = g.pos - p
             let along = simd_dot(v, fwdFlat), across = v.x * fwdFlat.y - v.y * fwdFlat.x
             let clear = GiantInfo.reach + 140
@@ -139,7 +139,7 @@ extension FlightCamera {
             nextPilgrim = time + 2
             pilgrim = nil
             var best = 12000.0
-            for g in world.giants {
+            for g in terrain.giants {
                 let key = SIMD2(Int(g.pos.x.rounded()), Int(g.pos.y.rounded()))
                 if visitedGiants.contains(key) { continue }
                 let v = g.pos - p, d = simd_length(v)

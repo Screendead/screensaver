@@ -39,7 +39,7 @@ enum Snapshot {
         // VR_ISLES=n: lists the n floating islands nearest the camera's start on its map's table.
         if let n = Int(env["VR_ISLES"] ?? "") {
             let here = SIMD2(r.camera.position.x, r.camera.position.z)
-            let list = r.world.isles.sorted { simd_length($0.pos - here) < simd_length($1.pos - here) }
+            let list = r.world.terrain.isles.sorted { simd_length($0.pos - here) < simd_length($1.pos - here) }
             print("islands on the table: \(list.count) (massifs \(list.filter(\.massif).count))")
             for s in list.prefix(n) {
                 print(String(format: "island %.0f,%.0f dist %.0f R %.0f reach %.0f top %.0f keel %.0f base %.0f%@", s.pos.x, s.pos.y,
@@ -53,15 +53,15 @@ enum Snapshot {
             let v = spec.split(separator: ",").compactMap { Double($0) }
             if v.count >= 4 {
                 let here = SIMD2(r.camera.position.x, r.camera.position.z)
-                let pick = r.world.sites.filter { $0.kind.rawValue == Int(v[0]) }
+                let pick = r.world.terrain.sites.filter { $0.kind.rawValue == Int(v[0]) }
                     .sorted { simd_length($0.pos - here) < simd_length($1.pos - here) }
                 let rank = v.count > 4 ? Int(v[4]) : 0
                 if rank < pick.count {
                     let site = pick[rank]
                     let b = v[3] * .pi / 180
                     let cam = site.pos + SIMD2(sin(b), cos(b)) * v[1]
-                    let g = r.world.height(x: cam.x, z: cam.y) ?? 20
-                    let sg = r.world.height(x: site.pos.x, z: site.pos.y) ?? 20
+                    let g = r.world.terrain.height(x: cam.x, z: cam.y) ?? 20
+                    let sg = r.world.terrain.height(x: site.pos.x, z: site.pos.y) ?? 20
                     let y = max(g, 19.85) + v[2]
                     let yaw = atan2(site.pos.x - cam.x, site.pos.y - cam.y)
                     let pitch = atan2(sg + 2 - y, v[1]) + (settings.pitch ?? 0)
@@ -85,17 +85,17 @@ enum Snapshot {
                 func clear(_ c: CaveRec) -> Bool {
                     let m = SIMD2(Double(c.m.x), Double(c.m.y)), u = SIMD2(Double(c.u.x), Double(c.u.y))
                     let dir = SIMD2(u.x * cos(b0) - u.y * sin(b0), u.x * sin(b0) + u.y * cos(b0))
-                    guard c.w >= 6, c.hc >= 8, let g = r.world.height(x: m.x - dir.x * v[0], z: m.y - dir.y * v[0]) else { return false }
+                    guard c.w >= 6, c.hc >= 8, let g = r.world.terrain.height(x: m.x - dir.x * v[0], z: m.y - dir.y * v[0]) else { return false }
                     let y0 = max(g, Double(c.yF)) + v[1], y1 = Double(c.yF) + 0.5 * Double(c.hc)
                     for t in stride(from: 12.0, to: v[0], by: 6.0) {
                         let q = m - dir * t
-                        guard let h = r.world.height(x: q.x, z: q.y) else { return false }
+                        guard let h = r.world.terrain.height(x: q.x, z: q.y) else { return false }
                         if h > y1 + (y0 - y1) * t / v[0] { return false }
                     }
                     return true
                 }
                 let mode = v.count > 4 ? Int(v[4]) : 0
-                let pick = r.world.caves.filter { mode == 0 || (mode == 1 && $0.flags & 2 != 0) || (mode == 2 && clear($0)) || (mode == 3 && $0.flags & 4 != 0) }
+                let pick = r.world.terrain.caves.filter { mode == 0 || (mode == 1 && $0.flags & 2 != 0) || (mode == 2 && clear($0)) || (mode == 3 && $0.flags & 4 != 0) }
                     .sorted { simd_length($0.m - here) < simd_length($1.m - here) }
                 let rank = v.count > 3 ? Int(v[3]) : 0
                 if rank < pick.count {
@@ -104,7 +104,7 @@ enum Snapshot {
                     let b = v[2] * .pi / 180
                     let dir = SIMD2(u.x * cos(b) - u.y * sin(b), u.x * sin(b) + u.y * cos(b))
                     let cam = m - dir * v[0]
-                    let g = r.world.height(x: cam.x, z: cam.y) ?? 20
+                    let g = r.world.terrain.height(x: cam.x, z: cam.y) ?? 20
                     let y = max(max(g, 19.85), Double(c.yF)) + v[1]
                     let yaw = atan2(m.x - cam.x, m.y - cam.y)
                     let pitch = atan2(Double(c.yF) + 0.4 * Double(c.hc) - y, v[0]) + (settings.pitch ?? 0)
@@ -150,19 +150,19 @@ enum Snapshot {
                     r.simulate(0.25)
                     if env["VR_FTRACE"] != nil {
                         let c = r.camera.position
-                        print(String(format: "ft %.2f %.1f %.1f %.2f %.2f %.3f", Double(i - 1) + Double(q + 1) * 0.25, c.x, c.z, c.y, r.world.height(x: c.x, z: c.z) ?? -1, r.camera.yaw)
+                        print(String(format: "ft %.2f %.1f %.1f %.2f %.2f %.3f", Double(i - 1) + Double(q + 1) * 0.25, c.x, c.z, c.y, r.world.terrain.height(x: c.x, z: c.z) ?? -1, r.camera.yaw)
                               + " " + r.camera.terms.map { String(format: "%.1f", $0) }.joined(separator: " "))
                     }
                 }
                 let p = r.camera.position
-                let col = r.world.column(x: p.x, z: p.z)
-                let g = col.map { c in c.under.map { p.y < $0 ? c.ground : c.top } ?? c.top } ?? r.world.height(x: p.x, z: p.z) ?? 0
+                let col = r.world.terrain.column(x: p.x, z: p.z)
+                let g = col.map { c in c.under.map { p.y < $0 ? c.ground : c.top } ?? c.top } ?? r.world.terrain.height(x: p.x, z: p.z) ?? 0
                 var near = Double.infinity
                 for (dx, dz) in [(0.0, 0.0)] + (0..<16).map({ (k: Int) -> (Double, Double) in
                     let a = Double(k % 8) * .pi / 4, rr = k < 8 ? 12.0 : 24.0
                     return (sin(a) * rr, cos(a) * rr)
                 }) {
-                    guard let c = r.world.column(x: p.x + dx, z: p.z + dz), let u = c.under else { continue }
+                    guard let c = r.world.terrain.column(x: p.x + dx, z: p.z + dz), let u = c.under else { continue }
                     let v = p.y < u ? u - p.y : p.y > c.top ? p.y - c.top : 0
                     near = min(near, (dx * dx + dz * dz + v * v).squareRoot())
                 }
@@ -171,7 +171,7 @@ enum Snapshot {
                 for f in r.wildlife.flocks {
                     for b in f.birds {
                         birdChecks += 1
-                        if let c = r.world.column(x: b.pos.x, z: b.pos.z), let u = c.under, b.pos.y >= u, b.pos.y < c.top { birdsInRock += 1 }
+                        if let c = r.world.terrain.column(x: b.pos.x, z: b.pos.z), let u = c.under, b.pos.y >= u, b.pos.y < c.top { birdsInRock += 1 }
                     }
                 }
                 if near < 25 { isleScrape += 1; print(String(format: "flight island scrape t=%d pos=(%.0f,%.0f) y=%.0f clearance %.0f", i, p.x, p.z, p.y, near)) }
@@ -179,7 +179,7 @@ enum Snapshot {
                     // Between two islands: one abreast on each side (its reach spans the camera along the track), within 400 of its rock.
                     let side = SIMD2(cos(r.camera.yaw), -sin(r.camera.yaw)), fwd = SIMD2(sin(r.camera.yaw), cos(r.camera.yaw))
                     var l = false, rt = false
-                    for s in r.world.isles where s.radius > 40 {
+                    for s in r.world.terrain.isles where s.radius > 40 {
                         let v = s.pos - SIMD2(p.x, p.z), across = simd_dot(v, side), along = simd_dot(v, fwd)
                         if abs(along) < s.reach, abs(across) > s.reach * 0.5, abs(across) < s.reach + 400 { if across > 0 { rt = true } else { l = true } }
                     }
@@ -190,7 +190,7 @@ enum Snapshot {
                 }
                 if let u = col?.under, p.y < u {
                     isleUnder += 1
-                    if let s = r.world.isles.first(where: { simd_length($0.pos - SIMD2(p.x, p.z)) < $0.reach }) { islesUnder.insert(SIMD2(Int(s.pos.x), Int(s.pos.y))) }
+                    if let s = r.world.terrain.isles.first(where: { simd_length($0.pos - SIMD2(p.x, p.z)) < $0.reach }) { islesUnder.insert(SIMD2(Int(s.pos.x), Int(s.pos.y))) }
                 }
                 if p.y - lastY > 6 { print(String(format: "flight jump t=%d pos=(%.0f,%.0f) %.0f -> %.0f", i, p.x, p.z, lastY, p.y)) }
                 maxClimb = max(maxClimb, p.y - lastY)
@@ -214,7 +214,7 @@ enum Snapshot {
                 let wall = r.camera.wallInFrame()
                 if wall >= 0.4 { walled += 1; walledRun += 1; maxWalledRun = max(maxWalledRun, walledRun) } else { walledRun = 0 }
                 if p.y - (i == 1 ? p.y : prevY) > 6 { fastClimb += 1 }
-                for g in r.world.giants {
+                for g in r.world.terrain.giants {
                     let dg = simd_length(SIMD2(p.x, p.z) - g.pos)
                     if dg < GiantInfo.reach && p.y < g.top { underCrown += 1 }
                     if dg < 1500 { giantsSeen.insert(Int(g.pos.x) * 100_003 + Int(g.pos.y)) }
@@ -222,8 +222,8 @@ enum Snapshot {
                 prevY = p.y
                 if i % 12 == 0 {
                     fflush(stdout)
-                    let nearG = r.world.giants.map { simd_length(SIMD2(p.x, p.z) - $0.pos) }.min() ?? -1
-                    let nearI = r.world.isles.map { simd_length(SIMD2(p.x, p.z) - $0.pos) - $0.reach }.min() ?? -1
+                    let nearG = r.world.terrain.giants.map { simd_length(SIMD2(p.x, p.z) - $0.pos) }.min() ?? -1
+                    let nearI = r.world.terrain.isles.map { simd_length(SIMD2(p.x, p.z) - $0.pos) - $0.reach }.min() ?? -1
                     print(String(format: "flight t=%d pos=(%.0f,%.0f) y=%.0f ground=%.0f wall=%.2f far=%.0f yaw=%.0f giant=%.0f isle=%.0f", i, p.x, p.z, p.y, g, wall,
                                  r.farHeight(x: p.x + sin(r.camera.yaw) * 600, z: p.z + cos(r.camera.yaw) * 600) ?? -1, r.camera.yaw * 180 / .pi, nearG, nearI))
                 }
@@ -241,7 +241,7 @@ enum Snapshot {
             }
             print(String(format: "flight towers: closest plinth edge %.0f, seconds with a tower ahead within 9k %d, tower-seconds within 1.5k %d", towerEdge, towerSeen, towerClose))
             print(String(format: "flight islands: closest %.0f, seconds nearer than 25 %d, seconds beneath one %d, islands passed under %d, on the table %d, bird-seconds in island cells %d of %d",
-                         isleClear, isleScrape, isleUnder, islesUnder.count, r.world.isles.count, birdsInRock, birdChecks))
+                         isleClear, isleScrape, isleUnder, islesUnder.count, r.world.terrain.isles.count, birdsInRock, birdChecks))
             print(String(format: "flight islands 2: seconds between two %d, seconds with a flock circling one %d, flocks that circled %d", isleBetween, circlingSeconds, circlers.count))
             print(String(format: "flight done: max climb %.2f/s, min clearance %.1f, max y %.0f (ceiling %.0f), low seconds %d, walled seconds %d (longest %d), seconds climbing over 6/s %d, seconds under a crown %d, giants passed within 1500 %d", maxClimb, minClear, maxY, FlightCamera.ceiling, lows, walled, maxWalledRun, fastClimb, underCrown, giantsSeen.count))
             if let log = r.popLog { print(log.summary(r.wildlife)) }
@@ -257,7 +257,7 @@ enum Snapshot {
         for t in settings.screenshotTimes.sorted() {
             r.simulate(t - simulated)
             if let v = camSpec, v.count >= 5 {
-                let g = (v.count > 5 && v[5] == 1) ? 0 : max(r.world.height(x: v[0], z: v[1]) ?? 20, 19.85)
+                let g = (v.count > 5 && v[5] == 1) ? 0 : max(r.world.terrain.height(x: v[0], z: v[1]) ?? 20, 19.85)
                 r.camera.freeze(position: SIMD3(v[0], g + v[2], v[1]), yaw: v[3] * .pi / 180, pitch: v[4] * .pi / 180,
                                 roll: v.count > 6 ? v[6] * .pi / 180 : 0)
             }
@@ -343,8 +343,8 @@ enum Snapshot {
         let o = r.camera.position
         let tanV = tan(25.0 * .pi / 180), tanH = tanV * Double(r.aspect)
         var seen: [String] = []
-        for site in r.world.sites {
-            let g = r.world.height(x: site.pos.x, z: site.pos.y) ?? 20
+        for site in r.world.terrain.sites {
+            let g = r.world.terrain.height(x: site.pos.x, z: site.pos.y) ?? 20
             let v = SIMD3(site.pos.x, g + 1, site.pos.y) - o
             let z = simd_dot(v, b.fwd), dist = simd_length(v)
             guard z > 0, dist < 700 else { continue }

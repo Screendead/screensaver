@@ -60,7 +60,7 @@ extension Renderer {
         }
         bakes?.endEncoding()
         // The giants within the world's edge: their strand maps (baked on arrival) and the frame's table of them.
-        vines.update(giants: world.giants, eye: SIMD2(camera.position.x, camera.position.z), reach: Double(f.fade.y), origin: world.origin, seed: world.seed, into: cb)
+        vines.update(giants: world.terrain.giants, eye: SIMD2(camera.position.x, camera.position.z), reach: Double(f.fade.y), origin: world.origin, seed: world.seed, into: cb)
         // Snapshots refresh the far heights synchronously as they simulate.
         if !world.synchronous { updateFar(into: cb) }
         birdSlots.wait()
@@ -70,7 +70,7 @@ extension Renderer {
         // Caves are carved out to level 3's handoff: shading looks them up only while one lies within it.
         let camXZ = SIMD2<Float>(Float(camera.position.x), Float(camera.position.z))
         let caveR = Float(Clipmap.handoff(3)) + Float(MapLayout.caveReach)
-        f.birds.w = world.caves.contains { simd_length_squared($0.m - camXZ) < caveR * caveR } ? 1 : 0
+        f.birds.w = world.terrain.caves.contains { simd_length_squared($0.m - camXZ) < caveR * caveR } ? 1 : 0
         f.birds.x = Float(wildlife.upload(into: birdBuf, origin: SIMD3(Double(world.origin.x), 0, Double(world.origin.y))))
         let b = camera.basis
         prevCamera = (camera.position, b.fwd, b.right, b.up)
@@ -91,15 +91,15 @@ extension Renderer {
             // On while an island within the reach could show, off a little past it, so a camera hovering at the edge does
             // not flick it.
             let key = Renderer.keyLight(clock.sunDirection).0
-            let isleSpheres = Islands.spheres(world.isles, eye: camera.position, within: Renderer.isleShadeReach + (isleVariant ? 400 : 0), key: key)
+            let isleSpheres = Islands.spheres(world.terrain.isles, eye: camera.position, within: Renderer.isleShadeReach + (isleVariant ? 400 : 0), key: key)
             isleVariant = Islands.inView(isleSpheres, eye: camera.position, fwd: tb.fwd, half: half, margin: isleVariant ? 0.12 : 0.06)
             let isles = isleVariant
-            isleShapeVariant = isles || Islands.inView(Islands.spheres(world.isles, eye: camera.position, within: edgeRadius + 1000, key: key),
+            isleShapeVariant = isles || Islands.inView(Islands.spheres(world.terrain.isles, eye: camera.position, within: edgeRadius + 1000, key: key),
                                                        eye: camera.position, fwd: tb.fwd, half: half, margin: isleShapeVariant ? 0.12 : 0.06)
-            let canopyBands = world.bandsNear(cam2, radius: Clipmap.handoff(0) + 40)
+            let canopyBands = world.terrain.bandsNear(cam2, radius: Clipmap.handoff(0) + 40)
             let noband = Renderer.profile == "noband"
             f.shadow.w = isles && !noband ? 1 : 0
-            let isleTable = Islands.table(world.isles, near: cam2, within: 3000, view: (camera.position, tb.fwd, half))
+            let isleTable = Islands.table(world.terrain.isles, near: cam2, within: 3000, view: (camera.position, tb.fwd, half))
             var isleBytes = isleTable.bytes
             towers.frameTable(eye: camera.position, fwd: tb.fwd, right: tb.right, up: tb.up, tanH: tanV * Double(aspect), tanV: tanV)
             // Per tile: 1 an island's surfaces may show, 2 its shade or sky occlusion, 8 close by one within isleShadeReach,
@@ -113,15 +113,15 @@ extension Renderer {
                 }
             }
             if isleShapeVariant {
-                mark(Islands.boxes(world.isles, eye: camera.position, within: edgeRadius + 1000, key: key, columns: true, shade: false), 1)
+                mark(Islands.boxes(world.terrain.isles, eye: camera.position, within: edgeRadius + 1000, key: key, columns: true, shade: false), 1)
             }
             if isles {
                 let within = Renderer.isleShadeReach + 400
-                mark(Islands.boxes(world.isles, eye: camera.position, within: within, key: key, columns: true, shade: false), 8)
-                mark(Islands.boxes(world.isles, eye: camera.position, within: within, key: key, columns: false, shade: true), 2)
+                mark(Islands.boxes(world.terrain.isles, eye: camera.position, within: within, key: key, columns: true, shade: false), 8)
+                mark(Islands.boxes(world.terrain.isles, eye: camera.position, within: within, key: key, columns: false, shade: true), 2)
                 mark(isleTable.mist, 12)
                 // The sky occlusion reaches no farther than the shading table, which holds every island it darkens.
-                mark(world.isles.filter { simd_length($0.pos - cam2) < 3000 + $0.reach }.map(Islands.occlusionBox), 2)
+                mark(world.terrain.isles.filter { simd_length($0.pos - cam2) < 3000 + $0.reach }.map(Islands.occlusionBox), 2)
             }
             // Island bands only where an island's work does: elsewhere its air is walked as any rock gap's.
             let bandsT = canopyBands && !noband

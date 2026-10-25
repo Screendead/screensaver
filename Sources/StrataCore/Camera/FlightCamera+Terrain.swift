@@ -7,7 +7,7 @@ extension FlightCamera {
         return position.y < u - FlightCamera.isleMargin + FlightCamera.isleSink * d / speed
     }
     func h(_ x: Double, _ z: Double) -> Double {
-        if let c = world.column(x: x, z: z) {
+        if let c = terrain.column(x: x, z: z) {
             if let u = c.under, u - c.ground >= 90, beneath(x, z, under: u) { return c.ground }
             return c.top
         }
@@ -23,7 +23,7 @@ extension FlightCamera {
     }
     // The highest the flight may climb near (x, z) while it passes under an island there.
     func isleCeiling(_ x: Double, _ z: Double) -> Double {
-        guard let c = world.column(x: x, z: z), let u = c.under, u - c.ground >= 90, beneath(x, z, under: u) else { return .infinity }
+        guard let c = terrain.column(x: x, z: z), let u = c.under, u - c.ground >= 90, beneath(x, z, under: u) else { return .infinity }
         return u - FlightCamera.isleCap
     }
 
@@ -36,7 +36,7 @@ extension FlightCamera {
     }
     func hSteer(_ x: Double, _ z: Double) -> Double { max(h(x, z), towerTop(x, z)) }
     // Far terrain: the 32-voxel max grid, else the fine map.
-    func hFar(_ x: Double, _ z: Double) -> Double { isleFloor(x, z) ?? far.height(x: x, z: z) ?? world.height(x: x, z: z) ?? 20 }
+    func hFar(_ x: Double, _ z: Double) -> Double { isleFloor(x, z) ?? far.height(x: x, z: z) ?? terrain.height(x: x, z: z) ?? 20 }
 
     // How much terrain along a heading rises above what the flight could clear: the slope it may climb (capped at
     // the ceiling), weighted toward near walls. Gorges and passes are the open headings.
