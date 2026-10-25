@@ -8,8 +8,7 @@ extension SkyClock {
         if e > -0.02 { return (simd_normalize(SIMD3(sun.x, 0.05, sun.z)), true) }
         let glow = simd_normalize(SIMD3(sun.x, 0.05, sun.z))
         let moon = simd_normalize(SIMD3(-sun.x, max(-sun.y * 0.7, 0.08), -sun.z))
-        let t = min(max((e + 0.09) / (-0.16 + 0.09), 0), 1)
-        let m = t * t * (3 - 2 * t)
+        let m = smoothstep(-0.09, -0.16, e)
         return (simd_normalize(glow + (moon - glow) * m), m > 0.5)
     }
 }
