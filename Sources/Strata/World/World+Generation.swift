@@ -189,11 +189,11 @@ extension World {
             buf.origin = o
             buf.globalMax = r.top + 1
             let terrain = self.terrain
-            terrain.sites = World.readSites(buf.sites)
+            terrain.sites = MapTables.sites(in: buf.sites.contents())
             terrain.lamps = Dictionary(terrain.sites.flatMap { $0.lamps.map { ($0.index, $0) } }, uniquingKeysWith: { $1 })
-            terrain.giants = World.readGiants(buf.giants)
-            terrain.isles = Islands.parse(buf.isles)
-            terrain.caves = World.readCaves(buf.giants)
+            terrain.giants = MapTables.giants(in: buf.giants.contents())
+            terrain.isles = Islands.parse(buf.isles.contents())
+            terrain.caves = MapTables.caves(in: buf.giants.contents())
             if let e = Knobs.current.env["VR_CAVES"] {
                 let mid = SIMD2<Float>(Float(o.x), Float(o.y)) + Float(MapLayout.size / 2)
                 let r = Float(e) ?? 1500

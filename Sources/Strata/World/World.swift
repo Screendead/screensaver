@@ -57,16 +57,10 @@ final class World {
             bd.usage = [.shaderRead, .shaderWrite, .pixelFormatView]
             bd.storageMode = .private
             guard let bt = device.makeTexture(descriptor: bd),
-                  let gb = device.makeBuffer(length: MapLayout.caveOffset + MapLayout.caveWin * MapLayout.caveWin * MemoryLayout<CaveRec>.stride, options: .storageModeShared),
+                  let gb = device.makeBuffer(length: MapTables.giantTableBytes, options: .storageModeShared),
                   let ib = device.makeBuffer(length: Islands.slots * Islands.recordSize, options: .storageModeShared) else { return nil }
-            // No slot holds a cell yet (placeGiants and placeIslands fill a slot only when its cell changes).
-            let none = GiantRec(cell: SIMD2(Int32.min, Int32.min))
-            let slots = gb.contents().bindMemory(to: GiantRec.self, capacity: MapLayout.giantWin * MapLayout.giantWin)
-            for i in 0..<(MapLayout.giantWin * MapLayout.giantWin) { slots[i] = none }
-            let islots = ib.contents().bindMemory(to: IsleRec.self, capacity: Islands.slots)
-            for i in 0..<Islands.slots { islots[i] = IsleRec() }
-            let caveSlots = (gb.contents() + MapLayout.caveOffset).bindMemory(to: CaveRec.self, capacity: MapLayout.caveWin * MapLayout.caveWin)
-            for i in 0..<(MapLayout.caveWin * MapLayout.caveWin) { caveSlots[i] = CaveRec(cell: SIMD2(Int32.min, Int32.min)) }
+            MapTables.clearGiantsAndCaves(gb.contents())
+            Islands.clear(ib.contents())
             giants = gb
             isles = ib
             band = bt
@@ -240,7 +234,7 @@ final class World {
         enc.endEncoding()
         cb.commit()
         cb.waitUntilCompleted()
-        terrain.giants = World.readGiants(buf.giants)
+        terrain.giants = MapTables.giants(in: buf.giants.contents())
     }
 
     static func mapOrigin(_ center: SIMD2<Double>) -> SIMD2<Int32> {

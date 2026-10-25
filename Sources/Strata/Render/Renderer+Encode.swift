@@ -71,7 +71,7 @@ extension Renderer {
         let camXZ = SIMD2<Float>(Float(camera.position.x), Float(camera.position.z))
         let caveR = Float(Clipmap.handoff(3)) + Float(MapLayout.caveReach)
         f.birds.w = world.terrain.caves.contains { simd_length_squared($0.m - camXZ) < caveR * caveR } ? 1 : 0
-        f.birds.x = Float(wildlife.upload(into: birdBuf, origin: SIMD3(Double(world.origin.x), 0, Double(world.origin.y))))
+        f.birds.x = Float(wildlife.upload(into: birdBuf.contents(), origin: SIMD3(Double(world.origin.x), 0, Double(world.origin.y))))
         let b = camera.basis
         prevCamera = (camera.position, b.fwd, b.right, b.up)
         let histIn = history[historyIndex], histOut = history[1 - historyIndex]

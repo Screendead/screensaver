@@ -6,11 +6,11 @@ import simd
 // decides it on the GPU for a square of world cells round the camera's; the list feeds the camera, and the records
 // nearest the camera are the shader's table (fragment buffer 9; stage 3's giants hold 8).
 final class Towers {
-    // Must match TOWER_CELL, TOWER_MEMBERS and TOWER_TABLE (and TowerRec's 64 bytes) in Shaders/Saver.metal.
-    static let cell = 9000.0, members = 4, tableSize = 16, recordSize = 64
+    // Must match TOWER_CELL, TOWER_MEMBERS and TOWER_TABLE in Shaders/Saver.metal.
+    static let cell = 9000.0, members = 4, tableSize = 16
     // Cells on a side of the square round the camera's cell: every tower out past the world's edge (13.8k).
     static let grid = 5
-    static let tableBytes = 16 + tableSize * recordSize
+    static let tableBytes = 16 + tableSize * TowerInfo.recordSize
 
     private let device: MTLDevice
     private let pipeline: MTLComputePipelineState
@@ -25,7 +25,7 @@ final class Towers {
     init?(gpu: GPU, seed: UInt32) {
         let device = gpu.device
         guard let p = gpu.pipeline("placeTowers"),
-              let b = device.makeBuffer(length: Towers.grid * Towers.grid * Towers.members * Towers.recordSize, options: .storageModeShared)
+              let b = device.makeBuffer(length: Towers.grid * Towers.grid * Towers.members * TowerInfo.recordSize, options: .storageModeShared)
         else { return nil }
         self.device = device
         pipeline = p
@@ -43,21 +43,6 @@ final class Towers {
         enc.endEncoding()
     }
 
-    private static func parse(_ buf: MTLBuffer, count: Int) -> [TowerInfo] {
-        let raw = buf.contents()
-        var out: [TowerInfo] = []
-        for i in 0..<count {
-            let r = raw + i * recordSize
-            let a = r.load(as: SIMD4<Float>.self), b = (r + 16).load(as: SIMD4<Float>.self)
-            let c = (r + 32).load(as: SIMD4<Float>.self), d = (r + 48).load(as: SIMD4<UInt32>.self)
-            guard b.x > 0 else { continue }
-            out.append(TowerInfo(pos: SIMD2(Double(a.x), Double(a.y)), radius: Double(a.z), base: Double(a.w), height: Double(b.x),
-                                 kind: Int(d.y), member: Int(d.w & 255), lit: d.z != 0, moist: Double((d.w >> 8) & 255) / 255,
-                                 temp: Double((d.w >> 16) & 255) / 255, record: (a, b, c, d)))
-        }
-        return out
-    }
-
     private static func cellOf(_ p: SIMD2<Double>) -> SIMD2<Int32> {
         SIMD2(Int32(floor(p.x / cell)), Int32(floor(p.y / cell)))
     }
@@ -73,7 +58,7 @@ final class Towers {
             // Strong: a weak reference would give Towers a side table, slowing the camera's many reads of the list.
             let done = { (ok: Bool) in
                 if ok {
-                    self.list = Towers.parse(self.buffer, count: n * n * Towers.members)
+                    self.list = TowerInfo.decode(self.buffer.contents(), count: n * n * Towers.members)
                     self.cellAt = c
                 }
                 self.inFlight = false
@@ -115,7 +100,7 @@ final class Towers {
         table.withUnsafeMutableBytes { p in
             p.storeBytes(of: Int32(n), as: Int32.self)
             for i in 0..<n {
-                let t = near[i], o = 16 + i * Towers.recordSize
+                let t = near[i], o = 16 + i * TowerInfo.recordSize
                 p.storeBytes(of: t.record.0, toByteOffset: o, as: SIMD4<Float>.self)
                 p.storeBytes(of: t.record.1, toByteOffset: o + 16, as: SIMD4<Float>.self)
                 p.storeBytes(of: t.record.2, toByteOffset: o + 32, as: SIMD4<Float>.self)
@@ -126,11 +111,11 @@ final class Towers {
 
     // Every tower of an n-cell square round p (VR_TOWERS listings).
     func scan(around p: SIMD2<Double>, cells n: Int, queue: MTLCommandQueue) -> [TowerInfo] {
-        guard let buf = device.makeBuffer(length: n * n * Towers.members * Towers.recordSize, options: .storageModeShared),
+        guard let buf = device.makeBuffer(length: n * n * Towers.members * TowerInfo.recordSize, options: .storageModeShared),
               let cb = queue.makeCommandBuffer() else { return [] }
         encode(cb, into: buf, first: Towers.cellOf(p) &- Int32(n / 2), n: n)
         cb.commit()
         cb.waitUntilCompleted()
-        return Towers.parse(buf, count: n * n * Towers.members)
+        return TowerInfo.decode(buf.contents(), count: n * n * Towers.members)
     }
 }

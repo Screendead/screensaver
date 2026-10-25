@@ -1,4 +1,3 @@
-import Metal
 import simd
 
 enum Islands {
@@ -28,8 +27,14 @@ enum Islands {
     }
     static func crag(_ r: Double, _ h: UInt32) -> Double { form(r, h) == 1 ? 0.3 * r : 0 }
 
-    static func parse(_ buf: MTLBuffer) -> [IslandInfo] {
-        let p = buf.contents().bindMemory(to: IsleRec.self, capacity: slots)
+    // No slot holds a cell yet: placeIslands fills a slot only when its cell changes.
+    static func clear(_ table: UnsafeMutableRawPointer) {
+        let slots = table.bindMemory(to: IsleRec.self, capacity: Islands.slots)
+        for i in 0..<Islands.slots { slots[i] = IsleRec() }
+    }
+
+    static func parse(_ table: UnsafeRawPointer) -> [IslandInfo] {
+        let p = table.bindMemory(to: IsleRec.self, capacity: slots)
         var out: [IslandInfo] = []
         for i in 0..<slots {
             let r = p[i]
