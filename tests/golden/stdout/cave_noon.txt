@@ -1,0 +1,2 @@
+showing cave at (4286, 3906) floor 89 W 8.7 H 9 L 36 home, 1 of 43; VR_CAM=4314.4,3877.8,95.0,-44.24,-3.43,1
+t=30 phase=0.250 sunY=0.49 exposure=0.70 cam=(4314,95,3878) yaw=-44.2 pitch=-3.4 birds=67 flocks=7 near=144 sites=1[henge@651] -> cave_noon.png

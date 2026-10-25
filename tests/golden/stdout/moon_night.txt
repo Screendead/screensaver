@@ -1,0 +1,1 @@
+t=30 phase=0.750 sunY=-0.49 exposure=1.60 cam=(3706,34,1705) yaw=21.7 pitch=-0.5 birds=0 flocks=0 near=nan sites=4[camp@597 camp@446 camp@528 camp@635] -> moon_night.png

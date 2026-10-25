@@ -1,0 +1,1 @@
+t=30 phase=0.250 sunY=0.49 exposure=0.70 cam=(9500,80,4000) yaw=-75.0 pitch=3.0 birds=0 flocks=0 near=nan sites=4[hamlet@269 camp@592 jetty@277 hamlet@350] -> tepui_noon.png
