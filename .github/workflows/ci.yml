@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # Xcode 16's type checker times out on two StrataCore expressions that Xcode 26 builds.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Metal toolchain
+        # Xcode 26 ships the Metal compiler as a separate component; the shader-probe tests need it.
+        run: |
+          xcrun metal --version 2>/dev/null || xcodebuild -downloadComponent MetalToolchain
+          xcrun metal --version
+
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: |
+          set -o pipefail
+          swift test --enable-code-coverage 2>&1 | tee test.log
+
+      - name: Shader probes
+        run: |
+          grep -E "ShaderProbes|skipped|no Metal device" test.log | head -20 || true
+          grep -cE "Test Case .* skipped" test.log || true
+
+      - name: Coverage
+        id: coverage
+        run: |
+          # Lines in Sources/ only; the executable target's sources aren't linked into the test bundle.
+          profdata="$(dirname "$(swift test --show-codecov-path)")/default.profdata"
+          bundle="$(swift build --show-bin-path)/STRATAPackageTests.xctest/Contents/MacOS/STRATAPackageTests"
+          xcrun llvm-cov report "$bundle" -instr-profile "$profdata" -ignore-filename-regex='(\.build|tests)/' | tail -1
+          pct=$(xcrun llvm-cov export -summary-only "$bundle" -instr-profile "$profdata" -ignore-filename-regex='(\.build|tests)/' \
+            | python3 -c 'import json,sys; print(round(json.load(sys.stdin)["data"][0]["totals"]["lines"]["percent"]))')
+          echo "Line coverage of Sources/: ${pct}%" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "pct=$pct" >> "$GITHUB_OUTPUT"
+
+      - name: Publish badge
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        env:
+          PCT: ${{ steps.coverage.outputs.pct }}
+        run: |
+          if   [ "$PCT" -ge 80 ]; then color=brightgreen
+          elif [ "$PCT" -ge 60 ]; then color=green
+          elif [ "$PCT" -ge 40 ]; then color=yellow
+          elif [ "$PCT" -ge 20 ]; then color=orange
+          else color=red; fi
+          dir=$(mktemp -d)
+          cd "$dir"
+          git init -q
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          if git fetch -q --depth 1 origin badges; then git checkout -q -b badges FETCH_HEAD; else git checkout -q --orphan badges; fi
+          printf '{"schemaVersion":1,"label":"coverage","message":"%s%%","color":"%s"}\n' "$PCT" "$color" > coverage.json
+          cat coverage.json
+          git add coverage.json
+          if git diff --cached --quiet; then echo "badge unchanged"; exit 0; fi
+          git commit -q -m "coverage ${PCT}% at ${GITHUB_SHA::7}"
+          git push -q origin badges
