@@ -7792,6 +7792,7 @@ static float4 skyWithClouds(thread const Ctx& x, float3 o, float3 d) {
 static float3 softCloudSky(thread const Ctx& x, float3 o, float3 r) {
     float3 sky = skyColor(r, x.L);
     if (r.y < 0.02) return sky;
+    sky += 0.6 * aurora(x, r);
     float t = (CLOUD_Y - o.y) / r.y;
     float2 q = o.xz + r.xz * t + float2(x.origin);
     // Soft coverage, blurred as if by ripples, matching the volumetric sky.
