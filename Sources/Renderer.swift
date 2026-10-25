@@ -85,15 +85,19 @@ final class GPU {
                                                 (true, false, true, false, false), (true, true, true, true, false),
                                                 (true, true, true, true, true)]
 
-    func scene(towers: Bool, _ v: SceneVariant) -> MTLRenderPipelineState? {
-        pipeline(GPU.sceneKey(towers, v)) { sceneDescriptor(towers, v) }
+    // sea: the sea of cloud compiled in (function constant 8), only while SkyClock.cloudSea is above 0.
+    func scene(towers: Bool, sea: Bool, _ v: SceneVariant) -> MTLRenderPipelineState? {
+        pipeline(GPU.sceneKey(towers, sea, v)) { sceneDescriptor(towers, sea, v) }
     }
 
-    private static func sceneKey(_ towers: Bool, _ v: SceneVariant) -> String { "scene \(towers) \(v.bands) \(v.shape) \(v.isles) \(v.near) \(v.mist)" }
+    private static func sceneKey(_ towers: Bool, _ sea: Bool, _ v: SceneVariant) -> String {
+        "scene \(towers) \(sea) \(v.bands) \(v.shape) \(v.isles) \(v.near) \(v.mist)"
+    }
 
-    private func sceneDescriptor(_ towers: Bool, _ v: SceneVariant) -> MTLRenderPipelineDescriptor {
+    private func sceneDescriptor(_ towers: Bool, _ sea: Bool, _ v: SceneVariant) -> MTLRenderPipelineDescriptor {
         let fc = MTLFunctionConstantValues()
-        var b = v.bands, t = towers, i = v.isles, sh = v.shape, m = v.mist, n = v.near
+        var b = v.bands, t = towers, i = v.isles, sh = v.shape, m = v.mist, n = v.near, s = sea
+        fc.setConstantValue(&s, type: .bool, index: 8)
         fc.setConstantValue(&b, type: .bool, index: 0)
         fc.setConstantValue(&t, type: .bool, index: 1)
         fc.setConstantValue(&i, type: .bool, index: 3)
@@ -104,15 +108,16 @@ final class GPU {
     }
 
     // The giants' hanging strands, drawn over the scene (vineFragment): the towers and the band test compiled out.
-    func vine() -> MTLRenderPipelineState? {
-        pipeline("vine") { vineDescriptor() }
+    func vine(sea: Bool) -> MTLRenderPipelineState? {
+        pipeline("vine \(sea)") { vineDescriptor(sea) }
     }
 
-    private func vineDescriptor() -> MTLRenderPipelineDescriptor {
+    private func vineDescriptor(_ sea: Bool) -> MTLRenderPipelineDescriptor {
         let fc = MTLFunctionConstantValues()
-        var no = false
+        var no = false, s = sea
         fc.setConstantValue(&no, type: .bool, index: 0)
         fc.setConstantValue(&no, type: .bool, index: 1)
+        fc.setConstantValue(&s, type: .bool, index: 8)
         return fullscreen(try? library.makeFunction(name: "vineFragment", constantValues: fc), .rgba16Float)
     }
 
@@ -160,10 +165,12 @@ final class GPU {
         var descriptors = ["taa": taaDescriptor(false), "taa star": taaDescriptor(true),
                            "bio": bioDescriptor(),
                            GPU.postKey(output, true): postDescriptor(output, true)]
-        for t in [false, true] {
-            for v in GPU.sceneVariants { descriptors[GPU.sceneKey(t, v)] = sceneDescriptor(t, v) }
+        for s in [false, true] {
+            for t in [false, true] {
+                for v in GPU.sceneVariants { descriptors[GPU.sceneKey(t, s, v)] = sceneDescriptor(t, s, v) }
+            }
+            descriptors["vine \(s)"] = vineDescriptor(s)
         }
-        descriptors["vine"] = vineDescriptor()
         for f in functions where f.functionType == .kernel {
             group.enter()
             device.makeComputePipelineState(function: f) { p, _ in
@@ -1253,13 +1260,13 @@ final class Clipmap {
 final class Renderer: NSObject, MTKViewDelegate {
     let device: MTLDevice
     let queue: MTLCommandQueue
-    // sceneFragment specialised by [towers][GPU.sceneVariants]: function constant 1 compiles the towers in (only frames
+    // sceneFragment specialised by [sea][towers][GPU.sceneVariants]: constant 8 the sea of cloud, constant 1 the towers (only frames
     // with one in view need them), constant 0 the band test in the DDA (BAND_FC, only while a giant or the jungle is near,
     // or close by an island), and the islands' constants (GPU.SceneVariant). Each costs every pixel a little even unused,
     // so each tile of the scene pass takes the variant its pixels need.
-    let scenePipelines: [[MTLRenderPipelineState]]
-    // The giants' hanging strands, a pass over the scene while a giant stands within the world's edge (vineFragment).
-    private let vinePipeline: MTLRenderPipelineState
+    let scenePipelines: [[[MTLRenderPipelineState]]]
+    // The giants' hanging strands, a pass over the scene while a giant stands within the world's edge (vineFragment), by [sea].
+    private let vinePipelines: [MTLRenderPipelineState]
     let postPipeline: MTLRenderPipelineState
     let taaPipeline: MTLRenderPipelineState
     let taaStarPipeline: MTLRenderPipelineState?
@@ -1385,11 +1392,12 @@ final class Renderer: NSObject, MTKViewDelegate {
     init?(gpu: GPU, outputFormat: MTLPixelFormat, seed: UInt32, screenIndex: Int, battery: Bool, dither: Bool = true) {
         let device = gpu.device
         guard let queue = device.makeCommandQueue() else { return nil }
-        let sceneStates = [false, true].map { t in
-            GPU.sceneVariants.compactMap { gpu.scene(towers: t, $0) }
+        let sceneStates = [false, true].map { s in
+            [false, true].map { t in GPU.sceneVariants.compactMap { gpu.scene(towers: t, sea: s, $0) } }
         }
-        guard sceneStates.allSatisfy({ $0.count == GPU.sceneVariants.count }),
-              let vp = gpu.vine(),
+        let vineStates = [false, true].compactMap { gpu.vine(sea: $0) }
+        guard sceneStates.allSatisfy({ $0.allSatisfy { $0.count == GPU.sceneVariants.count } }),
+              vineStates.count == 2,
               let tp = gpu.taa(),
               let bp = gpu.bio(),
               let pp = gpu.post(outputFormat, dither: dither),
@@ -1445,7 +1453,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         self.clipmap = clipmap
         self.towers = towers
         self.vines = vines
-        vinePipeline = vp
+        vinePipelines = vineStates
         // Spec offset displays by 90 s of the same flight; steering reads GPU heights, so displays
         // instead start at different places in the same world.
         camera = FlightCamera(seed: seed &+ UInt32(screenIndex) &* 7919, world: world, far: far)
@@ -1863,7 +1871,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             for v in 0..<GPU.sceneVariants.count {
                 let mine = rects.filter { $0.v == v }
                 guard !mine.isEmpty else { continue }
-                enc.setRenderPipelineState(scenePipelines[towers.tableCount > 0 ? 1 : 0][v])
+                enc.setRenderPipelineState(scenePipelines[clock.cloudSea > 0 ? 1 : 0][towers.tableCount > 0 ? 1 : 0][v])
                 for r in mine {
                     let x0 = r.x0 * T, y0 = r.y0 * T
                     enc.setScissorRect(MTLScissorRect(x: x0, y: y0, width: min((r.x1 + 1) * T, w) - x0, height: min((r.y1 + 1) * T, h) - y0))
@@ -1880,7 +1888,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             vp.colorAttachments[0].loadAction = .load
             vp.colorAttachments[0].storeAction = .store
             if let enc = cb.makeRenderCommandEncoder(descriptor: vp) {
-                enc.setRenderPipelineState(vinePipeline)
+                enc.setRenderPipelineState(vinePipelines[clock.cloudSea > 0 ? 1 : 0])
                 enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
                 enc.setFragmentTexture(world.heightTex, index: 0)
                 enc.setFragmentTexture(cloudTex, index: 1)
