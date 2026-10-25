@@ -111,7 +111,7 @@ struct Settings {
 struct Knobs {
     let env: [String: String]
     let timing, fullCoarse, chunkedCoarse, pieces, sites, popLog, birdTrace: Bool
-    let profile: String
+    let profile, sunArc: String
     let lodShift: Float
 
     init(_ env: [String: String]) {
@@ -124,6 +124,7 @@ struct Knobs {
         popLog = env["VR_POPLOG"] != nil
         birdTrace = env["VR_BIRDTRACE"] != nil
         profile = env["VR_PROFILE"] ?? ""
+        sunArc = env["VR_SUNARC"] ?? "A"
         lodShift = Float(env["VR_LODSHIFT"] ?? "") ?? 0
     }
 
