@@ -6915,7 +6915,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     // Night glow: damp, mild, vegetated country, in groves, most in the woods and the damp lowlands; none on sand, salt,
     // desert, snow, the great walls or the bare uplands. Cover comes from the 2-voxel map on the 1-voxel one too, so
     // both sides of their handoff see the same woods.
-    if (bio && !underGap && !built && !(isleBody && n.y <= 0)) {
+    if (bio && !underGap && !built && !(isleBody && n.y <= 0 && float(v.y) < isleLo - 6.0)) {
         float d = max(smoothstep(0.1, 0.5, provinceAmount(c)), smoothstep(0.25, 0.55, c.moist)) * smoothstep(0.18, 0.4, c.temp)
                 * (1.0 - smoothstep(0.1, 0.4, desert)) * (1.0 - rimW) * (1.0 - 0.5 * painted) * (1.0 - wallM)
                 * (1.0 - smoothstep(SEA + 60.0, SEA + 150.0, Hc)) * (1.0 - smoothstep(snowline - 8.0, snowline, Hc));
@@ -6924,7 +6924,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
             float g = bioNoise(wp / 170.0, seed + 710u) + 0.5 * bioNoise(wp / 47.0, seed + 711u);
             s.bioG = g;
             s.bioJ = smoothstep(0.65, 0.9, c.jungle);
-            d *= smoothstep(-0.35, 0.05, g) * (1.0 + 0.7 * smoothstep(SEA + 28.0, SEA + 3.0, H)) * (1.0 - 0.45 * s.bioJ);
+            d *= smoothstep(-0.35, 0.05, g) * (1.0 + 0.7 * smoothstep(SEA + 28.0, SEA + 3.0, Hc)) * (1.0 - 0.45 * s.bioJ);
             int kc = max(k, 1);
             constexpr sampler cb(filter::linear, address::repeat);
             float cov = tr.cv.sample(cb, (p.xz / tr.lod[kc].w + float2(levelOrigin(tr, kc))) / float(COARSE_N), uint(kc - 1), level(0)).r;
