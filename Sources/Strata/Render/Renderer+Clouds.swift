@@ -14,7 +14,7 @@ extension Renderer {
         guard let cloudTex else { return }
         // Must match CLOUD_DRIFT in Shaders/Saver.metal.
         let drift = SIMD2(cos(0.6), sin(0.6)) * 4.8 * Double(Float(simTime))
-        let cam = SIMD2(camera.position.x, camera.position.z) - drift
+        let cam = camera.xz - drift
         if cloudCenter.map({ simd_length(cam - $0) > span * 0.2 }) ?? true,
            let enc = cb.makeComputeCommandEncoder() {
             cloudCenter = (cam / Renderer.cloudTexel).rounded(.down) * Renderer.cloudTexel
@@ -36,7 +36,7 @@ extension Renderer {
             slowTex = device.makeTexture(descriptor: td)
         }
         guard let slowTex, let enc = cb.makeComputeCommandEncoder() else { return }
-        let sc = (SIMD2(camera.position.x, camera.position.z) / Renderer.slowTexel).rounded(.down) * Renderer.slowTexel
+        let sc = (camera.xz / Renderer.slowTexel).rounded(.down) * Renderer.slowTexel
         var info = SIMD4<Float>(Float(sc.x - sspan / 2), Float(sc.y - sspan / 2), Float(Renderer.slowTexel), Float(simTime))
         var seed = world.seed
         enc.setComputePipelineState(slowPipeline)

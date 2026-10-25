@@ -70,6 +70,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     static let lampReach: [Double] = [1, 20, 16, 7, 10, 24, 22, 6]   // LAMP_R in Shaders/Saver.metal
     var tileMasks = [UInt32](repeating: 0, count: 16 * 16)
     static let ditherCells = 864.0
+    // The vertical half field of view's tangent: the shader casts its rays by it (Frame.camPos.w).
+    static let tanV = tan(25.0 * .pi / 180)
     // Sun height the glowing bugs start from (BIO_SUN in Shaders/Saver.metal).
     static let bioSun: Float = 0.07
     // Bug sprites: one per cube of the MOTE_N^3 block round the camera (bioVertex in Shaders/Saver.metal).
@@ -224,16 +226,16 @@ final class Renderer: NSObject, MTKViewDelegate {
         if let v = Knobs.current.env["VR_START"]?.split(separator: ",").compactMap({ Double($0) }), v.count >= 3 {
             camera.start(at: SIMD2(v[0], v[1]), yaw: v[2] * .pi / 180)
         }
-        world.placeGiants(around: SIMD2(camera.position.x, camera.position.z))
+        world.placeGiants(around: camera.xz)
         if Knobs.current.env["VR_START"] == nil, camera.startNearGiant() {
-            world.placeGiants(around: SIMD2(camera.position.x, camera.position.z))
+            world.placeGiants(around: camera.xz)
         }
-        let pre = SIMD2(camera.position.x, camera.position.z)
+        let pre = camera.xz
         towers.update(center: pre, queue: queue, wait: true)
         // Placing the camera reads only the far heights, which level 3 holds: the CPU waits for that level alone.
         refreshFar(only: 3)
         camera.moveToOpenGround()
-        let post = SIMD2(camera.position.x, camera.position.z)
+        let post = camera.xz
         // The lift reads the map centred on `pre` where it reaches round `post`, else the far heights: that map is built only
         // if it reaches.
         let o = World.mapOrigin(pre), r = FlightCamera.liftRadius
@@ -248,7 +250,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         // nothing waits on the CPU. Afterwards only strips are rewritten.
         if let cb = queue.makeCommandBuffer() {
             let t0 = CACurrentMediaTime()
-            clipmap.encode(into: cb, center: SIMD2(camera.position.x, camera.position.z), drain: true, active: activeLevels, giants: world.giantBuffer, isles: world.isleBuffer)
+            clipmap.encode(into: cb, center: camera.xz, drain: true, active: activeLevels, giants: world.giantBuffer, isles: world.isleBuffer)
             if Renderer.logTiming {
                 cb.addCompletedHandler { cb in
                     print(String(format: "coarse build %.1f ms (gpu %.1f)", (CACurrentMediaTime() - t0) * 1000, (cb.gpuEndTime - cb.gpuStartTime) * 1000))
@@ -283,8 +285,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             }
             clock.advance(step)
             if let p = pinnedPhase { clock.phase = p }
-            world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
-            towers.update(center: SIMD2(camera.position.x, camera.position.z), queue: queue, wait: world.synchronous)
+            world.ensureCentered(on: camera.xz)
+            towers.update(center: camera.xz, queue: queue, wait: world.synchronous)
             // Snapshots simulate long stretches without frames: keep the far heights following the camera.
             if world.synchronous && simTime + (dt * timeScale - remaining) - farSimClock > 2 {
                 farSimClock = simTime + (dt * timeScale - remaining)
@@ -306,7 +308,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     // What a frame rendered now could show; the frustum follows the scene size the last encode (or prepare) set.
     func sight() -> Sight {
         let b = camera.basis
-        let tanV = tan(25.0 * .pi / 180)
+        let tanV = Renderer.tanV
         // As makeFrame's level-0 ring: its morph band starts 140 inside the handoff, less a cell for the floor's 4x4 grain.
         let p = camera.position - SIMD3(Double(world.origin.x), 0, Double(world.origin.y)), half = Double(MapLayout.size / 2)
         let edge = half - 8 - max(abs(p.x - half), abs(p.z - half)) - abs(Double(Renderer.lodShift))

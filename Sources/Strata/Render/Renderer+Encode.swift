@@ -23,7 +23,7 @@ extension Renderer {
         frameIndex = (frameIndex + 1).truncatingRemainder(dividingBy: 4096)
         bakeClouds(into: cb, frame: &f)
         if Renderer.fullCoarse { clipmap.invalidate() }
-        clipmap.encode(into: cb, center: SIMD2(camera.position.x, camera.position.z), drain: world.synchronous && !Renderer.chunkedCoarse,
+        clipmap.encode(into: cb, center: camera.xz, drain: world.synchronous && !Renderer.chunkedCoarse,
                        active: activeLevels, giants: world.giantBuffer, isles: world.isleBuffer)
         bakeLamps(into: cb, frame: &f)
         fillLampTiles(frame: f, width: w, height: h)
@@ -34,7 +34,7 @@ extension Renderer {
         if Renderer.profile != "nohorizon", let enc = bakes { encodeHorizon(into: enc, frame: &f) }
         bakes?.endEncoding()
         // The giants within the world's edge: their strand maps (baked on arrival) and the frame's table of them.
-        vines.update(giants: world.terrain.giants, eye: SIMD2(camera.position.x, camera.position.z), reach: Double(f.fade.y), origin: world.origin, seed: world.seed, into: cb)
+        vines.update(giants: world.terrain.giants, eye: camera.xz, reach: Double(f.fade.y), origin: world.origin, seed: world.seed, into: cb)
         // Snapshots refresh the far heights synchronously as they simulate.
         if !world.synchronous { updateFar(into: cb) }
         birdSlots.wait()
@@ -64,7 +64,7 @@ extension Renderer {
 
     // The province fields round the camera, rebaked whole once it has moved an eighth of their window.
     private func encodeProvinces(into cb: MTLCommandBuffer) {
-        let cam2 = SIMD2(camera.position.x, camera.position.z)
+        let cam2 = camera.xz
         guard provCentre.map({ simd_length($0 - cam2) > Double(Renderer.provN) * Renderer.provCell / 8 }) ?? true,
               let enc = cb.makeComputeCommandEncoder() else { return }
         provCentre = cam2

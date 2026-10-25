@@ -10,7 +10,7 @@ extension Renderer {
         let b = camera.basis
         let o = SIMD3(Double(world.origin.x), 0, Double(world.origin.y))
         let p = camera.position - o
-        f.camPos = SIMD4(Float(p.x), Float(p.y), Float(p.z), Float(tan(25.0 * .pi / 180)))
+        f.camPos = SIMD4(Float(p.x), Float(p.y), Float(p.z), Float(Renderer.tanV))
         f.camFwd = SIMD4(SIMD3<Float>(b.fwd), Float(size.width / size.height))
         f.camRight = SIMD4(SIMD3<Float>(b.right), Float(simTime))
         f.camUp = SIMD4(SIMD3<Float>(b.up), battery ? 0 : 1)

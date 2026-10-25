@@ -71,6 +71,8 @@ package final class FlightCamera {
         time = Double(seed % 997) * 37.0
     }
 
+    package var xz: SIMD2<Double> { SIMD2(position.x, position.z) }
+
     var forward: SIMD3<Double> {
         SIMD3(cos(pitch) * sin(yaw), sin(pitch), cos(pitch) * cos(yaw))
     }

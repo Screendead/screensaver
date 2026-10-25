@@ -17,7 +17,7 @@ extension Renderer {
         if Renderer.profile == "oldshadow" { f.shadow.x = 0; return }
         if Renderer.profile == "nobake" && shadowValid { f.shadow.x = 1; return }
         guard casts, levels > 0 else { shadowValid = false; f.shadow.x = 0; return }
-        let cam = SIMD2(camera.position.x, camera.position.z)
+        let cam = camera.xz
         let jumped = shadowFrom.map { simd_length($0.cam - cam) > 300 || simd_dot($0.key, key) < 0.995 } ?? true
         if !shadowValid || jumped { shadowFrom = (cam, key); shadowBand = [0, 0] }
         let full = !shadowValid || jumped

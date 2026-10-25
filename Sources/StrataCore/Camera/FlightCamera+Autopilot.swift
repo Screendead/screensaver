@@ -16,7 +16,7 @@ extension FlightCamera {
         time += dt
         let fwdFlat = SIMD2(sin(yaw), cos(yaw))
         let left = SIMD2(-fwdFlat.y, fwdFlat.x) * -1
-        let p = SIMD2(position.x, position.z)
+        let p = xz
 
         // Steer toward the lower side of a look-ahead point, so the flight follows valleys.
         var steer = 0.0, steerRidge = 0.0
@@ -59,7 +59,7 @@ extension FlightCamera {
             // At night lit settlements near the moon's bearing join the shots, so a flight passes them and the
             // moon still frames it.
             if nightW > 0.5 {
-                let p = SIMD2(position.x, position.z)
+                let p = xz
                 for site in terrain.sites where litInterest(site) > 0 {
                     let v = site.pos - p
                     let b = atan2(v.x, v.y)

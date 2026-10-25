@@ -11,7 +11,7 @@ extension FlightCamera {
         for dist in [60.0, 120.0, 200.0] + Array(stride(from: 300.0, through: 7500.0, by: 300.0)) {
             for off in [-0.2, 0.0, 0.2] {
                 let d2 = SIMD2(sin(heading + off), cos(heading + off))
-                let q = SIMD2(position.x, position.z) + (off == 0 ? dir : d2) * dist
+                let q = xz + (off == 0 ? dir : d2) * dist
                 // An island the flight will pass beneath is no wall; far off it is a vista like any relief.
                 guard let g = dist < 1000 ? (dist < 300 ? (terrain.height(x: q.x, z: q.y) != nil ? h(q.x, q.y) : nil) : hFar(q.x, q.y))
                                           : far.height(x: q.x, z: q.y) else { continue }
@@ -33,7 +33,7 @@ extension FlightCamera {
     // Interest of the sites a heading frames: by day the old stones and the villages, at night only what is lit.
     // Capped, so a site adds to a shot but never outvotes the land and the light.
     func siteInterest(_ heading: Double, night: Double) -> (Double, SiteInfo?) {
-        let p = SIMD2(position.x, position.z)
+        let p = xz
         var sum = 0.0, best = 0.0
         var top: SiteInfo?
         for site in terrain.sites {
@@ -54,7 +54,7 @@ extension FlightCamera {
     // A ruined tower 1.2-9k off, framed when the heading passes about 900 off one of its flanks: by day the strongest
     // landmark there is, at night (a few lit rooms on some) less so. The flank bearings are offered as shots.
     func towerFlanks() -> [(bearing: Double, tower: TowerInfo, d: Double)] {
-        let p = SIMD2(position.x, position.z)
+        let p = xz
         var out: [(Double, TowerInfo, Double)] = []
         for t in towersAt() where t.member == 0 || t.height > 500 {
             let v = t.pos - p, d = simd_length(v)
@@ -94,7 +94,7 @@ extension FlightCamera {
     }
 
     func shotScore(_ heading: Double, lightYaw: Double, lightW: Double, noon: Double, night: Double = 0) -> Double {
-        let p = SIMD2(position.x, position.z)
+        let p = xz
         var rise = -Double.infinity, nearAngle = -Double.infinity
         for dist in stride(from: 30.0, through: 100.0, by: 14.0) {
             for off in [-0.25, 0.0, 0.25] {
@@ -135,7 +135,7 @@ extension FlightCamera {
     // A big island 0.3-3 km ahead is a subject, framed head on: the flight goes on to pass beneath it.
     // So is a way between two islands, or beneath one, within the next 1.8 km.
     private func isleInterest(_ heading: Double) -> Double {
-        let p = SIMD2(position.x, position.z)
+        let p = xz
         let fd = SIMD2(sin(heading), cos(heading)), side = SIMD2(fd.y, -fd.x)
         var best = 0.0, left = Double.infinity, right = Double.infinity, under = 0.0
         for s in islesAt() where s.radius > 40 {
@@ -159,7 +159,7 @@ extension FlightCamera {
     // A giant tree is a landmark: a heading that frames one 0.4-3 km ahead scores, and one far off draws the flight
     // slowly toward its country. Passing within a crown's reach is the steering's business (step).
     private func giantInterest(_ heading: Double) -> Double {
-        let p = SIMD2(position.x, position.z)
+        let p = xz
         var best = 0.0
         for g in terrain.giants {
             let v = g.pos - p, d = simd_length(v)

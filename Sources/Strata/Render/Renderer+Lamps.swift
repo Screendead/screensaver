@@ -7,7 +7,7 @@ extension Renderer {
     // The lamps nearest the camera that glow in their own haze; the shader reads their state, so the list
     // needs no schedule.
     private func pickHazeLamps() {
-        let cam = SIMD2(camera.position.x, camera.position.z)
+        let cam = camera.xz
         var near: [(Double, Int)] = []
         for site in world.terrain.sites {
             for l in site.lamps where l.kind != 3 && l.kind != 7 {
@@ -43,7 +43,7 @@ extension Renderer {
         let n = Renderer.lampTiles
         for i in 0..<tileMasks.count { tileMasks[i] = 0 }
         let b = camera.basis, cam = camera.position
-        let tanV = tan(25.0 * .pi / 180), aspect = Double(width) / Double(height)
+        let tanV = Renderer.tanV, aspect = Double(width) / Double(height)
         let padX = 6.0 / Double(width), padY = 6.0 / Double(height)
         func mark(_ c: SIMD3<Double>, _ r: Double, _ bit: UInt32) {
             let v = c - cam

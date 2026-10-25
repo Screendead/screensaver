@@ -54,7 +54,7 @@ extension Renderer {
     // Brings the rings to the camera and reads the far heights back at once (startup and snapshots).
     func refreshFar(only: Int? = nil) {
         guard let cb = queue.makeCommandBuffer() else { return }
-        clipmap.encode(into: cb, center: SIMD2(camera.position.x, camera.position.z), drain: true, active: activeLevels, giants: world.giantBuffer, isles: world.isleBuffer, only: only)
+        clipmap.encode(into: cb, center: camera.xz, drain: true, active: activeLevels, giants: world.giantBuffer, isles: world.isleBuffer, only: only)
         let buf = encodeFar(into: cb)
         cb.commit()
         cb.waitUntilCompleted()

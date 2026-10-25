@@ -7,7 +7,7 @@ extension Snapshot {
     static func showSite(_ r: Renderer, spec: String, pitch: Double?) {
         let v = spec.split(separator: ",").compactMap { Double($0) }
         if v.count >= 4 {
-            let here = SIMD2(r.camera.position.x, r.camera.position.z)
+            let here = r.camera.xz
             let pick = r.world.terrain.sites.filter { $0.kind.rawValue == Int(v[0]) }
                 .sorted { simd_length($0.pos - here) < simd_length($1.pos - here) }
             let rank = v.count > 4 ? Int(v[4]) : 0

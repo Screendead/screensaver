@@ -45,7 +45,7 @@ extension FlightCamera {
         let side = SIMD2(dir.y, -dir.x)
         var b = 0.0
         for dist in [40.0, 60.0, 80.0, 105.0, 135.0, 170.0, 210.0, 260.0, 320.0, 400.0, 500.0, 650.0, 850.0, 1100.0, 1500.0] {
-            let q = SIMD2(position.x, position.z) + dir * dist
+            let q = xz + dir * dist
             // The flight's width, every 4 voxels at most: a needle between samples must still count.
             let w = min(dist * 0.12, 30)
             let l = q + side * w, r = q - side * w

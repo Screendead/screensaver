@@ -6,7 +6,7 @@ extension FlightCamera {
     // the start stays as near its own country as it can), facing it: it reaches the landmark within minutes. True if
     // it moved. terrain.giants is the table round the start's map (+-18k).
     package func startNearGiant() -> Bool {
-        let p = SIMD2(position.x, position.z)
+        let p = xz
         guard let g = terrain.giants.min(by: { simd_length($0.pos - p) < simd_length($1.pos - p) }) else { return false }
         let d = simd_length(g.pos - p)
         guard d > 3500 else { return false }

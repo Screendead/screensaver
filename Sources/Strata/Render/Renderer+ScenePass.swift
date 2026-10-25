@@ -10,8 +10,8 @@ extension Renderer {
         // The canopies' band test only skips through cells inside the 1-voxel map's unmorphed disc (trace in
         // Shaders/Saver.metal), so it is compiled in only while bands lie that close; islands' bands hold on every
         // ring, needed out to isleShadeReach.
-        let cam2 = SIMD2(camera.position.x, camera.position.z)
-        let tb = camera.basis, tanV = tan(25.0 * .pi / 180) * 1.05
+        let cam2 = camera.xz
+        let tb = camera.basis, tanV = Renderer.tanV * 1.05
         let half = atan(tanV * (1 + Double(aspect) * Double(aspect)).squareRoot())
         // On while an island within the reach could show, off a little past it, so a camera hovering at the edge does
         // not flick it.
@@ -129,7 +129,7 @@ extension Renderer {
     private func tileRange(box lo: SIMD3<Double>, _ hi: SIMD3<Double>, nx: Int, ny: Int, tw: Double, th: Double, width: Int, height: Int,
                            pad: Double) -> (x0: Int, x1: Int, y0: Int, y1: Int)? {
         let b = camera.basis
-        let tanV = tan(25.0 * .pi / 180), aspect = Double(width) / Double(height), near = 0.5
+        let tanV = Renderer.tanV, aspect = Double(width) / Double(height), near = 0.5
         let cs = (0..<8).map { i -> SIMD3<Double> in
             let v = SIMD3(i & 1 == 0 ? lo.x : hi.x, i & 2 == 0 ? lo.y : hi.y, i & 4 == 0 ? lo.z : hi.z) - camera.position
             return SIMD3(simd_dot(v, b.right), simd_dot(v, b.up), simd_dot(v, b.fwd))
