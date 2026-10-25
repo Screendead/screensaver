@@ -1,5 +1,10 @@
 # STRATA
 
+[![CI](https://github.com/Screendead/screensaver/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/Screendead/screensaver/actions/workflows/ci.yml)
+![coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Screendead/screensaver/badges/coverage.json)
+
+Coverage counts the Swift code in `Sources/` only. The Metal shader is covered by `tools/golden.sh`, not by this number.
+
 A generative screensaver for macOS. An endless, slow flight over Perlin-noise terrain built from exact unit voxels. Each one-voxel step of the smooth noise field is a contour line, and the piece lights those contour lines through a full day. It runs through golden and blue hour, midday, and a moonlit night.
 
 Everything is procedural, including terrain, mesas and arches, rock strata, water, stepped voxel clouds, sky, stars and the blocky moon. Nothing is loaded from disk except the compiled shader.
