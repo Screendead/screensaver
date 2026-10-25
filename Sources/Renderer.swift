@@ -184,7 +184,20 @@ struct SkyClock {
         return SIMD3(cos(el) * sin(az), sin(el), cos(el) * cos(az))
     }
 
-    // Steps at mid-morning rather than at the dawn wrap, so a night keeps its beacons and rites until daylight.
+    // Runs 0 at dusk to 1 at dawn and eases back to 0 through the morning, so the burn-down schedule never steps.
+    var nightProgress: Double {
+        let ph = phase - floor(phase)
+        return ph < 0.25 ? 1 - { let s = min(max((ph - 0.08) / 0.12, 0), 1); return s * s * (3 - 2 * s) }() : min(max((ph - 0.52) / 0.46, 0), 1)
+    }
+
+    // The sea of cloud's amount: must match cloudSeaAmount in Saver.metal, 0 at dusk, by day and at night.
+    var cloudSea: Double {
+        func ss(_ a: Double, _ b: Double, _ x: Double) -> Double { let t = min(max((x - a) / (b - a), 0), 1); return t * t * (3 - 2 * t) }
+        let e = SkyClock.elevation(phase)
+        return ss(0.5, 0.75, nightProgress) * ss(-0.24, -0.08, e) * (1 - ss(0.08, 0.30, e))
+    }
+
+    // A night keeps one index from dusk through to the morning after: it steps at mid-morning rather than at the dawn wrap, so a night keeps its beacons and rites until daylight.
     var nightIndex: Int {
         let n = day + Int(floor(phase))
         return phase - floor(phase) < 0.25 ? n - 1 : n
@@ -1344,6 +1357,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             if let p = pinnedPhase { clock.phase = p }
             camera.sun = clock.sunDirection
             camera.nightIndex = clock.nightIndex
+            camera.cloudSea = clock.cloudSea
             camera.step(dt: step)
             wildlife.step(dt: step, camera: camera, sight: sight(), sunY: clock.sunDirection.y, phase: clock.phase)
             popLog?.check(wildlife, sight: sight(), time: simTime + dt * timeScale - remaining + step, dt: step,
@@ -1419,11 +1433,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         f.misc = SIMD4(Float(exposure), world.globalMax, 0.6, Float(cloudCover))
         f.misc2 = SIMD4(frameIndex, 1, debugMode, headroom)
         let sunY = clock.sunDirection.y
-        let ph = clock.phase - floor(clock.phase)
-        // Night progress runs 0 at dusk to 1 at dawn and eases back to 0 through the morning, so the burn-down
-        // schedule never steps. A night keeps one index from dusk through to the morning after.
-        let progress = ph < 0.25 ? 1 - { let s = min(max((ph - 0.08) / 0.12, 0), 1); return s * s * (3 - 2 * s) }() : min(max((ph - 0.52) / 0.46, 0), 1)
-        f.lights = SIMD4(Float(sunY), Float(progress), Float(clock.nightIndex), Float(min(max((0.08 - sunY) / 0.1, 0), 1)))
+        f.lights = SIMD4(Float(sunY), Float(clock.nightProgress), Float(clock.nightIndex), Float(min(max((0.08 - sunY) / 0.1, 0), 1)))
         f.refs = SIMD4(Int32(f.lights.w > 0 ? hazeCount : 0), 0, 0, 0)
         pickSmoke()
         f.refs.y = Int32(smokeCount)
@@ -2228,6 +2238,7 @@ enum Snapshot {
                         r.clock.day = Int(v[9])
                         r.camera.sun = r.clock.sunDirection
                         r.camera.nightIndex = r.clock.nightIndex
+                        r.camera.cloudSea = r.clock.cloudSea
                     }
                     r.camera.freeze(position: SIMD3(v[1], v[3], v[2]), yaw: v[4] * .pi / 180, pitch: v[5] * .pi / 180, roll: v[6] * .pi / 180)
                     r.exposure = v[7]

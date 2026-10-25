@@ -7626,6 +7626,7 @@ struct SeaFog { float T; float3 col; };  // col is premultiplied: seen = behind 
 
 // Antiderivative in u = top - y of the density profile min(u / SEA_SOFT, 1) above the top.
 constant float SEA_SOFT = 5.0;
+constant float SEA_LID = SEA + 14.0;
 static inline float seaG(float u) { return u <= 0.0 ? 0.0 : u < SEA_SOFT ? u * u / (2.0 * SEA_SOFT) : u - 0.5 * SEA_SOFT; }
 
 // Closed form along the ray, no march; one noise sample where the ray meets the top sets the billows and the gaps.
@@ -7650,16 +7651,16 @@ static SeaFog cloudSea(thread const Ctx& x, float amt, float3 o, float3 d, float
     t = min(t, 3000.0);
     float3 ph = o + d * t;
     // Burning off, the layer sinks as well as thins. The closed form below needs one top per ray: the hit's.
-    float top0 = seaFloorAt(x, ph.xz) + mix(2.0, 8.0, amt);
-    // The flight may skim 7 over the ground: the layer's top stays below the eye, far below it close by, so no ray
-    // starts inside it and the flight never meets it as a wall.
-    top0 = min(top0, o.y - 6.0 - 16.0 * (1.0 - smoothstep(40.0, 320.0, length(ph.xz - o.xz))));
+    // The inversion's lid: no top rises over SEA_LID, so the dawn flight (at least 22 over the ground or the sea,
+    // Camera.swift) always looks down on the layer; a ray starting under its hit's top would be fogged all its length.
+    // Basins well above the sea, and hillsides, stand clear of it.
+    float top0 = min(seaFloorAt(x, ph.xz) + mix(2.0, 8.0, amt), SEA_LID);
     float y0 = o.y, y1 = ph.y;
     if (min(y0, y1) > top0 + 3.0) return s;
     float te = d.y < 0.0 && y0 > top0 ? min((y0 - top0) / -d.y, t) : 0.0;
     float2 q = o.xz + d.xz * te + float2(x.origin) - float2(0.35, 0.12) * x.time;
     float n = perlin2(q / 110.0, x.seed + 71u) + 0.3 * perlin2(OCT_ROT * q / 41.0, x.seed + 72u);
-    float top = top0 + 3.0 * n;
+    float top = min(top0 + 3.0 * n, SEA_LID);
     // Gaps open where the noise is low, wider as the sun climbs.
     float dens = 0.16 * amt * saturate((n + 0.55 - 1.6 * burn) * 2.5);
     if (dens <= 0.0) return s;

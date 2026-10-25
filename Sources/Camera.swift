@@ -20,6 +20,7 @@ final class FlightCamera {
     private var nextPilgrim: Double = 0
     private var rimLift: Double = 0
     var sun = SIMD3<Double>(0, 1, 0)
+    var cloudSea = 0.0
     var pitchOverride: Double?
     // A fixed pose for showcase snapshots; step() leaves it alone.
     private(set) var frozen = false
@@ -576,6 +577,8 @@ final class FlightCamera {
         clearance += 25 * hug
         // Passing the site a shot was built around: a little lower, so the windows read.
         if let f = focus, simd_length(f - p) < 150 { clearance = max(clearance - 8, min(clearance, 22)) }
+        // At dawn the sea of cloud's lid lies 14 over the sea (SEA_LID in Saver.metal): skim over it, never into it.
+        clearance = max(clearance, 22 * cloudSea)
         // Canyon and mesa country: down among the walls they fill the frame, so rise to look across the rims.
         // The rim level is the upper quartile of a 150-voxel neighbourhood, so a lone peak off to the side does
         // not lift the flight, or the highest rim ahead, out to where a wall would still fill the frame. Eased
