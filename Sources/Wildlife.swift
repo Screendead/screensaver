@@ -395,7 +395,9 @@ final class Wildlife {
             var fl = Wildlife.flight(kind)
             // Flying in they go near their top speed, so some can keep pace with the camera; then raptors circle, bats
             // jink about where they arrived, and the rest settle to their own pace and the camera overtakes them.
-            let cruise = fl.maxSpeed * (0.92 + 0.08 * pace)
+            // Against a camera much faster than their top speed no path would overtake the frame's edges as it closes on
+            // them, so none would spawn: they glide in at three quarters of the camera's pace, over their top speed.
+            let cruise = max(fl.maxSpeed * (0.92 + 0.08 * pace), 0.75 * simd_length(SIMD2(camVel.x, camVel.z)))
             let spread: Double = kind == .raptor ? 25 : 6 + Double(n) * 0.4
             let size = fl.span * 1.12
             // The start: out past a side or the top of the frame, or (one in five) low inside it, hoping for a hill
@@ -771,7 +773,9 @@ final class Wildlife {
 
             b.vel += acc * dt
             var s = simd_length(b.vel)
-            if s > fl.maxSpeed { b.vel *= fl.maxSpeed / s; s = fl.maxSpeed }
+            // A flock gliding in may go over its top speed, and eases back to it as its speed falls to its own pace.
+            let top = max(fl.maxSpeed, f.speed)
+            if s > top { b.vel *= top / s; s = top }
             if s < fl.minSpeed { b.vel = (s > 1e-3 ? b.vel / s : SIMD3(sin(f.heading), 0, cos(f.heading))) * fl.minSpeed; s = fl.minSpeed }
             // Birds climb and dive at modest angles.
             let maxY = 0.45 * s
