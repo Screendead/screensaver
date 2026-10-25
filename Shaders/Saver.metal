@@ -5263,7 +5263,8 @@ static float3 skyDiscs(float3 c, float3 d, Light L, uint seed, float time, float
             float2 xq = (floor(xy * 7.0) + 0.5) / 7.0;
             xq *= min(1.0, 0.98 / length(xq));
             float3 n = float3(xq, sqrt(1.0 - dot(xq, xq)));
-            float sunlit = smoothstep(-0.05, 0.05, dot(n, float3(sin(th), 0.0, -cos(th))));
+            // mu runs to the viewer's left, so a waxing moon (k < 4) is lit on its right.
+            float sunlit = smoothstep(-0.05, 0.05, dot(n, float3(-sin(th), 0.0, -cos(th))));
             float3 moonCol = mix(float3(0.55, 0.65, 0.9) * 0.144, float3(0.75, 0.80, 0.92) * 2.4, sunlit) * lum;
             c = mix(c, moonCol, L.night * disc);
         }
