@@ -64,3 +64,4 @@ Live frame times are measured at `--size 3456x2234 --scale 1`: the scene renders
   `Surface`, `Shade`, `Light`, `Sky`, `Atmos` (fog, mist, smoke, sea of cloud), `Water`, and `Passes` (the scene, vine,
   mote, TAA, post and capture entry points).
 - `tools/golden.sh`: output regression check; renders a fixed set and compares sha256s with `tests/golden/manifest.sha256` (`tests/fixtures/golden_path.txt` is its recorded-path replay).
+- `tools/`: `vrgpu` (the shared GPU lock) and `vrr` (the warm render server), the render sets `render.sh` and `golden.sh`; `perf/` GPU and battery timing (`bench.sh`, `soak.sh`, `powersoak`); `frames/` measures and stacks rendered frame sequences; `sky/` mirrors the sky clock (VR_PATH files, the meteor schedule).

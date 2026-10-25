@@ -19,7 +19,7 @@ out=${GOLDEN_OUT:-build/golden}
 mkdir -p $out/stdout
 find $out -type f -delete
 
-# name|seed|times|phase|env|flags; "-" for none. Poses mostly from tools/bench.sh, at short times: simulating minutes of
+# name|seed|times|phase|env|flags; "-" for none. Poses mostly from tools/perf/bench.sh, at short times: simulating minutes of
 # flight costs minutes. The sea of cloud (function constant 8) is compiled in only while the sky clock's cloudSea is above
 # 0: escarp (phase 0.005) and the path (phase -0.01) have it, the others don't. Seed 606 has an aurora on night 0 (day 0:
 # no scene runs the clock to its first wrap), looked at along its azimuth; 202 does not, and its night looks at the moon (opposite the sun, at most ~20 degrees up). The path fixture is a synthetic

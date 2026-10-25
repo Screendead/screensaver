@@ -1,7 +1,7 @@
 #!/usr/bin/python3 -I
 """Battery soak: what the saver costs in watts, battery and heat, run on the laptop until the battery is nearly flat.
 
-  tools/powersoak [app, default build/VoxelReverie.app] [out dir, default build/power]
+  tools/perf/powersoak [app, default build/VoxelReverie.app] [out dir, default build/power]
 
 Start it any time. It waits until the Mac is on battery and nobody has touched it for 5 minutes, then:
   1. baseline: the display held on with nothing else running, 20 minutes;
@@ -13,8 +13,8 @@ summary.txt. Keep the display brightness where it usually is: it moves the watts
 import os, re, subprocess, sys, time
 
 here = os.path.dirname(os.path.realpath(__file__))
-app = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.path.join(here, '../build/VoxelReverie.app'))
-out = os.path.abspath(sys.argv[2] if len(sys.argv) > 2 else os.path.join(here, '../build/power'))
+app = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.path.join(here, '../../build/VoxelReverie.app'))
+out = os.path.abspath(sys.argv[2] if len(sys.argv) > 2 else os.path.join(here, '../../build/power'))
 binary = os.path.join(app, 'Contents/MacOS/voxelreverie')
 BASELINE_S, STOP_PCT, IDLE_S, EVERY = 20 * 60, 3, 300, 30
 os.makedirs(out, exist_ok=True)

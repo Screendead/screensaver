@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Stacks two dumped frame sequences (VR_FRAMES' <name>_fN.png) top over bottom with a label on each, into a
 # directory of PNGs for ffmpeg, and prints each sequence's mean frame-to-frame change inside a crop.
-#   tools/abstack.py <top dir> "<top label>" <bottom dir> "<bottom label>" <out dir> [x0,y0,x1,y1]
+#   tools/frames/abstack.py <top dir> "<top label>" <bottom dir> "<bottom label>" <out dir> [x0,y0,x1,y1]
 import glob
 import re
 import sys
