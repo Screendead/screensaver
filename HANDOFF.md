@@ -35,6 +35,7 @@ The flight runs at twice its old speed (11-30 voxels/s by height, Jack's call 20
 
 1. **What is missing when you don't use it?** If there are days the saver isn't running, or you turn it off, say why (too hot, too slow on battery, a fault, a scene you tire of). Each answer becomes the next step.
 2. **Unmerged branches.** Should `strata/islands2` (floating islands) and the other unmerged branches above be finished or archived?
+3. **Slow dawn (`strata/pitch-slow-dawn`, pitch only).** Half-speed clock within ~4.6 degrees of the horizon doubles golden hour (73 to 142 s each sunrise and sunset) and halves the dawn cloud shadows' sweep; kept at 12 minutes by running the rest 1.49x faster, which trims night below -8 degrees from 140 to 94 s. Without the hurry the day grows to about 15 minutes. `tools/dayclock.py` models both clocks.
 
 ## Bug reports (triaged 2026-10-24)
 

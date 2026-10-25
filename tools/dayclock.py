@@ -114,5 +114,5 @@ if __name__ == "__main__":
               f" night below -8 deg {night:.0f} s, sun climbs {climb_at(w):.3f} deg/s at 3 deg")
         rows.append(gold / 2)
     if len(sys.argv) > 1:
-        chart(sys.argv[1], [("current", (42, 120, 214), cur, f"Current: {rows[0]:.0f} s golden hour per sunrise"),
-                            ("slow", (235, 104, 52), slow, f"Slow dawn: {rows[1]:.0f} s per sunrise")], total)
+        chart(sys.argv[1], [("current", (42, 120, 214), cur, f"Current: {rows[0]:.0f} s golden hour each sunrise and sunset"),
+                            ("slow", (235, 104, 52), slow, f"Slow dawn: {rows[1]:.0f} s")], total)
