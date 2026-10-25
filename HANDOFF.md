@@ -6,7 +6,7 @@ STRATA is a generative macOS screensaver: an endless, slow flight over procedura
 
 ## Where things stand
 
-Statuses come from the commit history as of 2026-10-24 (master at 440f08b). "Merged" means the work is on master; it does not mean it has been soak-tested on real hardware unless the row says so.
+Statuses come from the commit history as of 2026-10-25 (master after PR #23; earlier rows as of 2026-10-24, master at 440f08b). "Merged" means the work is on master; it does not mean it has been soak-tested on real hardware unless the row says so.
 
 | Area | Status | Commits that prove it |
 | --- | --- | --- |
@@ -20,8 +20,14 @@ Statuses come from the commit history as of 2026-10-24 (master at 440f08b). "Mer
 | Bug reports | B while the saver shows files a report (clip, per-frame state, replay commands, note); merged 2026-10-12 | 55bfef4, 4478756 |
 | Render server | `--serve` answers `--screenshot` requests without a fresh process; prewarm race fixed; merged 2026-10-12 | 4abe916, aae1492, e394297 |
 | bugclip | `bugclip.sh` added 2026-10-23 and used to prove PR #1 (giants' skirts across the morph band), merged 2026-10-23 | d661c58, 74d61e1, 2b71c8e |
-| Swift layout | Branch `refactor/swift` (off `refactor/oracle`, not merged): the Swift sources as three SwiftPM targets (`StrataCore` without Metal or AppKit, `Strata`, the `voxelreverie` executable), one job per file, every VR_* switch in `Knobs`, and a `swift test` target with first tests; `make` and `install.sh` unchanged; `tools/golden.sh` byte-identical after every commit | 38351f3, e9c537b, 4b9a683 |
-| Unit tests | Branch `refactor/tests` (off `refactor/swift`, not merged): `make test` runs `swift test` then `tools/golden.sh`. `StrataTests` builds probe kernels against `Shaders/` at test time and checks the CPU's ports of the shader (hashes, provinces, key light, cloud sea, lit lamps), its constants and record layouts against the shader's own, and `state.json` against `bugclip.sh`; `StrataCoreTests` flies the camera and birds over a synthetic world (determinism, clearance, smoothness) and covers the sky clock, settings and table decoders. Each test was shown to fail under a deliberate mutation of the code it guards | |
+| Overnight picks | PR #17, merged 2026-10-25: Jack's picks in one bundle: floating islands, aurora (1.8x brighter), moon phases (darker crescent nights), shooting stars, evening star, wet sand, the dawn sea of cloud (compiled into the scene and vine passes only while it is out: the cloud-sea gate), the sun's full turn a day, moon glints C, sunrise clock kept at 12 minutes | 46ca68e, 35b6244, 9d99059 |
+| Cloud shadows at the horizon | PR #18, merged 2026-10-25: cloud shadows fade in with the sun's height (none at the horizon, full by L.y 0.5) instead of cutting off at 0.02, so the land no longer flashes as the sun crosses the horizon | 934e770, 950ac83 |
+| Sunrise face jump | PR #19, merged 2026-10-25: the key light holds the afterglow's height (0.05) until the sun clears it, and terrain shadows fade in from the handover (sun -0.02 to 0.03); sunlit faces no longer darken by up to 24/255 in one frame | c091e27, a5ce882 |
+| Output oracle | PR #20, merged 2026-10-25: `tools/golden.sh` renders 15 scenes and checks 51 sha256s against `tests/golden/manifest.sha256`; every refactor below passed it unchanged. Also the picks-perf tidy-up (no measurable speed difference) | 3bf3c3e |
+| Shader layout | PR #21, merged 2026-10-25: `Shaders/Saver.metal` is an include list over 84 topic files under `Shaders/<topic>/`; duplicates and dead code removed, output byte-identical | 79c796d |
+| Tools layout | PR #22, merged 2026-10-25: `tools/perf/` (bench, soak, powersoak), `tools/frames/`, `tools/sky/`; one-off scripts on local `archive/one-off-tools`; `bugclip.sh` under the GPU lock | f9fece0 |
+| Swift layout and unit tests | PR #23, merged 2026-10-25: three SwiftPM targets (`StrataCore` without Metal or AppKit, `Strata`, `voxelreverie`), one job per file, every VR_* switch in `Knobs`; `make test` runs 42 XCTest tests (`StrataTests` checks the CPU's ports, constants and record layouts against the shader's own; `StrataCoreTests` flies the camera and birds over a synthetic world) then `tools/golden.sh`; `tools/mutants.py` shows each test bites | 80f26c8 |
+| Cross-references | Branch `refactor/crossrefs`: comments name the new Swift and shader files, `Sight.sea` replaces the Swift copies of 19.85, `make lint` (`tools/lint.sh`) finds unused shader code (only `F_FLAT`, `M_ROOF`, kept) | |
 
 Branches with commits that master lacks (from `git branch --no-merged master`): `strata/islands2` (31 commits, floating islands), `strata/islands-fix`, `strata/islands-b`, `strata/islands`, `strata/giant-C3` and `strata/giant-C2-roots` (morph-band work from 2026-10-13, before PR #1), `strata/vines3`, `strata/waves`, `strata/tundra`, `strata/merge4`, and single-commit prototypes. None of them is described in a merge message, so whether any is still wanted is unknown.
 
@@ -36,7 +42,10 @@ The flight runs at twice its old speed (11-30 voxels/s by height, Jack's call 20
 ## Open questions for Jack
 
 1. **What is missing when you don't use it?** If there are days the saver isn't running, or you turn it off, say why (too hot, too slow on battery, a fault, a scene you tire of). Each answer becomes the next step.
-2. **Overnight pitches (2026-10-25).** Each has its own branch, pushed, with media in `build/overnight/` and a report page for Jack. Recommended picks in brackets:
+2. **Moon handover: shadows switch on in one frame.** Below the horizon, as the key light blends from the afterglow to the moon, terrain shadows switch on at once (`L.shadows = m > 0.5` in `makeLight`, `Shaders/Sky/Light.metal`): the same kind of step PR #19 removed at sunrise. A fade like #19's was offered; whether the step shows has not been measured.
+3. **Battery soak.** `tools/perf/powersoak` needs the laptop unplugged overnight; it is the only measure of watts, drain and heat on battery.
+4. **Vine pass terrain bound (possible bug, changes output).** The vine pass bounds its terrain trace with the coarse levels' top mips without `abs()` (`Shaders/Passes/Vines.metal`), where the scene pass takes `abs()` (`Shaders/Passes/Scene.metal`): a negative max flags an open band, so the vine pass may trace too low a ceiling over a crown or an island. Fixing it changes output; your call.
+5. **Overnight pitches (2026-10-25), merged as PR #17.** Each has its own branch, pushed, with media in `build/overnight/` and a report page for Jack. Recommended picks in brackets:
    - **All picks in one merge: `strata/overnight-picks`** holds every branch below at its bracketed pick (cloud sea included), conflicts resolved, one PR away from master.
    - **Jack's picks: `strata/overnight-picks2`** is that bundle (with the cloud-sea gate) at Jack's answers where they differ from the brackets, marked "Jack:" below.
    - Floating islands, `strata/islands3` (master merged in, conflicts reviewed): merge now [yes]; follow-ups: birds no longer circle islands at the doubled flight speed, island tops dark at night.
@@ -90,4 +99,4 @@ Taste questions for Jack, not faults: should moon glints roll off softly rather 
 
 ## The plan
 
-**Next step: act on Jack's replies to the overnight pitches** (above), merging each chosen branch through its own PR and proving it live. The battery soak (`tools/powersoak`, unplugged overnight) is still pending and remains the way to learn the saver's cost on battery.
+**Next step: the battery soak** (`tools/perf/powersoak`, on the laptop unplugged overnight; needs Jack to unplug it). The overnight picks, the horizon fixes and the refactor are merged; what the saver costs on battery is the one goal still unmeasured.
