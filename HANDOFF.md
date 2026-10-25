@@ -34,7 +34,8 @@ The flight runs at twice its old speed (11-30 voxels/s by height, Jack's call 20
 ## Open questions for Jack
 
 1. **What is missing when you don't use it?** If there are days the saver isn't running, or you turn it off, say why (too hot, too slow on battery, a fault, a scene you tire of). Each answer becomes the next step.
-2. **Unmerged branches.** Should `strata/islands2` (floating islands) and the other unmerged branches above be finished or archived?
+2. **Shooting stars (prototype, `strata/idea-shooting-stars`, 2026-10-25).** On a dark night, about one meteor every 35 s (one in five 7 s slots), 0.4-0.8 s, a streak a cell or two wide and up to ~20 cells long on the dither grid with a fading warm tail. Hashed from the clock in the sky shader, hidden by clouds and terrain like the stars, never by day; frames without one are byte-identical to master, and GPU time on two night scenes is unchanged (-0.15 and +0.25 ms, noise). Keep, tune (rarer, longer) or drop? `tools/meteors.py <seed> <from> <to>` lists when they fall.
+3. **Unmerged branches.** Should `strata/islands2` (floating islands) and the other unmerged branches above be finished or archived?
 
 ## Bug reports (triaged 2026-10-24)
 
