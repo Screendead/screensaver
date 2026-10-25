@@ -7757,7 +7757,7 @@ static float3 aurora(thread const Ctx& x, float3 d) {
     float k = dot(d.xz, Q) / dp;
     float span = smoothstep(1.1, 0.45, abs(k));
     if (span <= 0.0) return 0;
-    const float D = 70000.0, A = 9000.0, e = 0.01;
+    const float D = 70000.0, A = 14000.0, e = 0.01;
     float t = x.time, fn = float(n) * 3.7;
     float2 m0 = float2(k, k + e) * (D / 9000.0) + float2(t * 0.002 + fn);
     float2 m1 = float2(k, k + e) * (D / 3200.0) - float2(t * 0.005 - fn);
@@ -7765,14 +7765,14 @@ static float3 aurora(thread const Ctx& x, float3 d) {
     if (x.quality > 0.5)
         m += 0.35 * A * float2(perlin2(float2(m1.x, 0.5), x.seed + 903u), perlin2(float2(m1.y, 0.5), x.seed + 903u));
     float u = D + m.x, du = (m.y - m.x) / e;
-    float fold = min(sqrt(1.0 + du * du * (1.0 + k * k) / (u * u)), 4.0);
+    float fold = min(1.0 + du * du * (1.0 + k * k) / (u * u), 6.0);
     float y = d.y / length(d.xz) * u * sqrt(1.0 + k * k);
-    float hem = 9000.0 + 0.12 * m.x;
+    float hem = 8500.0 + 0.3 * m.x;
     float z = (y - hem) / 15000.0;
-    float prof = smoothstep(0.0, 0.05, z) * exp(-3.0 * max(z, 0.0));
+    float prof = smoothstep(0.0, 0.05, z) * exp(-4.0 * max(z, 0.0));
     float rays = 0.6 + 0.4 * saturate(perlin2(float2(k * (D / 700.0), t * 0.03), x.seed + 904u) + 0.5);
-    float3 col = mix(float3(0.2, 1.0, 0.45), float3(0.7, 0.25, 0.9), smoothstep(0.05, 0.6, z));
-    return col * 0.035 * fold * prof * rays * span * env * smoothstep(0.02, 0.06, d.y);
+    float3 col = mix(float3(0.2, 1.0, 0.45), float3(0.7, 0.25, 0.9), smoothstep(0.1, 0.7, z));
+    return col * 0.018 * fold * prof * rays * span * env * smoothstep(0.02, 0.06, d.y);
 }
 
 static float4 skyWithClouds(thread const Ctx& x, float3 o, float3 d) {
