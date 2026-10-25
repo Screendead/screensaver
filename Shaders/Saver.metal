@@ -5954,14 +5954,31 @@ struct Light {
     float sunAmt;
     float night;
     float gold;     // golden and blue hour; 0 at noon and deep night
-    float moonTh;   // the sun's angle around the moon as seen from here: pi is full
-    float moonLit;  // the moon's lit share, exactly 1 at full
     float moonAmt;  // moonlight's strength on land, cloud and water: floored so thin-moon nights stay readable
-    float3 planet;  // direction to the evening or morning star
-    float planetAmt;
-    float2 planetPx; // in scene pixels
-    float planetReach; // scene pixels from planetPx to the core's edge
 };
+
+// The moon's phase and the planet live outside Light, read from the Frame where the sky needs them: every pixel
+// carries Light through its shading, and their seven fields there cost the scene pass registers.
+// x the sun's angle around the moon as seen from here (pi is full), y the moon's lit share (exactly 1 at full).
+static inline float2 moonPhase(uint seed, float nightIndex) {
+    // An 8-night cycle of phases with full moon at k = 4. It stops short of new moon (lit share 0.13), which would
+    // leave no moon at all. Full is pinned to 1 so full-moon nights render exactly as before phases.
+    uint k = (uint(int(nightIndex) + 8000) + pcg(seed + 5u)) & 7u;
+    float th = 3.14159265 + 0.6 * (float(k) - 4.0);
+    return float2(th, k == 4u ? 1.0 : 0.5 - 0.5 * cos(th));
+}
+
+struct Planet {
+    float3 dir;   // direction to the evening or morning star
+    float amt;
+    float2 px;    // in scene pixels
+    float reach;  // scene pixels from px to the core's edge
+};
+
+static inline Planet planetOf(constant Frame& f) {
+    // Every scene pixel some cell of the two-cell block takes as its own (taaFragment), and no more at full scale.
+    return { f.planet.xyz, smoothstep(0.02, -0.05, f.sunDir.y), f.planetPx.xy * f.planetPx.z, f.planetPx.z + 0.5 };
+}
 
 // Keyframes by sun elevation: night, blue hour, sunrise, golden, midday.
 static inline float3 key5(float e, float3 a, float3 b, float3 c, float3 d, float3 f) {
@@ -5975,7 +5992,7 @@ static inline float3 key5(float e, float3 a, float3 b, float3 c, float3 d, float
 static inline float goldAmount(float e) { return smoothstep(0.30, 0.12, e) * smoothstep(-0.16, -0.04, e); }
 
 // nightIndex is Frame.lights.z.
-static Light makeLight(float3 sunDir, uint seed, float nightIndex, float3 planet, float4 planetPx) {
+static Light makeLight(float3 sunDir, uint seed, float nightIndex) {
     Light L;
     float e = sunDir.y;
     L.sun = sunDir;
@@ -5994,17 +6011,7 @@ static Light makeLight(float3 sunDir, uint seed, float nightIndex, float3 planet
     L.sunAmt = smoothstep(-0.02, 0.05, e);
     L.night = smoothstep(-0.04, -0.20, e);
     L.gold = goldAmount(e);
-    // An 8-night cycle of phases with full moon at k = 4. It stops short of new moon (lit share 0.13), which would
-    // leave no moon at all. Full is pinned to 1 so full-moon nights render exactly as before phases.
-    uint k = (uint(int(nightIndex) + 8000) + pcg(seed + 5u)) & 7u;
-    L.moonTh = 3.14159265 + 0.6 * (float(k) - 4.0);
-    L.moonLit = k == 4u ? 1.0 : 0.5 - 0.5 * cos(L.moonTh);
-    L.moonAmt = 1.0 - (1.0 - MOON_FLOOR) * (1.0 - L.moonLit);
-    L.planet = planet;
-    L.planetPx = planetPx.xy * planetPx.z;
-    // Every scene pixel some cell of the two-cell block takes as its own (taaFragment), and no more at full scale.
-    L.planetReach = planetPx.z + 0.5;
-    L.planetAmt = smoothstep(0.02, -0.05, e);
+    L.moonAmt = 1.0 - (1.0 - MOON_FLOOR) * (1.0 - moonPhase(seed, nightIndex).y);
     if (e > -0.02) {
         L.key = sunDir;
         L.keyCol = sunCol * L.sunAmt + float3(1.3, 0.5, 0.3) * 0.4 * (1.0 - L.sunAmt);
@@ -6057,7 +6064,7 @@ static inline float moonCellLit(float2 i, float3 s) {
 }
 
 // The sky c (skyColor) with the sun's and moon's discs, and at night the stars and the Milky Way.
-static float3 skyDiscs(float3 c, float3 d, Light L, uint seed, float time, float pixelAngle, float2 px) {
+static float3 skyDiscs(float3 c, float3 d, Light L, uint seed, float time, float pixelAngle, float2 px, Planet P, float2 phase) {
     float s = max(dot(d, L.sun), 0.0);
     // Disc takes the key light's hue (amber near the horizon) and blooms into the haze.
     float3 tint = L.keyCol / max(max(L.keyCol.r, max(L.keyCol.g, L.keyCol.b)), 1e-3);
@@ -6068,19 +6075,19 @@ static float3 skyDiscs(float3 c, float3 d, Light L, uint seed, float time, float
     // dimmed and warmed by the thick air near the horizon. The core is the block round a pixel corner, picked unjittered,
     // so it keeps its shape as the sky clock carries it and steps a whole pixel at a time; a disc at the exact
     // direction covers 2 to 5 pixel centres as it drifts.
-    if (L.planetAmt > 0.0) {
-        float r = length(d - L.planet) / pixelAngle;
+    if (P.amt > 0.0) {
+        float r = length(d - P.dir) / pixelAngle;
         if (r < 12.0) {
             float low = smoothstep(-0.01, 0.08, d.y);
             float3 col = mix(float3(1.0, 0.62, 0.36), float3(1.0, 0.95, 0.86), low);
-            float core = all(abs(px - L.planetPx) < L.planetReach) ? 8.0 : 0.0;
-            c += col * (core + exp(-r * 0.55) * 0.3) * L.planetAmt * low;
+            float core = all(abs(px - P.px) < P.reach) ? 8.0 : 0.0;
+            c += col * (core + exp(-r * 0.55) * 0.3) * P.amt * low;
         }
     }
 
     if (L.night > 0.0) {
         float md = max(dot(d, L.moon), 0.0);
-        float lit = L.moonLit, th = L.moonTh;
+        float lit = phase.y, th = phase.x;
         c += float3(0.10, 0.13, 0.22) * (pow(md, 24.0) * 0.6 + pow(md, 400.0) * 1.5) * L.night * lit;
         // Stars: one hashed point per cell, thinned by low-frequency noise into clusters and voids and
         // denser along a band (a galactic plane at a seed-dependent tilt).
@@ -8363,9 +8370,12 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         caveDress(x.tr, s, n3, w, wq, wy, cs, fpA, under, s.caveG - (under ? 2.0 : 0.0), x.seed, x.time);
     }
     if (sceneTowers && x.towers->n.x > 0) towerSurface(x, s, k, h.voxel, h.normal, uv, inWater ? max(fp, 4.0) : fp, inWater ? max(fpA, 4.0) : fpA, d);
-    float3 wash = 0;
+    // Only a flag is kept through the shading below, which takes the wash again at its end: three floats held across
+    // it cost the scene pass registers on every pixel.
+    bool washOn = false;
     if (s.mat == 0 && h.normal.y > 0 && k == 0 && shadows == 1 && !inWater && s.pale > 0.5 && s.H > SEA && s.H <= SEA + 1.2) {
-        wash = shoreWash(x, p, s.H, fp);
+        float3 wash = shoreWash(x, p, s.H, fp);
+        washOn = any(wash > 0.0);
         s.albedo *= mix(float3(1.0), float3(0.6, 0.55, 0.47), wash.x) * mix(1.0, 0.85, wash.y);
     }
     // A tower wall shading as its plane (s.nrm; terrain has none of its own): no corner AO, which would line every jog of
@@ -8648,7 +8658,8 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         float fr = min(0.02 + 0.3 * pow(1.0 - saturate(-dot(d, nl)), 5.0), 0.08);
         col += env * fr * saturate(nl.y) * sv * (0.6 + 0.4 * sh) * dusk * s.up * s.up;
     }
-    if (any(wash > 0.0)) {
+    if (washOn) {
+        float3 wash = shoreWash(x, p, s.H, fp);
         // Wet sand and the film on it mirror the sky, the film as water does; the foam takes the sand's light.
         float3 rv = reflect(d, float3(0, 1, 0));
         float3 env = mix(L.skyHor, L.skyZen, saturate(rv.y * 2.5));
@@ -9178,13 +9189,14 @@ static float3 meteor(constant Frame& f, float night, float3 d, float time, uint 
 
 // met: a shooting star in front of the stars. Where what it adds through the clouds reaches `seen`, a is negative,
 // which tells the temporal resolve the pixel moves.
-static float4 skyWithClouds(thread const Ctx& x, float3 o, float3 d, float3 met, float seen, float2 px) {
+static float4 skyWithClouds(thread const Ctx& x, constant Frame& f, float3 o, float3 d, float3 met, float seen, float2 px) {
     float3 raw = skyColor(d, x.L);
     float3 bare = raw;
     // Forward-scatter glow near the horizon, matching what applyFog adds to fogged land.
     bare += x.L.keyCol * min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night) * smoothstep(0.1, 0.0, d.y);
-    float3 discs = skyDiscs(raw, d, x.L, x.seed, x.time, x.pixelAngle, px) - raw + aurora(x, d) + met;
-    bool star = x.L.planetAmt > 0.0 && all(abs(px - x.L.planetPx) < x.L.planetReach);
+    Planet P = planetOf(f);
+    float3 discs = skyDiscs(raw, d, x.L, x.seed, x.time, x.pixelAngle, px, P, moonPhase(x.seed, x.lights.z)) - raw + aurora(x, d) + met;
+    bool star = P.amt > 0.0 && all(abs(px - P.px) < P.reach);
     CloudSample c = cloudSheet(x, o, d, x.prof1 ? 7000.0 : 1e9);
     // Clouds hide the stars, moon and sun behind them.
     // At night thin cloud veils the moon instead of hiding it.
@@ -10397,7 +10409,7 @@ fragment float4 vineFragment(VOut in [[stage_in]], float4 dst [[color(0)]], cons
     if (int(f.shadow.y) & 2) gmax = min(gmax, 260.0);
     Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, cg2, hb, uint(f.mapInfo.w), giants, pvTex, towers, 0 };
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
-            2.0 * tanH * f.resolution.z, f.misc.w, makeLight(f.sunDir.xyz, uint(f.mapInfo.w), f.lights.z, f.planet.xyz, f.planetPx),
+            2.0 * tanH * f.resolution.z, f.misc.w, makeLight(f.sunDir.xyz, uint(f.mapInfo.w), f.lights.z),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
             cloudTex, f.cloud.xyz, st, sites, lampPos, lampState, lightMap, lightDir, f.lights, shadowNear, shadowFar,
             f.misc2.z == 14 ? 2.0 : f.shadow.x, (int(f.shadow.y) & 1) != 0, int(f.shadow.y), slowTex,
@@ -10454,7 +10466,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     tr.caveNight = f.birds.w > 0.0 ? bioLandRamp(f.lights.x) : 0.0;
     tr.caveFire = mix(1.0, 0.02, smoothstep(-0.02, 0.05, f.lights.x)) * (1.0 - 0.75 * smoothstep(0.6, 0.66, f.lights.y));
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
-            2.0 * tanH * f.resolution.z, f.misc.w, makeLight(f.sunDir.xyz, uint(f.mapInfo.w), f.lights.z, f.planet.xyz, f.planetPx),
+            2.0 * tanH * f.resolution.z, f.misc.w, makeLight(f.sunDir.xyz, uint(f.mapInfo.w), f.lights.z),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
             cloudTex, f.cloud.xyz, st, sites, lampPos, lampState, lightMap, lightDir, f.lights, shadowNear, shadowFar,
             f.misc2.z == 14 ? 2.0 : f.shadow.x, (int(f.shadow.y) & 1) != 0, int(f.shadow.y), slowTex,
@@ -10553,10 +10565,9 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     bool shadeHit = false;
     SeaLife life = { half3(1), 1.0h, half3(0), 0.0h };
     float seaAmt = f.misc2.z != 2 ? cloudSeaAmount(x) : 0.0;
-    SeaFog sea = { 1.0, float3(0) };
-    if (seaAmt > 0.0 && (water || h.hit)) sea = cloudSea(x, seaAmt, o, d, water ? tw : h.t);
-    // What the sea of cloud hides needs no shading.
-    bool seaHides = sea.T < 0.01;
+    // What the sea of cloud hides needs no shading. Only that is kept through the shading; the sea is taken again
+    // after it, as its transmittance and colour held across it cost the scene pass registers on every pixel.
+    bool seaHides = seaAmt > 0.0 && (water || h.hit) && cloudSea(x, seaAmt, o, d, water ? tw : h.t).T < 0.01;
     if (water) {
         wp = o + d * tw;
         ww = wp.xz + float2(x.origin);
@@ -10728,7 +10739,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         }
     } else {
         // seen: about half the dither's finest step near black, after exposure.
-        float4 sky = skyWithClouds(x, o, d, meteor(f, x.L.night, d, x.time, x.seed), 0.004 / f.misc.x, in.pos.xy);
+        float4 sky = skyWithClouds(x, f, o, d, meteor(f, x.L.night, d, x.time, x.seed), 0.004 / f.misc.x, in.pos.xy);
         if (SCENE_MIST && x.isles->n.x > 0 && !(x.prof & 128)) {
             float4 m = isleMist(x, o, d, 1e5);
             sky.rgb = mix(sky.rgb, m.rgb, m.a);
@@ -10758,7 +10769,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             }
     }
     if (f.misc2.z == 3) return float4(float3(fogTransmittance(x, o, d, tSurf)), 1);
-    if (seaAmt > 0.0) col = col * sea.T + sea.col;
+    if (seaAmt > 0.0 && (water || h.hit)) { SeaFog sea = cloudSea(x, seaAmt, o, d, water ? tw : h.t); col = col * sea.T + sea.col; }
     if (f.misc2.z != 2) col = Tfog >= 0.0 ? applyFogT(x, col, o, d, Tfog, landSolid(x, o + d * h.t)) : applyFog(x, col, o, d, tSurf);
     // A summit above the cloud base is seen through the slab in front of it.
     if (!(x.prof & 32) && !water && h.hit && o.y < CLOUD_Y0 && o.y + d.y * h.t > CLOUD_Y0) {
