@@ -30,7 +30,7 @@ if mode == 'strip':
             print(f'{t:.4f} {X0} {Z0} {Y0} {YAW} {PITCH} 0 {exposure(ph):.4f} {ph} 0')
             t += 1 / 30
 else:
-    # Starts past the phase wrap at 1.0, where the sun's azimuth jumps half a turn (master does it live too).
+    # Starts past the phase wrap at 1.0, where the sun's azimuth jumps half a turn.
     ph, x, z, y = 0.0, X0, Z0, Y0
     for i in range(300):
         print(f'{t:.4f} {x:.3f} {z:.3f} {y:.3f} {YAW} {PITCH + 4 * i / 300:.3f} 0 {exposure(ph):.4f} {ph % 1:.6f} 0')
