@@ -23,7 +23,7 @@ fragment float4 vineFragment(VOut in [[stage_in]], float4 dst [[color(0)]], cons
     float3 o = f.camPos.xyz;
     int levels = int(f.fade.z);
     float gmax = f.misc.y;
-    for (int k = 1; k < levels; k++) gmax = max(gmax, coarse.read(uint2(0), uint(k - 1), coarse.get_num_mip_levels() - 1).r + 1.0);
+    for (int k = 1; k < levels; k++) gmax = max(gmax, abs(coarse.read(uint2(0), uint(k - 1), coarse.get_num_mip_levels() - 1).r) + 1.0);
     if (int(f.shadow.y) & 2) gmax = min(gmax, 260.0);
     Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, cg2, hb, uint(f.mapInfo.w), giants, pvTex, towers, 0 };
     Ctx x = makeCtx(tr, f, in.pos.xy, cloudTex, st, sites, lampPos, lampState, lightMap, lightDir, shadowNear, shadowFar,
