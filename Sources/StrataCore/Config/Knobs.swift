@@ -1,13 +1,13 @@
 import Foundation
 
 // The VR_* test knobs: the process environment's, or a served request's.
-struct Knobs {
-    let env: [String: String]
-    let timing, fullCoarse, chunkedCoarse, pieces, sites, popLog, birdTrace: Bool
-    let profile: String
-    let lodShift: Float
+package struct Knobs {
+    package let env: [String: String]
+    package let timing, fullCoarse, chunkedCoarse, pieces, sites, popLog, birdTrace: Bool
+    package let profile: String
+    package let lodShift: Float
 
-    init(_ env: [String: String]) {
+    package init(_ env: [String: String]) {
         self.env = env
         timing = env["VR_TIMING"] != nil
         fullCoarse = env["VR_COARSE_FULL"] != nil
@@ -20,5 +20,5 @@ struct Knobs {
         lodShift = Float(env["VR_LODSHIFT"] ?? "") ?? 0
     }
 
-    static var current = Knobs(ProcessInfo.processInfo.environment)
+    package static var current = Knobs(ProcessInfo.processInfo.environment)
 }

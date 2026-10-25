@@ -11,7 +11,7 @@ extension FlightCamera {
         atan2(sin(a - b), cos(a - b))
     }
 
-    func step(dt: Double) {
+    package func step(dt: Double) {
         if frozen { return }
         time += dt
         let fwdFlat = SIMD2(sin(yaw), cos(yaw))

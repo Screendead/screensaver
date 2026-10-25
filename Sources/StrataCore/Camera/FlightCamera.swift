@@ -2,16 +2,16 @@ import Foundation
 import simd
 
 // Valley-following flight. Positions are world-space Doubles; the renderer rebases them onto the map.
-final class FlightCamera {
-    var position: SIMD3<Double>
-    var yaw: Double
-    var pitch: Double = -0.18
-    var roll: Double = 0
+package final class FlightCamera {
+    package var position: SIMD3<Double>
+    package var yaw: Double
+    package var pitch: Double = -0.18
+    package var roll: Double = 0
     var yawRate: Double = 0
     var yawAccel: Double = 0
     var climbRate: Double = 0
-    var tracing = false
-    var terms: [Double] = []
+    package var tracing = false
+    package var terms: [Double] = []
     var time: Double = 0
     var surveyAmount: Double = 0
     var facing: Double = 0
@@ -19,13 +19,13 @@ final class FlightCamera {
     var nextShot: Double = 0
     var nextPilgrim: Double = 0
     var rimLift: Double = 0
-    var sun = SIMD3<Double>(0, 1, 0)
-    var cloudSea = 0.0
-    var pitchOverride: Double?
+    package var sun = SIMD3<Double>(0, 1, 0)
+    package var cloudSea = 0.0
+    package var pitchOverride: Double?
     // A fixed pose for showcase snapshots; step() leaves it alone.
     private(set) var frozen = false
 
-    func freeze(position p: SIMD3<Double>, yaw y: Double, pitch pt: Double, roll rl: Double = 0) {
+    package func freeze(position p: SIMD3<Double>, yaw y: Double, pitch pt: Double, roll rl: Double = 0) {
         position = p
         yaw = y
         pitch = pt
@@ -38,7 +38,7 @@ final class FlightCamera {
     unowned(unsafe) let terrain: Terrain
     unowned(unsafe) let far: FarHeights
     // Flight stays this far under the cloud base (CLOUD_Y0 in Shaders/Saver.metal, 1065).
-    static let ceiling = 1065.0 - 80.0
+    package static let ceiling = 1065.0 - 80.0
     var avoidRate: Double = 0
     var nextRoute: Double = 0
     var routeYaw: Double?
@@ -47,11 +47,11 @@ final class FlightCamera {
     // 0...1, eased: how much a slope close by fills the frame (looked down onto, or rising beside the flight).
     var hug: Double = 0
     // Ruined towers round the camera (Sources/Towers.swift).
-    var towersAt: () -> [TowerInfo] = { [] }
+    package var towersAt: () -> [TowerInfo] = { [] }
     // Floating islands round the camera (Sources/Islands.swift).
-    var islesAt: () -> [IslandInfo] = { [] }
+    package var islesAt: () -> [IslandInfo] = { [] }
     // Index of the current night, as the lamps read it (beacons and rites burn only on some nights).
-    var nightIndex = 0
+    package var nightIndex = 0
     // Sites a shot was built around, and when; each rests for a while so one place can't own the flight.
     var framedAt: [UInt32: Double] = [:]
     var focus: SIMD2<Double>?
@@ -61,7 +61,7 @@ final class FlightCamera {
     // The pilgrim is a big island, flown beneath rather than beside.
     var pilgrimIsle = false
 
-    init(seed: UInt32, terrain: Terrain, far: FarHeights) {
+    package init(seed: UInt32, terrain: Terrain, far: FarHeights) {
         self.terrain = terrain
         self.far = far
         let s = Double(seed % 100_000)
@@ -76,7 +76,7 @@ final class FlightCamera {
     }
 
     // Unit right/up vectors including roll.
-    var basis: (fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>) {
+    package var basis: (fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>) {
         let f = forward
         let r0 = simd_normalize(simd_cross(SIMD3<Double>(0, 1, 0), f))
         let u0 = simd_cross(f, r0)
@@ -92,7 +92,7 @@ final class FlightCamera {
     var speed = 20.0
 
     // Starts the flight here (tests: VR_START).
-    func start(at p: SIMD2<Double>, yaw y: Double) {
+    package func start(at p: SIMD2<Double>, yaw y: Double) {
         position.x = p.x
         position.z = p.y
         yaw = y

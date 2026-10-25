@@ -25,7 +25,7 @@ extension Wildlife {
         return best
     }
 
-    func step(dt: Double, camera: FlightCamera, sight: Sight, sunY: Double, phase: Double) {
+    package func step(dt: Double, camera: FlightCamera, sight: Sight, sunY: Double, phase: Double) {
         time += dt
         // The last frame drew the birds where they are now, from where the camera was then.
         var sight = sight

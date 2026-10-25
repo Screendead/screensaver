@@ -5,7 +5,7 @@ extension Islands {
     // Spheres bounding where an island within d of the eye shows: its column of air down to the ground under it and its
     // reflection in the sea (columns); the ground its sky occlusion darkens, as a sphere round its base (occlusion; else see
     // occlusionBox); its shade cast along the key light (shade).
-    static func spheres(_ list: [IslandInfo], eye: SIMD3<Double>, within d: Double, key: SIMD3<Double>, columns: Bool = true,
+    package static func spheres(_ list: [IslandInfo], eye: SIMD3<Double>, within d: Double, key: SIMD3<Double>, columns: Bool = true,
                         occlusion: Bool = true, shade: Bool = true) -> [(c: SIMD3<Double>, r: Double)] {
         var out: [(c: SIMD3<Double>, r: Double)] = []
         let e2 = SIMD2(eye.x, eye.z)
@@ -28,12 +28,12 @@ extension Islands {
         return out
     }
 
-    typealias Box = (lo: SIMD3<Double>, hi: SIMD3<Double>)
+    package typealias Box = (lo: SIMD3<Double>, hi: SIMD3<Double>)
 
     // Boxes bounding, for an island within d of the eye, its column (all of it lies within its reach of its centre) from
     // the sea's floor to its top, and that column's reflection in the sea (columns); its shade cast along the key light
     // (shade, Islands.spheres' spheres).
-    static func boxes(_ list: [IslandInfo], eye: SIMD3<Double>, within d: Double, key: SIMD3<Double>, columns: Bool, shade: Bool) -> [Box] {
+    package static func boxes(_ list: [IslandInfo], eye: SIMD3<Double>, within d: Double, key: SIMD3<Double>, columns: Bool, shade: Bool) -> [Box] {
         var out: [Box] = []
         let e2 = SIMD2(eye.x, eye.z)
         for s in list where simd_length(s.pos - e2) < d + s.reach {
@@ -70,13 +70,13 @@ extension Islands {
     }
 
     // The box its sky occlusion reaches: from the sea's floor up to its underside's mean height.
-    static func occlusionBox(_ s: IslandInfo) -> Box {
+    package static func occlusionBox(_ s: IslandInfo) -> Box {
         let r = occlusionReach(s)
         return (SIMD3(s.pos.x - r, 0, s.pos.y - r), SIMD3(s.pos.x + r, 0.5 * (s.keel + s.top), s.pos.y + r))
     }
 
     // Whether any of the spheres could show in the view cone (eye, forward axis, half angle, widened by `margin`).
-    static func inView(_ spheres: [(c: SIMD3<Double>, r: Double)], eye: SIMD3<Double>, fwd: SIMD3<Double>, half: Double, margin: Double) -> Bool {
+    package static func inView(_ spheres: [(c: SIMD3<Double>, r: Double)], eye: SIMD3<Double>, fwd: SIMD3<Double>, half: Double, margin: Double) -> Bool {
         spheres.contains { c, r in
             let w = c - eye, l = simd_length(w)
             if l <= r { return true }

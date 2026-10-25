@@ -2,9 +2,9 @@ import simd
 
 // The tables placed with each map (placeSites, placeGiants, placeCaves), read from their buffers' bytes. The cave table
 // follows the giant table in its buffer.
-enum MapTables {
+package enum MapTables {
     // No slot holds a cell yet: placeGiants and placeCaves fill a slot only when its cell changes.
-    static func clearGiantsAndCaves(_ table: UnsafeMutableRawPointer) {
+    package static func clearGiantsAndCaves(_ table: UnsafeMutableRawPointer) {
         let none = GiantRec(cell: SIMD2(Int32.min, Int32.min))
         let slots = table.bindMemory(to: GiantRec.self, capacity: MapLayout.giantWin * MapLayout.giantWin)
         for i in 0..<(MapLayout.giantWin * MapLayout.giantWin) { slots[i] = none }
@@ -13,9 +13,9 @@ enum MapTables {
     }
 
     // The giant and cave tables' bytes, the cave table after the giants'.
-    static var giantTableBytes: Int { MapLayout.caveOffset + MapLayout.caveWin * MapLayout.caveWin * MemoryLayout<CaveRec>.stride }
+    package static var giantTableBytes: Int { MapLayout.caveOffset + MapLayout.caveWin * MapLayout.caveWin * MemoryLayout<CaveRec>.stride }
 
-    static func sites(in raw: UnsafeRawPointer) -> [SiteInfo] {
+    package static func sites(in raw: UnsafeRawPointer) -> [SiteInfo] {
         var list: [SiteInfo] = []
         for i in 0..<(MapLayout.siteGrid * MapLayout.siteGrid) {
             let base = raw + i * MapLayout.siteStride
@@ -36,12 +36,12 @@ enum MapTables {
         return list
     }
 
-    static func caves(in giantTable: UnsafeRawPointer) -> [CaveRec] {
+    package static func caves(in giantTable: UnsafeRawPointer) -> [CaveRec] {
         let p = (giantTable + MapLayout.caveOffset).bindMemory(to: CaveRec.self, capacity: MapLayout.caveWin * MapLayout.caveWin)
         return (0..<(MapLayout.caveWin * MapLayout.caveWin)).compactMap { p[$0].flags & 1 != 0 ? p[$0] : nil }
     }
 
-    static func giants(in table: UnsafeRawPointer) -> [GiantInfo] {
+    package static func giants(in table: UnsafeRawPointer) -> [GiantInfo] {
         let p = table.bindMemory(to: GiantRec.self, capacity: MapLayout.giantWin * MapLayout.giantWin)
         return (0..<(MapLayout.giantWin * MapLayout.giantWin)).compactMap { i in
             let r = p[i]

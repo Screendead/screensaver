@@ -1,17 +1,17 @@
 import simd
 
-enum Islands {
+package enum Islands {
     // Must match ISLE_WIN, ISLE_MWIN and ISLE_SLOTS (and IsleRec's 64 bytes) in Shaders/Saver.metal.
     static let win = 60, mwin = 13
-    static let slots = win * win + mwin * mwin
-    static let recordSize = 64
+    package static let slots = win * win + mwin * mwin
+    package static let recordSize = 64
     // Must match ISLE_TABLE and IsleShade in Shaders/Saver.metal: the islands the shading reads, nearest the camera first.
     static let tableSize = 16
     static let mistPuffs = 6
     static let entryBytes = 80 + mistPuffs * 16
-    static let tableBytes = 16 + tableSize * entryBytes
+    package static let tableBytes = 16 + tableSize * entryBytes
     // VR_ISLE_FIELD=1: the test field round (-3500, -2500) in place of island country; 2: no islands (tests).
-    static var field: Int32 { Int32(Knobs.current.env["VR_ISLE_FIELD"] ?? "") ?? 0 }
+    package static var field: Int32 { Int32(Knobs.current.env["VR_ISLE_FIELD"] ?? "") ?? 0 }
 
     static func stretch(_ r: Double, _ h: UInt32) -> Double {
         (r > 40 && (r <= 210 || r >= 420) && Provinces.hashf(Provinces.pcg(h &+ 10)) < 0.33) ? 1.5 : 1.0
@@ -28,12 +28,12 @@ enum Islands {
     static func crag(_ r: Double, _ h: UInt32) -> Double { form(r, h) == 1 ? 0.3 * r : 0 }
 
     // No slot holds a cell yet: placeIslands fills a slot only when its cell changes.
-    static func clear(_ table: UnsafeMutableRawPointer) {
+    package static func clear(_ table: UnsafeMutableRawPointer) {
         let slots = table.bindMemory(to: IsleRec.self, capacity: Islands.slots)
         for i in 0..<Islands.slots { slots[i] = IsleRec() }
     }
 
-    static func parse(_ table: UnsafeRawPointer) -> [IslandInfo] {
+    package static func parse(_ table: UnsafeRawPointer) -> [IslandInfo] {
         let p = table.bindMemory(to: IsleRec.self, capacity: slots)
         var out: [IslandInfo] = []
         for i in 0..<slots {

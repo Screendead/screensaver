@@ -5,8 +5,8 @@ import simd
 // (Sight.sees: in the frustum, not behind terrain, not lost in fog, directly or in a reflection). A bird that
 // appears is judged with this step's camera; one that disappears with the previous step's camera and position, the
 // last frame that drew it.
-final class PopLog {
-    static var enabled: Bool { Knobs.current.popLog }
+package final class PopLog {
+    package static var enabled: Bool { Knobs.current.popLog }
 
     private struct Drawn { var pos: SIMD3<Double>; var size: Double; var kind: Wildlife.Kind; var flock: Int }
     private var drawn: [Int: Drawn] = [:]
@@ -19,13 +19,15 @@ final class PopLog {
     private var periodSeconds: [String: Double] = [:]
     private var spawned = 0, retired = 0
 
-    static func period(sunY: Double, phase: Double) -> String {
+    package init() {}
+
+    package static func period(sunY: Double, phase: Double) -> String {
         if sunY < -0.16 { return "night" }
         if sunY < 0.14 { return phase - floor(phase) > 0.25 && phase - floor(phase) < 0.75 ? "dusk" : "dawn" }
         return "day"
     }
 
-    func check(_ w: Wildlife, sight: Sight, time: Double, dt: Double, period: String) {
+    package func check(_ w: Wildlife, sight: Sight, time: Double, dt: Double, period: String) {
         var now: [Int: Drawn] = [:]
         var inFrame = 0
         for (f, cs) in w.drawList() {
@@ -83,7 +85,7 @@ final class PopLog {
                      (sight.direct(d.pos, size: d.size) ? "" : " (reflection)") + note))
     }
 
-    func summary(_ w: Wildlife) -> String {
+    package func summary(_ w: Wildlife) -> String {
         let causes = byCause.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
         let seen = ["dawn", "day", "dusk", "night"].compactMap { p -> String? in
             guard let s = periodSeconds[p], s > 0 else { return nil }

@@ -1,5 +1,6 @@
 import AppKit
 import MetalKit
+import StrataCore
 
 extension Renderer {
     convenience init?(view: MTKView, gpu: GPU, screen: NSScreen, seed: UInt32, screenIndex: Int, battery: Bool, dither: Bool = true) {

@@ -4,8 +4,8 @@ import simd
 // What one rendered frame can show of a bird: the view frustum, terrain in front of it, fog, and its reflection in
 // water. Every test errs toward "seen": the terrain test uses a lower bound of the solid ground, the fog test leaves
 // out the valley mist, which only thickens it.
-struct Sight {
-    var pos: SIMD3<Double>
+package struct Sight {
+    package var pos: SIMD3<Double>
     var fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>
     var tanV: Double
     var aspect: Double
@@ -24,6 +24,12 @@ struct Sight {
     // needs the sightline this far inside the ground, water anywhere within a few voxels counts, fog must be thicker.
     var slack = 0.0
 
+    package init(pos: SIMD3<Double>, fwd: SIMD3<Double>, right: SIMD3<Double>, up: SIMD3<Double>, tanV: Double, aspect: Double,
+                 pixelAngle: Double, sunY: Double, worldEdge: Double, floorReach: Double, terrain: Terrain) {
+        (self.pos, self.fwd, self.right, self.up, self.tanV, self.aspect) = (pos, fwd, right, up, tanV, aspect)
+        (self.pixelAngle, self.sunY, self.worldEdge, self.floorReach, self.terrain) = (pixelAngle, sunY, worldEdge, floorReach, terrain)
+    }
+
     // Must match SEA in Shaders/Saver.metal.
     static let sea = 19.85
     // A bird fogged below this transmittance differs from the sky behind it by under half of one of the 8 output
@@ -32,7 +38,7 @@ struct Sight {
     static let fogHidden = 0.12
 
     // Half-extent a bird can cover at distance t: wings and body, plus the shader's minimum box footprint.
-    func reach(size: Double, at t: Double) -> Double { 0.62 * size + 0.9 * t * pixelAngle }
+    package func reach(size: Double, at t: Double) -> Double { 0.62 * size + 0.9 * t * pixelAngle }
 
     // Inside the frustum widened by `margin` radians on every side and by the bird's own extent; subpixel jitter and
     // the cell grid add one cell.

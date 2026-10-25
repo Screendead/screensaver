@@ -2,7 +2,7 @@ import Foundation
 
 // CPU port of the forest-province fields (provinces, fbm2, perlin2 and their hashes in Shaders/Saver.metal), in Double:
 // close to the shader's floats, which is all the renderer's choices from it need.
-enum Provinces {
+package enum Provinces {
     static func pcg(_ v: UInt32) -> UInt32 {
         let state = v &* 747796405 &+ 2891336453
         let word = ((state >> ((state >> 28) &+ 4)) ^ state) &* 277803737
@@ -46,7 +46,7 @@ enum Provinces {
     }
 
     // (jungle, old growth) at world xz.
-    static func at(_ x: Double, _ z: Double, seed: UInt32) -> (Double, Double) {
+    package static func at(_ x: Double, _ z: Double, seed: UInt32) -> (Double, Double) {
         let b = Biome.pinned(seed)
         if b != 0 { return (b == 8 ? 1 : 0, b == 9 ? 1 : 0) }
         let o = seedOffset(seed)

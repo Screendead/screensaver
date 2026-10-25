@@ -4,7 +4,7 @@ import simd
 // Birds (and bats) in a few small flocks around the camera. Each flock steers an anchor through the terrain on a
 // slow noise heading; its birds follow the anchor as boids. All randomness is drawn from the seed in step order,
 // so a snapshot reproduces.
-final class Wildlife {
+package final class Wildlife {
 
     static let maxFlocks = 8
     static let maxBirds = 600
@@ -12,9 +12,9 @@ final class Wildlife {
     // pixel near a big murmuration tests a few clusters, not every bird. Must match MAX_FLOCKS and MAX_CLUSTERS in
     // Shaders/Saver.metal.
     static let maxClusters = 48, clusterSize = 16
-    static let bufferLength = ((maxFlocks + maxClusters) * 2 + maxBirds * 4) * MemoryLayout<SIMD4<Float>>.stride
+    package static let bufferLength = ((maxFlocks + maxClusters) * 2 + maxBirds * 4) * MemoryLayout<SIMD4<Float>>.stride
 
-    var flocks: [Flock] = []
+    package var flocks: [Flock] = []
     private var state: UInt64
     var time = 0.0
     var spawnTimer = 0.0
@@ -32,15 +32,15 @@ final class Wildlife {
     var failWhy: [String: Int] = [:]
     var spawnMs = 0.0
     let noiseSeed: UInt32
-    var heightAt: (Double, Double) -> Double? = { _, _ in nil }
+    package var heightAt: (Double, Double) -> Double? = { _, _ in nil }
     // The CPU cell under world (x, z) with its islands (World.column): top, ground islands aside, lowest underside.
-    var columnAt: (Double, Double) -> (top: Double, ground: Double, under: Double?)? = { _, _ in nil }
+    package var columnAt: (Double, Double) -> (top: Double, ground: Double, under: Double?)? = { _, _ in nil }
     // Giant trees on the loaded map (world coordinates).
-    var giantsAt: () -> [GiantInfo] = { [] }
+    package var giantsAt: () -> [GiantInfo] = { [] }
     // Floating islands round the camera.
-    var islesAt: () -> [IslandInfo] = { [] }
+    package var islesAt: () -> [IslandInfo] = { [] }
 
-    init(seed: UInt32) {
+    package init(seed: UInt32) {
         state = UInt64(seed) &* 0x9E37_79B9_7F4A_7C15 ^ 0xD1B5_4A32_D192_ED03
         noiseSeed = seed &* 2_654_435_761
     }
@@ -72,9 +72,9 @@ final class Wildlife {
         return ((a + (b - a) * u) + ((c + (d - c) * u) - (a + (b - a) * u)) * v) * 1.414
     }
 
-    func ground(_ x: Double, _ z: Double) -> Double { heightAt(x, z) ?? 200 }
+    package func ground(_ x: Double, _ z: Double) -> Double { heightAt(x, z) ?? 200 }
     // The ground as a bird at height y meets it: well under an island, the land beneath it; else the island's top.
-    func ground(_ x: Double, _ z: Double, at y: Double) -> Double {
+    package func ground(_ x: Double, _ z: Double, at y: Double) -> Double {
         guard let c = columnAt(x, z) else { return 200 }
         if let u = c.under, y < u - 12 { return c.ground }
         return c.top

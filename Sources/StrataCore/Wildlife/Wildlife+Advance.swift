@@ -2,7 +2,7 @@ import Foundation
 import simd
 
 extension Wildlife {
-    func advance(_ f: Flock, dt: Double, cam: SIMD3<Double>) {
+    package func advance(_ f: Flock, dt: Double, cam: SIMD3<Double>) {
         let fl = Wildlife.flight(f.kind)
         f.age += dt
         f.transit -= dt

@@ -3,7 +3,7 @@ import simd
 
 extension Wildlife {
     // Debug: replaces the flocks with one murmuration `distance` ahead of the camera, gathered, for timing the worst case.
-    func testMurmuration(camera: FlightCamera, distance: Double) {
+    package func testMurmuration(camera: FlightCamera, distance: Double) {
         flocks = []
         let n = Int(rand(320...420))
         flocks = [makeMurmuration(slot: 0, anchor: camera.position + camera.forward * distance, n: n, life: rand(70...150), seedPhase: rand(0...1000))]
@@ -11,7 +11,7 @@ extension Wildlife {
 
     // Debug: replaces the flocks with a grid of birds of every kind close in front of the camera, at varied headings
     // and wingbeat phases, for judging their shapes.
-    func testPattern(camera: FlightCamera, distance: Double) {
+    package func testPattern(camera: FlightCamera, distance: Double) {
         let b = camera.basis
         let kinds: [Kind] = [.songbird, .raptor, .gull, .starling, .bat, .goose]
         flocks = kinds.map { Flock(kind: $0, slot: 99, anchor: camera.position, heading: 0, speed: 0, altitude: 0, life: 1e9, seedPhase: 0) }

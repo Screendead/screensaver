@@ -1,14 +1,14 @@
 import simd
 
 // A structure site as the camera and the smoke and halo lists see it, in world coordinates.
-struct SiteInfo {
-    enum Kind: Int { case none = 0, henge, cairn, ruins, hamlet, jetty, camp, cave }
+package struct SiteInfo {
+    package enum Kind: Int { case none = 0, henge, cairn, ruins, hamlet, jetty, camp, cave }
     // smoke: where its plume starts (rise > 0 only): a window lamp stands at its door, its chimney a few columns off.
-    struct Lamp { var pos: SIMD3<Double>; var kind: Int; var rise: Double; var index: Int; var smoke: SIMD3<Double> }
-    var index: Int
-    var id: UInt32
-    var kind: Kind
-    var pos: SIMD2<Double>
-    var radius: Double
-    var lamps: [Lamp]
+    package struct Lamp { package var pos: SIMD3<Double>; package var kind: Int; package var rise: Double; package var index: Int; package var smoke: SIMD3<Double> }
+    package var index: Int
+    package var id: UInt32
+    package var kind: Kind
+    package var pos: SIMD2<Double>
+    package var radius: Double
+    package var lamps: [Lamp]
 }

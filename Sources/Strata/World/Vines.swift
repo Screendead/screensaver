@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import StrataCore
 import simd
 
 // A giant's hanging strands (Shaders/Saver.metal, MARK: Hanging strands): a slot per giant near the camera holding its

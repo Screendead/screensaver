@@ -47,7 +47,7 @@ extension Wildlife {
     }
 
     // Birds inside the camera's view (ignoring terrain occlusion), and the nearest one's distance.
-    func inView(camera: FlightCamera, aspect: Double, tanHalf: Double) -> (count: Int, nearest: Double, flocks: Int) {
+    package func inView(camera: FlightCamera, aspect: Double, tanHalf: Double) -> (count: Int, nearest: Double, flocks: Int) {
         var n = 0, near = Double.infinity, fs = 0
         for f in flocks {
             let v = visible(f, camera: camera, aspect: aspect, tanHalf: tanHalf)

@@ -1,4 +1,5 @@
 import Foundation
+import StrataCore
 import simd
 
 extension Renderer {

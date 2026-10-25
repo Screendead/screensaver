@@ -3,6 +3,7 @@ import CoreVideo
 import Foundation
 import Metal
 import QuartzCore
+import StrataCore
 import VideoToolbox
 import simd
 

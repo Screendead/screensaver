@@ -1,4 +1,5 @@
 import AppKit
+import StrataCore
 
 final class MenuController: NSObject, NSMenuDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)

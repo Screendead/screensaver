@@ -1,5 +1,6 @@
 import AppKit
 import MetalKit
+import StrataCore
 
 final class SaverController {
     private var windows: [SaverWindow] = []

@@ -1,15 +1,16 @@
 import AppKit
+import StrataCore
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+package final class AppDelegate: NSObject, NSApplicationDelegate {
     let settings: Settings
     lazy var saver = SaverController(settings: settings)
     var pollTimer: Timer?
     private var menuController: MenuController?
     private var systemSaverRunning = false
 
-    init(settings: Settings) { self.settings = settings }
+    package init(settings: Settings) { self.settings = settings }
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
+    package func applicationDidFinishLaunching(_ notification: Notification) {
         if let socket = settings.servePath {
             Server.run(socket: socket)
             exit(0)

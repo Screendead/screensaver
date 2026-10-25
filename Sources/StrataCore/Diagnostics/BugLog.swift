@@ -1,7 +1,7 @@
 import Foundation
 
 // The last notable events of this process, for bug reports.
-enum BugLog {
+package enum BugLog {
     static let capacity = 200
     private static let lock = NSLock()
     private static var lines: [String] = []
@@ -12,7 +12,7 @@ enum BugLog {
         return f
     }()
 
-    static func note(_ s: String) {
+    package static func note(_ s: String) {
         dlog(s)
         lock.lock()
         defer { lock.unlock() }
@@ -20,7 +20,7 @@ enum BugLog {
         if lines.count < capacity { lines.append(line) } else { lines[head] = line; head = (head + 1) % capacity }
     }
 
-    static var recent: [String] {
+    package static var recent: [String] {
         lock.lock()
         defer { lock.unlock() }
         return Array(lines[head...] + lines[..<head])

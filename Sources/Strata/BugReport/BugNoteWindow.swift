@@ -1,4 +1,5 @@
 import AppKit
+import StrataCore
 
 // Asks what the user saw after a report is captured: Return saves note.txt, Option-Return starts a new line, Escape or
 // the close button skips it. `done` runs once the window closes, or after five minutes.

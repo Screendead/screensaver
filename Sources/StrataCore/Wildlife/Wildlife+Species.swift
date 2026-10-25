@@ -2,19 +2,19 @@ import Foundation
 import simd
 
 extension Wildlife {
-    enum Kind: Int { case songbird, raptor, gull, starling, bat, goose }
+    package enum Kind: Int { case songbird, raptor, gull, starling, bat, goose }
 
-    struct Bird {
-        var pos: SIMD3<Double>
+    package struct Bird {
+        package var pos: SIMD3<Double>
         var vel: SIMD3<Double>
         var flap = 0.0
         var beat = 0.0 // > 0: seconds of flapping left; < 0: of gliding
         var bank = 0.0
-        var size: Double
+        package var size: Double
         var tint: Double
-        var phase: Double
+        package var phase: Double
         var sheet = SIMD2<Double>.zero // starlings: place on the murmuration's sheet
-        var id = 0
+        package var id = 0
     }
 
     struct Flight {
@@ -24,7 +24,7 @@ extension Wildlife {
         let flapFor: ClosedRange<Double>, glideFor: ClosedRange<Double>
         let glideAngle: Double, glideExt: Double
         let handDroop: Double, sweep: Double // gliding hand angle relative to the arm; hand swept back (rad)
-        let reach: Double, separation: Double, cohesion: Double, alignment: Double, pull: Double, wander: Double
+        package let reach: Double, separation: Double, cohesion: Double, alignment: Double, pull: Double, wander: Double
         let clearance: Double
     }
 
@@ -57,17 +57,17 @@ extension Wildlife {
         }
     }
 
-    final class Flock {
-        let kind: Kind
+    package final class Flock {
+        package let kind: Kind
         let slot: Int
-        var birds: [Bird] = []
+        package var birds: [Bird] = []
         var anchor: SIMD3<Double>
         var heading: Double
         var speed: Double
         var altitude: Double
         var age = 0.0
         let life: Double
-        var leaving = false
+        package var leaving = false
         var unseen = 0.0 // seconds since any bird was in frame
         // Seconds until the flock, flying in from where nothing could see it, reaches the part of the frame it was
         // aimed at; until then it holds its course and speed.
@@ -79,10 +79,10 @@ extension Wildlife {
         // Murmuration: a slow drift along with the camera, so it stays in the frame while it gathers and wheels.
         var drift = SIMD3<Double>.zero
         let seedPhase: Double
-        var serial = 0
+        package var serial = 0
         var misses = 0 // murmuration: tries in a row to gather again ahead that found no place
         // Circling an island: its centre (x, z), the ring's radius and height, and which way round.
-        var orbit: SIMD4<Double>?
+        package var orbit: SIMD4<Double>?
         var orbitSense = 1.0
 
         init(kind: Kind, slot: Int, anchor: SIMD3<Double>, heading: Double, speed: Double, altitude: Double, life: Double, seedPhase: Double) {

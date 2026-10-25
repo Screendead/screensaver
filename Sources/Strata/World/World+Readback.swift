@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import StrataCore
 import simd
 
 extension World {

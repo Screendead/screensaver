@@ -1,4 +1,5 @@
 import Foundation
+import StrataCore
 
 // Read by the saver agent and written by the menu process; CFPreferences makes both see the same file.
 enum Prefs {

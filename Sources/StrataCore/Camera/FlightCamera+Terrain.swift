@@ -6,7 +6,7 @@ extension FlightCamera {
         let d = simd_length(SIMD2(x - position.x, z - position.z))
         return position.y < u - FlightCamera.isleMargin + FlightCamera.isleSink * d / speed
     }
-    func h(_ x: Double, _ z: Double) -> Double {
+    package func h(_ x: Double, _ z: Double) -> Double {
         if let c = terrain.column(x: x, z: z) {
             if let u = c.under, u - c.ground >= 90, beneath(x, z, under: u) { return c.ground }
             return c.top
@@ -65,7 +65,7 @@ extension FlightCamera {
 
     // Share of the frame's width (11 bearings across the horizontal field) where land within 220 rises above the eye:
     // a wall filling the frame (tests).
-    func wallInFrame() -> Double {
+    package func wallInFrame() -> Double {
         var n = 0.0
         for i in -5...5 {
             let a = yaw + Double(i) * 0.12

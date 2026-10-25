@@ -1,5 +1,6 @@
 import AppKit
 import Metal
+import StrataCore
 import simd
 
 // Offscreen render to PNG, for checking visuals without a display.

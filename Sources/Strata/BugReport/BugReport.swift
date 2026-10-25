@@ -2,6 +2,7 @@ import CoreGraphics
 import Foundation
 import Metal
 import QuartzCore
+import StrataCore
 
 enum BugReport {
     static let key: CGKeyCode = 11 // kVK_ANSI_B

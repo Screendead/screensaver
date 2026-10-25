@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import StrataCore
 import simd
 
 // Rare ruined towers. Whether a group stands turns on the climate and the provinces at its centre, so placeTowers

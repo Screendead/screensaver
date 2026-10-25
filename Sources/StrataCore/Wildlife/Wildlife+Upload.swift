@@ -22,7 +22,7 @@ extension Wildlife {
 
     // Writes cluster spheres then birds into `buffer` (bufferLength bytes), map-local (relative to `origin`). Returns the
     // flock count.
-    func upload(into buffer: UnsafeMutableRawPointer, origin o: SIMD3<Double>) -> Int {
+    package func upload(into buffer: UnsafeMutableRawPointer, origin o: SIMD3<Double>) -> Int {
         let out = buffer.bindMemory(to: SIMD4<Float>.self, capacity: Wildlife.bufferLength / 16)
         var nc = 0, nb = 0
         let clusters = Wildlife.maxFlocks * 2

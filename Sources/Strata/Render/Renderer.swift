@@ -1,5 +1,6 @@
 import AppKit
 import MetalKit
+import StrataCore
 import simd
 
 final class Renderer: NSObject, MTKViewDelegate {

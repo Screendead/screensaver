@@ -1,23 +1,23 @@
 import simd
 
 // One ruined tower (Shaders/Saver.metal, MARK: Ruined towers), as placeTowers records it.
-struct TowerInfo {
-    var pos: SIMD2<Double>
-    var radius: Double      // the base shaft's apothem
-    var base: Double
-    var height: Double      // above base
-    var kind: Int           // 0 stepped spire, 1 drum, 2 needle
-    var member: Int         // 0: the tallest of its group
-    var lit: Bool
-    var moist: Double, temp: Double
-    var record: (SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<UInt32>)
-    var top: Double { base + height }
+package struct TowerInfo {
+    package var pos: SIMD2<Double>
+    package var radius: Double      // the base shaft's apothem
+    package var base: Double
+    package var height: Double      // above base
+    package var kind: Int           // 0 stepped spire, 1 drum, 2 needle
+    package var member: Int         // 0: the tallest of its group
+    package var lit: Bool
+    package var moist: Double, temp: Double
+    package var record: (SIMD4<Float>, SIMD4<Float>, SIMD4<Float>, SIMD4<UInt32>)
+    package var top: Double { base + height }
 
     // Must match TowerRec's 64 bytes in Shaders/Saver.metal.
-    static let recordSize = 64
+    package static let recordSize = 64
 
     // The towers among `count` records (a slot without one has height 0).
-    static func decode(_ raw: UnsafeRawPointer, count: Int) -> [TowerInfo] {
+    package static func decode(_ raw: UnsafeRawPointer, count: Int) -> [TowerInfo] {
         var out: [TowerInfo] = []
         for i in 0..<count {
             let r = raw + i * recordSize

@@ -1,27 +1,27 @@
 import CoreGraphics
 import Foundation
 
-struct Settings {
-    var idleThreshold: Double?
-    var menu = false
-    var noDither = false
-    var preview = false
-    var previewDuration: Double = 0
-    var screenshotPath: String?
-    var screenshotTimes: [Double] = [8]
-    var screenshotSize = CGSize(width: 1728, height: 1117)
-    var forceBattery = false
-    var seed: UInt32 = 0
-    var debugMode: Float = 0
-    var renderScale: Double?
-    var phase: Double?
-    var biome: Int?
-    var timeScale: Double = 1
-    var pitch: Double?
-    var headroom: Float?
-    var servePath: String?
+package struct Settings {
+    package var idleThreshold: Double?
+    package var menu = false
+    package var noDither = false
+    package var preview = false
+    package var previewDuration: Double = 0
+    package var screenshotPath: String?
+    package var screenshotTimes: [Double] = [8]
+    package var screenshotSize = CGSize(width: 1728, height: 1117)
+    package var forceBattery = false
+    package var seed: UInt32 = 0
+    package var debugMode: Float = 0
+    package var renderScale: Double?
+    package var phase: Double?
+    package var biome: Int?
+    package var timeScale: Double = 1
+    package var pitch: Double?
+    package var headroom: Float?
+    package var servePath: String?
 
-    static func parse(_ args: [String]) -> Settings {
+    package static func parse(_ args: [String]) -> Settings {
         var s = Settings()
         var i = 1
         func next() -> String { i += 1; return i < args.count ? args[i] : "" }

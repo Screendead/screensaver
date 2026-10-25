@@ -9,7 +9,7 @@ extension Islands {
     // frame; mist that lies wholly outside it is left out (the scene pass draws mist on primary rays only). Each entry
     // ends with the square of its sky occlusion's reach (occlusionReach). mist: boxes bounding the mist banks and plumes
     // it holds (isleMist's ellipsoids).
-    static func table(_ list: [IslandInfo], near p: SIMD2<Double>, within d: Double,
+    package static func table(_ list: [IslandInfo], near p: SIMD2<Double>, within d: Double,
                       view: (eye: SIMD3<Double>, fwd: SIMD3<Double>, half: Double)? = nil) -> (bytes: [UInt8], mist: [Box]) {
         func seen(_ c: SIMD3<Double>, _ r: Double) -> Bool {
             guard let v = view else { return true }
