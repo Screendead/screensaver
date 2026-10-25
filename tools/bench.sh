@@ -1,5 +1,5 @@
 #!/bin/zsh
-# A/B GPU timing over twelve fixed scenes: VR_BENCH=12 stills at 3456x2234 scale 1 per scene and build, the build order
+# A/B GPU timing over thirteen fixed scenes (the last a close beach): VR_BENCH=12 stills at 3456x2234 scale 1 per scene and build, the build order
 # rotating each round, reporting each scene's minimum gpu ms per build. Run it inside the exclusive lock:
 #   tools/vrgpu --time -- tools/bench.sh ROUNDS "label=app label=app" [scene filter regex]
 # A label of the form name@prof=app runs that build with VR_PROFILE=prof; PROFILE=... in the environment applies to all.
@@ -26,6 +26,7 @@ SCENES=(
   "giantNear2|101|420|0.25|3658,-60,60,0,8"
   "twrHero|101|420|0.25|4071.2,-3942.3,40,220,14,0"
   "stilt_close_dusk|1|20|0.53|SHOW:4,30,10,270,3"
+  "beach303|303|20|0.3|6324,-945,29,10,-27.2,1"
 )
 for r in $(seq $R); do
   n=${#labels}
