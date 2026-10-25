@@ -1,0 +1,1 @@
+t=30 phase=0.470 sunY=0.15 exposure=1.12 cam=(300,84,2740) yaw=-90.0 pitch=4.0 birds=0 flocks=0 near=nan sites=2[jetty@388 hamlet@494] -> shelters_sunset.png

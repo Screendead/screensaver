@@ -1,0 +1,1 @@
+t=60 phase=0.005 sunY=0.08 exposure=1.34 cam=(-104,87,2255) yaw=-75.0 pitch=3.0 birds=9 flocks=1 near=495 sites=2[camp@444 camp@538] -> escarp_dawn.png

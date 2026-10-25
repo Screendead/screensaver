@@ -1,0 +1,1 @@
+t=20 phase=0.300 sunY=0.47 exposure=0.69 cam=(6324,29,-945) yaw=10.0 pitch=-27.2 birds=0 flocks=0 near=nan sites=1[jetty@31] -> beach_battery.png

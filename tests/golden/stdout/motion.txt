@@ -1,0 +1,1 @@
+t=30 phase=-0.013 sunY=0.02 exposure=1.54 cam=(-1601,58,264) yaw=-76.8 pitch=-11.7 birds=8 flocks=2 near=51 sites=0[] -> motion.png

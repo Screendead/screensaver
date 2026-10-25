@@ -1,0 +1,2 @@
+showing hamlet site 1050161357 at (2032, 558), 1 of 1
+t=20 phase=0.530 sunY=-0.03 exposure=2.16 cam=(2002,31,558) yaw=90.0 pitch=1.4 birds=384 flocks=6 near=194 sites=10[ruins@516 cairn@620 ruins@268 ruins@376 hamlet@30 cairn@344 ruins@466 ruins@366 ruins@521 ruins@693] -> stilt_dusk.png

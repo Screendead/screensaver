@@ -27,6 +27,7 @@ Run every launch of the binary through the GPU lock, `tools/vrgpu -- <binary> ..
 | --- | --- |
 | `tools/vrgpu -- <cmd>` / `--time -- <cmd>` / `--status` | GPU lock: renders share it, timing runs hold it alone |
 | `tools/vrr <app> --screenshot ...` | The same render through a warm per-build server (byte-identical; skips the shader compile) |
+| `tools/golden.sh [app]` / `--update [app]` | Output regression check: 15 scenes (stills, a 12-frame motion run, a recorded-path replay) at 864x558 through `tools/vrr`, PNG and stdout sha256s against `tests/golden/manifest.sha256`; run it on every refactor, `--update` only for an intended output change |
 | `tools/render.sh <out dir> [app]` | The standard 32 frames (8 seeds x dawn, noon, sunset, night) and four contact sheets; milestones only |
 | `tools/vrgpu --time -- tools/bench.sh ROUNDS "a=<app> b=<app>" [regex]` | A/B GPU ms over twelve fixed scenes |
 | `tools/flicker.py <dir or glob> [--skip n] [--crop WxH]` | Frame-to-frame flicker of a PNG sequence (a report's decoded clip, VR_PATH or VR_FRAMES renders): flip and one-frame blink rates in dark and bright regions |

@@ -1,0 +1,1 @@
+t=30 phase=0.250 sunY=0.49 exposure=0.70 cam=(3400,85,300) yaw=20.0 pitch=-6.0 birds=0 flocks=0 near=nan sites=2[camp@135 camp@622] -> jungle_debug1.png

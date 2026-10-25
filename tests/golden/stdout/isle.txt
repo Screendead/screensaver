@@ -1,0 +1,1 @@
+t=10 phase=0.120 sunY=0.36 exposure=0.64 cam=(9822,480,-2224) yaw=180.0 pitch=4.0 birds=1 flocks=1 near=136 sites=0[] -> isle.png

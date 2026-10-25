@@ -1,0 +1,1 @@
+t=30 phase=0.250 sunY=0.49 exposure=0.70 cam=(4071,60,-3942) yaw=220.0 pitch=14.0 birds=0 flocks=0 near=nan sites=3[hamlet@597 jetty@454 jetty@408] -> towers_noon.png

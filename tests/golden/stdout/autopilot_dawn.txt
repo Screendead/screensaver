@@ -1,0 +1,1 @@
+t=60 phase=0.005 sunY=0.08 exposure=1.34 cam=(2564,93,763) yaw=96.7 pitch=-11.7 birds=0 flocks=0 near=nan sites=4[hamlet@216 hamlet@433 camp@462 camp@640] -> autopilot_dawn.png
