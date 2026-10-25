@@ -14,10 +14,10 @@ kernel void probeProvinces(device const float2* in [[buffer(0)]], device float2*
     out[i] = provinces(in[i] + seedOffset(seed), seed);
 }
 
-// makeLight's key direction (xyz) and whether it casts shadows (w) for each sun direction.
+// makeLight's key direction (xyz) and, in w, 1 + shade where it casts shadows and 0 where it casts none, for each sun direction.
 kernel void probeLight(device const float3* in [[buffer(0)]], device float4* out [[buffer(1)]], uint i [[thread_position_in_grid]]) {
     Light L = makeLight(in[i], 1u, 0.0);
-    out[i] = float4(L.key, L.shadows ? 1.0 : 0.0);
+    out[i] = float4(L.key, L.shadows ? 1.0 + L.shade : 0.0);
 }
 
 // cloudSeaAmount for each (sun elevation, night progress); built with SEA_FC on.
