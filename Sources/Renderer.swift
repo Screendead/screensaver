@@ -30,6 +30,8 @@ struct Frame {
     var fade = SIMD4<Float>()
     var shadow = SIMD4<Float>()
     var slowCloud = SIMD4<Float>()
+    var planet = SIMD4<Float>()
+    var planetPx = SIMD4<Float>()
 }
 
 // The shader library and its pipeline states, shared by the renderers of one activation (a screen each).
@@ -114,8 +116,16 @@ final class GPU {
         return fullscreen(try? library.makeFunction(name: "vineFragment", constantValues: fc), .rgba16Float)
     }
 
-    func taa() -> MTLRenderPipelineState? {
-        pipeline("taa") { fullscreen(library.makeFunction(name: "taaFragment"), .rgba16Float) }
+    // star: the resolve round the evening star (STAR_FC), drawn over the plain one in a scissor.
+    func taa(star: Bool = false) -> MTLRenderPipelineState? {
+        pipeline(star ? "taa star" : "taa") { taaDescriptor(star) }
+    }
+
+    private func taaDescriptor(_ star: Bool) -> MTLRenderPipelineDescriptor {
+        let fc = MTLFunctionConstantValues()
+        var s = star
+        fc.setConstantValue(&s, type: .bool, index: 3)
+        return fullscreen(try? library.makeFunction(name: "taaFragment", constantValues: fc), .rgba16Float)
     }
 
     func bio() -> MTLRenderPipelineState? {
@@ -147,7 +157,7 @@ final class GPU {
         let group = DispatchGroup(), lock = NSLock()
         var kernels: [String: MTLComputePipelineState] = [:], renders: [String: MTLRenderPipelineState] = [:]
         let functions = library.functionNames.filter { compute[$0] == nil }.compactMap { library.makeFunction(name: $0) }
-        var descriptors = ["taa": fullscreen(library.makeFunction(name: "taaFragment"), .rgba16Float),
+        var descriptors = ["taa": taaDescriptor(false), "taa star": taaDescriptor(true),
                            "bio": bioDescriptor(),
                            GPU.postKey(output, true): postDescriptor(output, true)]
         for t in [false, true] {
@@ -200,10 +210,21 @@ struct SkyClock {
         0.9 + 0.834 * (1 - cos(2 * .pi * phase))
     }
 
-    var sunDirection: SIMD3<Double> {
+    static func direction(_ phase: Double) -> SIMD3<Double> {
         let el = asin(SkyClock.elevation(phase))
         let az = SkyClock.azimuth(phase)
         return SIMD3(cos(el) * sin(az), sin(el), cos(el) * cos(az))
+    }
+
+    var sunDirection: SIMD3<Double> { SkyClock.direction(phase) }
+
+    // The evening star trails the sun along its path and sets this much later; the morning star leads it and rises
+    // this much earlier.
+    static let planetLag = 0.09
+
+    var planetDirection: SIMD3<Double> {
+        let evening = SkyClock.direction(phase - SkyClock.planetLag), morning = SkyClock.direction(phase + SkyClock.planetLag)
+        return evening.y > morning.y ? evening : morning
     }
 
     // Steps at mid-morning rather than at the dawn wrap, so a night keeps its beacons and rites until daylight.
@@ -1228,6 +1249,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private let vinePipeline: MTLRenderPipelineState
     let postPipeline: MTLRenderPipelineState
     let taaPipeline: MTLRenderPipelineState
+    let taaStarPipeline: MTLRenderPipelineState?
     // The glowing bugs (bioFragment), drawn over the scene in a pass of their own from sunset.
     private let bioPipeline: MTLRenderPipelineState
     private let cloudPipeline: MTLComputePipelineState
@@ -1377,6 +1399,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         scenePipelines = sceneStates
         postPipeline = pp
         taaPipeline = tp
+        taaStarPipeline = gpu.taa(star: true)
         bioPipeline = bp
         cloudPipeline = cf
         slowPipeline = csf
@@ -1570,7 +1593,7 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     // shadeHeight sets the shading prefilter's pixel: the output's without the dither, so a scene smaller than the
     // output keeps the output's surface detail for the temporal resolve to gather.
-    func makeFrame(size: CGSize, shadeHeight: Int) -> Frame {
+    func makeFrame(size: CGSize, cells: CGSize, shadeHeight: Int) -> Frame {
         var f = Frame()
         let b = camera.basis
         let o = SIMD3(Double(world.origin.x), 0, Double(world.origin.y))
@@ -1580,6 +1603,18 @@ final class Renderer: NSObject, MTKViewDelegate {
         f.camRight = SIMD4(SIMD3<Float>(b.right), Float(simTime))
         f.camUp = SIMD4(SIMD3<Float>(b.up), battery ? 0 : 1)
         f.sunDir = SIMD4(SIMD3<Float>(clock.sunDirection), Float(clock.phase))
+        f.planet = SIMD4(SIMD3<Float>(clock.planetDirection), 0)
+        // The cell corner nearest the planet, projected as the shader casts its rays (without the jitter); off screen
+        // while the sun is up (planetAmt in Shaders/Saver.metal).
+        let pv = clock.planetDirection, pz = simd_dot(pv, b.fwd), tanH = Double(f.camPos.w)
+        f.planetPx = SIMD4(-1e4, -1e4, Float(size.width / cells.width), 0)
+        if pz > 0.01 && clock.sunDirection.y < 0.02 {
+            let pn = SIMD2(simd_dot(pv, b.right) / (pz * tanH * Double(f.camFwd.w)), simd_dot(pv, b.up) / (pz * tanH))
+            let uv = SIMD2(pn.x * 0.5 + 0.5, 0.5 - pn.y * 0.5)
+            let cx = (uv.x * cells.width).rounded(), cy = (uv.y * cells.height).rounded()
+            f.planetPx.x = Float(cx)
+            f.planetPx.y = Float(cy)
+        }
         f.resolution = SIMD4(Float(size.width), Float(size.height), Float(1 / Double(shadeHeight)), Float(1 / size.height))
         f.mapInfo = SIMD4(world.origin.x, world.origin.y, Int32(World.size), Int32(bitPattern: world.seed))
         f.misc = SIMD4(Float(exposure), world.globalMax, 0.6, Float(cloudCover))
@@ -1650,7 +1685,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard let sceneTex else { return }
         sceneSize = (w, h)
         aspect = Float(w) / Float(h)
-        var f = makeFrame(size: CGSize(width: w, height: h), shadeHeight: dither ? h : oh)
+        var f = makeFrame(size: CGSize(width: w, height: h), cells: CGSize(width: ow, height: oh), shadeHeight: dither ? h : oh)
         frameIndex = (frameIndex + 1).truncatingRemainder(dividingBy: 4096)
         bakeClouds(into: cb, frame: &f)
         if Renderer.fullCoarse { clipmap.invalidate() }
@@ -1897,6 +1932,13 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.setFragmentTexture(sceneTex, index: 0)
             enc.setFragmentTexture(histIn, index: 1)
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            let px = Int(f.planetPx.x), py = Int(f.planetPx.y)
+            if let sp = taaStarPipeline, px >= -4, py >= -4, px <= ow + 4, py <= oh + 4 {
+                let x0 = max(px - 5, 0), y0 = max(py - 5, 0)
+                enc.setRenderPipelineState(sp)
+                enc.setScissorRect(MTLScissorRect(x: x0, y: y0, width: min(px + 5, ow) - x0, height: min(py + 5, oh) - y0))
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            }
             enc.endEncoding()
         }
         let pp = MTLRenderPassDescriptor()
