@@ -34,8 +34,8 @@ The flight runs at twice its old speed (11-30 voxels/s by height, Jack's call 20
 ## Open questions for Jack
 
 1. **What is missing when you don't use it?** If there are days the saver isn't running, or you turn it off, say why (too hot, too slow on battery, a fault, a scene you tire of). Each answer becomes the next step.
-3. **Evening and morning star (`strata/idea-evening-star`, prototype, not merged).** A steady planet on the sun's path, 0.09 of a day behind it at dusk (sets about when full night arrives) and ahead of it at dawn; a 2x2 core in a faint halo, out from sunset, before the stars, hidden by cloud and terrain. Daytime frames are byte-identical to master; dusk GPU time unchanged within noise. Media in `build/overnight/idea-evening-star/`. Keep both stars every day, or one per day, and merge?
 2. **Unmerged branches.** Should `strata/islands2` (floating islands) and the other unmerged branches above be finished or archived?
+3. **Evening and morning star (`strata/idea-evening-star`, prototype, not merged).** A steady planet on the sun's path, 0.09 of a day behind it at dusk (sets about when full night arrives) and ahead of it at dawn; a 2x2 core in a faint halo, out from sunset, before the stars, hidden by cloud and terrain. Daytime frames are byte-identical to master; dusk GPU time unchanged within noise. Media in `build/overnight/idea-evening-star/`. Keep both stars every day, or one per day, and merge?
 
 ## Bug reports (triaged 2026-10-24)
 
