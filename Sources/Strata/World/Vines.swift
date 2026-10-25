@@ -133,10 +133,3 @@ final class Vines {
         SIMD2(Int32(floor((g.pos.x - Double(window / 2)) / 8)) * 8, Int32(floor((g.pos.y - Double(window / 2)) / 8)) * 8)
     }
 }
-
-// Must match VineBake in Shaders/Saver.metal.
-struct VineBake {
-    var a: SIMD4<Float>
-    var b: SIMD4<Int32>
-    var c: SIMD4<UInt32>
-}
