@@ -7,7 +7,10 @@ A generative macOS screensaver (Swift + one Metal shader). README.md describes b
 ```sh
 make            # builds build/VoxelReverie.app
 ./install.sh    # build, install to ~/Applications and (re)start the login agents
+swift test      # unit tests of StrataCore (the Metal-free logic)
 ```
+
+The Swift sources are three SwiftPM targets: `StrataCore` (no Metal or AppKit), `Strata` (GPU and app) and the `voxelreverie` executable. What `Strata` reads from `StrataCore` is marked `package`.
 
 ## Snapshot check
 

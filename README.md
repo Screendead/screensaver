@@ -54,9 +54,19 @@ Live frame times are measured at `--size 3456x2234 --scale 1`: the scene renders
 
 ## Layout
 
-- `Sources/main.swift`: idle agent, power and lock probes, fullscreen windows, dismissal.
-- `Sources/BugReport.swift`: the B-key bug report: hardware-encoded rolling capture, per-frame state, report files, note window.
-- `Sources/Renderer.swift`: world (2048² column map with max mips, async double-buffered regeneration), day clock, frame setup, TAA, snapshots.
-- `Sources/Camera.swift`: valley- and ridge-following autopilot with a pitch cycle, so the horizon sweeps the whole screen.
+- `Package.swift`: three SwiftPM targets, built by `make` (`swift build -c release`) and tested by `swift test`.
+- `Sources/StrataCore/`: everything without Metal or AppKit, unit-tested in `Tests/StrataCoreTests/`.
+  - `Camera/`: the valley- and ridge-following autopilot, its shot director, placement and terrain sampling.
+  - `Wildlife/`: the flocks (species, spawning, flight, upload), `Sight` (what a frame can show of a bird) and `PopLog`.
+  - `World/`: `Terrain` (the shown map's CPU copy and what stands on it), `FarHeights`, the map's table layouts and decoders, `Provinces`, sites, giants and towers.
+  - `Islands/`: floating islands' records, bounds and shading table. `Sky/`: the day clock and the key light. `Render/`: scene tiles.
+  - `Config/`: command-line `Settings`, the `Knobs` (every VR_* switch), biomes. `Diagnostics/`: the event log. `Math/`: smoothstep.
+- `Sources/Strata/`: the GPU and the app.
+  - `GPU/`: the shader library and pipelines, and the uniform layouts the shader shares (`Frame`, `ShadowBake`, `VineBake`).
+  - `World/`: the 1-voxel map (`World`: async double-buffered regeneration in pieces, landing a finished map), the LOD rings (`Clipmap`), towers and the giants' strands.
+  - `Render/`: `Renderer` (simulation and frame setup) and its passes: bakes, scene, resolve and post, lamps, shadows, clouds, far heights, display.
+  - `Snapshot/`: `--screenshot` runs and their test modes (poses, listings, the VR_FLIGHT soak, VR_PATH replay, PNG).
+  - `App/`: the idle agent, power and lock probes, fullscreen windows, dismissal, prefs and the menu bar item. `BugReport/`: the B-key report. `Server/`: `--serve`.
+- `Sources/voxelreverie/main.swift`: the executable's entry point.
 - `Shaders/Saver.metal`: noise, terrain generation, the quadtree voxel DDA, shading, sky, clouds, fog, water, and the temporal and EDR post passes.
 - `tools/golden.sh`: output regression check; renders a fixed set and compares sha256s with `tests/golden/manifest.sha256` (`tests/fixtures/golden_path.txt` is its recorded-path replay).

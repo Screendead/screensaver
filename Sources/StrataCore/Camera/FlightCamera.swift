@@ -46,9 +46,9 @@ package final class FlightCamera {
     var blockedAhead: Double = 0
     // 0...1, eased: how much a slope close by fills the frame (looked down onto, or rising beside the flight).
     var hug: Double = 0
-    // Ruined towers round the camera (Sources/Towers.swift).
+    // Ruined towers round the camera (Towers).
     package var towersAt: () -> [TowerInfo] = { [] }
-    // Floating islands round the camera (Sources/Islands.swift).
+    // Floating islands round the camera.
     package var islesAt: () -> [IslandInfo] = { [] }
     // Index of the current night, as the lamps read it (beacons and rites burn only on some nights).
     package var nightIndex = 0

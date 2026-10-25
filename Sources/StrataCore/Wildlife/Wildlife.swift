@@ -33,7 +33,7 @@ package final class Wildlife {
     var spawnMs = 0.0
     let noiseSeed: UInt32
     package var heightAt: (Double, Double) -> Double? = { _, _ in nil }
-    // The CPU cell under world (x, z) with its islands (World.column): top, ground islands aside, lowest underside.
+    // The CPU cell under world (x, z) with its islands (Terrain.column): top, ground islands aside, lowest underside.
     package var columnAt: (Double, Double) -> (top: Double, ground: Double, under: Double?)? = { _, _ in nil }
     // Giant trees on the loaded map (world coordinates).
     package var giantsAt: () -> [GiantInfo] = { [] }
