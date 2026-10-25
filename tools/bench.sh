@@ -4,6 +4,8 @@
 #   tools/vrgpu --time -- tools/bench.sh ROUNDS "label=app label=app" [scene filter regex]
 # A label of the form name@prof=app runs that build with VR_PROFILE=prof; PROFILE=... in the environment applies to all.
 # Copy each build's app aside first (e.g. into build/bench/), since make overwrites build/VoxelReverie.app.
+# BATTERY=1 runs every scene on the battery path (--battery). BENCH_SCENES replaces the scene list with its own
+# newline-separated entries in the same name|seed|time|phase|cam form.
 R=$1
 pairs=(${=2})
 F=${3:-.}
@@ -29,6 +31,7 @@ SCENES=(
   "isleHero|303|10|0.12|9822,-2224,480,180,4,1"
   "isleUnder|303|10|0.12|9822,-2700,300,180,18,1"
 )
+[[ -n $BENCH_SCENES ]] && SCENES=("${(@f)BENCH_SCENES}")
 for r in $(seq $R); do
   n=${#labels}
   k=$(( (r - 1) % n ))
@@ -44,6 +47,7 @@ for r in $(seq $R); do
       B=$apps[i]/Contents/MacOS/voxelreverie
       args=(--screenshot $D/bench_out.png --size 3456x2234 --scale 1 --seed $p[2] --times $p[3])
       [[ $p[4] != - ]] && args+=(--phase $p[4])
+      [[ -n $BATTERY ]] && args+=(--battery)
       envs=(VR_BENCH=12)
       [[ -n $prof ]] && envs+=(VR_PROFILE=$prof)
       if [[ $p[5] == SHOW:* ]]; then envs+=(VR_SHOW=${p[5]#SHOW:})
