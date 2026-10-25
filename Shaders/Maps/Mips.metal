@@ -126,6 +126,30 @@ kernel void reduceMax(texture2d<float, access::read> src [[texture(0)]],
     dst.write(float4(m, 0, 0, 0), gid);
 }
 
+// Mip 1 of the 1-voxel map also bounds the level-1 column over it, which the morph band slides toward: the
+// four raw columns combined as coarseHeight combines them.
+kernel void reduceMaxBase(texture2d<float, access::read> src [[texture(0)]],
+                          texture2d<float, access::read> raw [[texture(1)]],
+                          texture2d<float, access::write> dst [[texture(2)]],
+                          constant int4& info [[buffer(0)]],
+                          device const GiantRec* giants [[buffer(1)]],
+                          constant uint& row0 [[buffer(2)]],
+                          uint2 g [[thread_position_in_grid]]) {
+    uint2 gid = g + uint2(0, row0);
+    if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) return;
+    uint2 s = gid * 2;
+    float m = max(max(src.read(s).r, src.read(s + uint2(1, 0)).r), max(src.read(s + uint2(0, 1)).r, src.read(s + uint2(1, 1)).r));
+    float4 r4 = float4(raw.read(s).r, raw.read(s + uint2(1, 0)).r, raw.read(s + uint2(0, 1)).r, raw.read(s + uint2(1, 1)).r);
+    float parent = coarseCombine(r4.x, r4.y, r4.z, r4.w, 2.0);
+    int2 cw = (int2(s) + info.xy) >> 1;
+    // The level-1 column's forest (coarseVeg from the same raw heights) as well.
+    RawGround rg { raw, info.xy, uint(info.w) };
+    parent = max(parent, coarseVeg(cw, 1, r4, parent, uint(info.w), rg).x);
+    // A giant's level-1 column needs nothing more: its samples are these four columns, and its top their tops' mean
+    // (coarseColumn), which m bounds (working it out cost several ms a band).
+    dst.write(float4(max(m, parent), 0, 0, 0), gid);
+}
+
 // (ground, lowest underside) of a column: an island's ground and the underside over it, else its top and none.
 static inline float2 isleGroundUnder(float4 c, uint4 gx) {
     return c.a == 0.0 && c.b > c.g && (gapFlags(gx) & GAP_ISLAND) != 0u ? c.gb : float2(c.r, 4096.0);

@@ -61,6 +61,7 @@ using namespace metal;
 #include "Sky/CloudShadow.metal"
 #include "Atmos/Fog.metal"
 #include "Light/Shadows.metal"
+#include "Light/Roofs.metal"
 #include "Shade/Towers.metal"
 #include "Light/Bio.metal"
 #include "Shade/Shore.metal"

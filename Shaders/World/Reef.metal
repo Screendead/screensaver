@@ -121,3 +121,5 @@ static inline float3 coralGlowCode(uint code, float time) {
 constant float3 REEF_TURF = float3(0.27, 0.27, 0.19);
 // The mean of a reef's colonies and floor, for coarse columns.
 constant float3 REEF_MEAN = float3(0.33, 0.28, 0.21);
+// Reef colours and glow fade out by here: past it the haze and the surface's mirror hide the bed.
+constant float REEF_FAR = 1100.0;
