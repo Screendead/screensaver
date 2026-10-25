@@ -58,5 +58,9 @@ Live frame times are measured at `--size 3456x2234 --scale 1`: the scene renders
 - `Sources/BugReport.swift`: the B-key bug report: hardware-encoded rolling capture, per-frame state, report files, note window.
 - `Sources/Renderer.swift`: world (2048² column map with max mips, async double-buffered regeneration), day clock, frame setup, TAA, snapshots.
 - `Sources/Camera.swift`: valley- and ridge-following autopilot with a pitch cycle, so the horizon sweeps the whole screen.
-- `Shaders/Saver.metal`: noise, terrain generation, the quadtree voxel DDA, shading, sky, clouds, fog, water, and the temporal and EDR post passes.
+- `Shaders/`: one Metal library. `Saver.metal` is its only translation unit and includes the rest in declaration order:
+  `Common` (Frame, constants, function constants), `Noise`, `World` (climate, relief, towers, islands, caves), `Life` (trees,
+  jungle, giants, vines, birds), `Sites` (hamlets, lamps), `Maps` (coarse rings, mips), `Trace` (the quadtree voxel DDA),
+  `Surface`, `Shade`, `Light`, `Sky`, `Atmos` (fog, mist, smoke, sea of cloud), `Water`, and `Passes` (the scene, vine,
+  mote, TAA, post and capture entry points).
 - `tools/golden.sh`: output regression check; renders a fixed set and compares sha256s with `tests/golden/manifest.sha256` (`tests/fixtures/golden_path.txt` is its recorded-path replay).
