@@ -7745,7 +7745,10 @@ static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float tEn
 // Aurora on about one night in four: one pleated curtain 9-24k up toward a poleward bearing fixed per seed, building
 // after the stars are out and gone before dawn. The sheet is a curve in polar form around the camera (range from
 // azimuth), so flight and map recentring never move it and each ray crosses it once; it brightens where it turns
-// edge-on (the path through it lengthens), which draws the folds. Radiance stays near the Milky Way's.
+// edge-on (the path through it lengthens as 1/sin of the angle to the sheet), which draws the folds. The path saturates
+// smoothly at the sheet's thickness: a hard cap drew flat-topped bars. It spans about 55 degrees of azimuth, full over
+// the middle 25, and the fold and ray scales stay several cells wide so a turning camera doesn't make them shimmer in
+// the dither. Radiance stays near the Milky Way's.
 static float3 aurora(thread const Ctx& x, float3 d) {
     uint n = uint(max(int(x.lights.z), 0));
     if (x.L.night <= 0.0 || d.y < 0.02 || hashf(pcg(n * 7919u + x.seed + 900u)) >= 0.25) return 0;
@@ -7755,24 +7758,25 @@ static float3 aurora(thread const Ctx& x, float3 d) {
     float dp = dot(d.xz, P);
     if (env <= 0.0 || dp <= 0.0) return 0;
     float k = dot(d.xz, Q) / dp;
-    float span = smoothstep(1.1, 0.45, abs(k));
+    float span = smoothstep(0.55, 0.22, abs(k));
     if (span <= 0.0) return 0;
     const float D = 70000.0, A = 14000.0, e = 0.01;
     float t = x.time, fn = float(n) * 3.7;
     float2 m0 = float2(k, k + e) * (D / 9000.0) + float2(t * 0.002 + fn);
-    float2 m1 = float2(k, k + e) * (D / 3200.0) - float2(t * 0.005 - fn);
+    float2 m1 = float2(k, k + e) * (D / 4500.0) - float2(t * 0.005 - fn);
     float2 m = A * float2(perlin2(float2(m0.x, 0.5), x.seed + 902u), perlin2(float2(m0.y, 0.5), x.seed + 902u));
     if (x.quality > 0.5)
         m += 0.35 * A * float2(perlin2(float2(m1.x, 0.5), x.seed + 903u), perlin2(float2(m1.y, 0.5), x.seed + 903u));
     float u = D + m.x, du = (m.y - m.x) / e;
-    float fold = min(1.0 + du * du * (1.0 + k * k) / (u * u), 6.0);
+    float g = du * du * (1.0 + k * k) / (u * u);
+    float fold = sqrt(1.0 + g / (1.0 + g / 35.0));
     float y = d.y / length(d.xz) * u * sqrt(1.0 + k * k);
     float hem = 8500.0 + 0.3 * m.x;
     float z = (y - hem) / 15000.0;
     float prof = smoothstep(0.0, 0.05, z) * exp(-4.0 * max(z, 0.0));
-    float rays = 0.6 + 0.4 * saturate(perlin2(float2(k * (D / 700.0), t * 0.03), x.seed + 904u) + 0.5);
+    float rays = 0.6 + 0.4 * saturate(perlin2(float2(k * (D / 2400.0), t * 0.03), x.seed + 904u) + 0.5);
     float3 col = mix(float3(0.2, 1.0, 0.45), float3(0.7, 0.25, 0.9), smoothstep(0.1, 0.7, z));
-    return col * 0.018 * fold * prof * rays * span * env * smoothstep(0.02, 0.06, d.y);
+    return col * 0.029 * fold * prof * rays * span * env * smoothstep(0.02, 0.06, d.y);
 }
 
 static float4 skyWithClouds(thread const Ctx& x, float3 o, float3 d) {
