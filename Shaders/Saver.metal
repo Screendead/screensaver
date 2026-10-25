@@ -7203,8 +7203,6 @@ static float3 bioLight(thread const Ctx& x, thread const Surface& s, int k, int3
 
 static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, int mistSamples = -1);
 
-// shadows: 0 none, 1 traced near ray and maps, 2 maps only (reflections: ripples hide contact shadows).
-// L: the light (the bed under water takes it refracted); inWater: seen in rippled water.
 // MARK: - Wet sand
 
 // The swash on a beach tread just above the sea: x wetness out to the wash's highest reach, y the film of a wash that
@@ -7223,6 +7221,7 @@ static float3 shoreWash(thread const Ctx& x, float3 p, float H, float fp) {
     // The same box gives the shares of ground a step up the beach and of ground no longer beach, so the band fades
     // across tread edges rather than stepping with them.
     float3 sum = 0.0;
+    float ds = R * 2.0;
     for (int j = 0; j < 7; j++) {
         float wz = saturate(min(float(i0.y + j + 1), p.z + R) - max(float(i0.y + j), lo.y));
         float3 row = 0.0;
@@ -7231,6 +7230,7 @@ static float3 shoreWash(thread const Ctx& x, float3 p, float H, float fp) {
             float top = abs(x.tr.hx.read(uint2(cc), 0).r);
             float wx = saturate(min(float(i0.x + i + 1), p.x + R) - max(float(i0.x + i), lo.x));
             row += wx * float3(top < SEA, top > SEA + 0.5, top > SEA + 1.2);
+            if (top < SEA) ds = min(ds, length(max(abs(p.xz - float2(i0 + int2(i, j)) - 0.5) - 0.5, 0.0)));
         }
         sum += row * wz;
     }
@@ -7254,9 +7254,14 @@ static float3 shoreWash(thread const Ctx& x, float3 p, float H, float fp) {
     float e = (m - reach) / fw;
     float brk = smoothstep(-0.05, 0.3, perlin2(ww * 0.6 + float2(0.0, t * 0.06), x.seed + 174u));
     float foam = exp(-e * e) * (0.07 / fw) * mix(0.1, 1.0, brk) * (u < 0.4 ? 1.0 : mix(0.3, 1.0, rise));
-    return float3(wet, film, foam) * fade * (1.0 - dry);
+    // Round an islet or a pool the front's level sets close into rings. Against a straight shore the sea's share of the
+    // box is 1/2 - ds/2R at distance ds; a share well off that marks a shore curling round, and the swash fades there.
+    float open = 1.0 - smoothstep(0.06, 0.16, abs(sum.x - max(0.5 - ds / (2.0 * R), 0.0)));
+    return float3(wet, film * open, foam * open) * fade * (1.0 - dry);
 }
 
+// shadows: 0 none, 1 traced near ray and maps, 2 maps only (reflections: ripples hide contact shadows).
+// L: the light (the bed under water takes it refracted); inWater: seen in rippled water.
 static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3 d, Hit h, int shadows, bool inWater = false) {
     float3 p = o + d * h.t;
     float3 n = float3(h.normal);
@@ -7557,11 +7562,14 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         // Wet sand and the film on it mirror the sky, the film as water does; the foam takes the sand's light.
         float3 rv = reflect(d, float3(0, 1, 0));
         float3 env = mix(L.skyHor, L.skyZen, saturate(rv.y * 2.5));
-        float fr = 0.02 + 0.98 * pow(1.0 - saturate(-d.y), 5.0);
+        // The night sky is graded brighter than the moonlit ground it lights: mirrored at grazing Fresnel the band would
+        // glow above the dry sand, so by night it takes the matte ground's cap and only the moon's glint shows.
+        float fr = min(0.02 + 0.98 * pow(1.0 - saturate(-d.y), 5.0), mix(1.0, 0.06, L.night));
         float gloss = 0.2 * wash.x + 0.8 * wash.y;
         col += (env * fr + L.keyCol * 0.8 * pow(max(dot(rv, L.key), 0.0), 24.0) * fr * sh) * gloss * sv;
         float3 irr = col / max(dot(alb, float3(0.3, 0.59, 0.11)), 0.02);
-        col = mix(col, irr * 0.6, 0.8 * saturate(wash.z));
+        // Foam is pale: under the moon it takes the same knee as the sand's albedo.
+        col = mix(col, irr * 0.6 * (1.0 + 0.1 * kn) / (1.0 + 0.6 * kn), 0.8 * saturate(wash.z));
     }
     // Lamplight is added in absolute terms, outside the moonlight grade, so firelit ground stays warm in a blue night.
     if (x.lights.w > 0.0) {
