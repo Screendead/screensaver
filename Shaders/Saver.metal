@@ -7103,11 +7103,11 @@ static inline float bioPulse(float2 w, float t, uint seed, float warp, bool soft
 }
 
 // Pitch variants for the near-camera glow, chosen with VR_PROFILE: bits16384 is B (the glow on land, vines and bugs
-// 40% lower near the camera, untouched past ~150 voxels), bits32768 is C (B with the slower, softer pulse).
+// 40% lower near the camera, untouched past ~220 voxels), bits32768 is C (B with the slower, softer pulse).
 constant int BIO_PITCH_B = 16384, BIO_PITCH_C = 32768;
 static inline bool bioSoft(int prof) { return (prof & BIO_PITCH_C) != 0; }
 static inline float bioNear(int prof, float dist) {
-    return prof & (BIO_PITCH_B | BIO_PITCH_C) ? mix(0.6, 1.0, smoothstep(30.0, 150.0, dist)) : 1.0;
+    return prof & (BIO_PITCH_B | BIO_PITCH_C) ? mix(0.6, 1.0, smoothstep(60.0, 220.0, dist)) : 1.0;
 }
 
 // Means of the near patterns below, per unit of glow; far off each surface takes its mean, so the land keeps one level
