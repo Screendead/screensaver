@@ -25,8 +25,6 @@ extension World {
     // structures, trees, climate) a band of rows at a time, finishing every band of a pass before the next pass reads its
     // neighbours, then the max mips.
     // Sites are placed once, ahead of the first structure band: they read the cleaned map, and every band stamps them.
-    static var timePieces: Bool { Knobs.current.pieces }
-
     @discardableResult
     func advance(pieces: Int, wait: Bool, timed: Bool = false) -> Double {
         guard var j = job, let buf = buffers[j.index], let scratch, let cb = genQueue.makeCommandBuffer(),
@@ -46,7 +44,7 @@ extension World {
                         encodeGiants(enc, into: buf, origin: j.origin, half: band)
                     } else {
                         let mid = SIMD2<Double>(Double(j.origin.x), Double(j.origin.y)) + Double(MapLayout.size / 2)
-                        var ii = SIMD4<Int32>(Int32(floor(mid.x)), Int32(floor(mid.y)), Islands.field, Int32(bitPattern: seed))
+                        var ii = SIMD4<Int32>(Int32(floor(mid.x)), Int32(floor(mid.y)), Knobs.current.isleField, Int32(bitPattern: seed))
                         enc.setComputePipelineState(islePipeline)
                         enc.setBuffer(buf.isles, offset: 0, index: 0)
                         enc.setBytes(&ii, length: MemoryLayout<SIMD4<Int32>>.stride, index: 1)
@@ -215,8 +213,7 @@ extension World {
 
     // The cave table round the map at `origin`, centred on its middle cell.
     func encodeCaves(_ enc: MTLComputeCommandEncoder, into buf: Buffer, origin: SIMD2<Int32>) {
-        // VR_NOCAVES (tests): an empty table, which must render as master did.
-        if Knobs.current.env["VR_NOCAVES"] != nil { return }
+        if Knobs.current.noCaves { return }
         let mid = SIMD2<Double>(Double(origin.x), Double(origin.y)) + Double(MapLayout.size / 2)
         var ci = SIMD4<Int32>(Int32(floor(mid.x / MapLayout.caveCell)) - Int32(MapLayout.caveWin / 2),
                               Int32(floor(mid.y / MapLayout.caveCell)) - Int32(MapLayout.caveWin / 2), 0, Int32(bitPattern: seed))

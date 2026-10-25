@@ -53,7 +53,7 @@ extension Renderer {
             shotPath = nil
             saveShot(drawable.texture, into: cb, path: path)
         }
-        if Renderer.logTiming {
+        if Knobs.current.timing {
             cb.addCompletedHandler { [weak self] cb in
                 guard let self else { return }
                 self.gpuTimes.append((cb.gpuEndTime - cb.gpuStartTime) * 1000)

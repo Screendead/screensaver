@@ -54,7 +54,7 @@ extension Renderer {
         // regeneration. Each level morphs toward the next over a band, reaching it 1.5 parent columns before the
         // handoff circle.
         let half = Double(MapLayout.size / 2)
-        let edge = half - 8 - max(abs(p.x - half), abs(p.z - half)) - abs(Double(Renderer.lodShift))
+        let edge = half - 8 - max(abs(p.x - half), abs(p.z - half)) - abs(Double(Knobs.current.lodShift))
         let b01 = min(880, edge)
         var lods = [SIMD4<Float>(Float(b01 - 140), Float(b01), Float(b01 - 3), 1)]
         // Levels drawn: those built, out to the edge. Past the battery edge the last level's band eases in with the
@@ -74,7 +74,7 @@ extension Renderer {
         }
         while lods.count < 5 { lods.append(lods.last!) }
         (f.lod0, f.lod1, f.lod2, f.lod3, f.lod4) = (lods[0], lods[1], lods[2], lods[3], lods[4])
-        f.fade = SIMD4(Float(0.7 * rMax), Float(rMax), Float(levels + 1), Renderer.lodShift)
+        f.fade = SIMD4(Float(0.7 * rMax), Float(rMax), Float(levels + 1), Knobs.current.lodShift)
         return f
     }
 }

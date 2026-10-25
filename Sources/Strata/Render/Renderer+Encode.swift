@@ -22,8 +22,8 @@ extension Renderer {
         var f = makeFrame(size: CGSize(width: w, height: h), cells: CGSize(width: ow, height: oh), shadeHeight: dither ? h : oh)
         frameIndex = (frameIndex + 1).truncatingRemainder(dividingBy: 4096)
         bakeClouds(into: cb, frame: &f)
-        if Renderer.fullCoarse { clipmap.invalidate() }
-        clipmap.encode(into: cb, center: camera.xz, drain: world.synchronous && !Renderer.chunkedCoarse,
+        if Knobs.current.fullCoarse { clipmap.invalidate() }
+        clipmap.encode(into: cb, center: camera.xz, drain: world.synchronous && !Knobs.current.chunkedCoarse,
                        active: activeLevels, giants: world.giantBuffer, isles: world.isleBuffer)
         bakeLamps(into: cb, frame: &f)
         fillLampTiles(frame: f, width: w, height: h)
@@ -31,7 +31,7 @@ extension Renderer {
         // The shadow maps and the horizon share no data: one concurrent pass, so their short dispatches overlap.
         let bakes = cb.makeComputeCommandEncoder(dispatchType: .concurrent)
         if let bakes { bakeShadows(into: bakes, frame: &f) }
-        if Renderer.profile != "nohorizon", let enc = bakes { encodeHorizon(into: enc, frame: &f) }
+        if Knobs.current.profile != "nohorizon", let enc = bakes { encodeHorizon(into: enc, frame: &f) }
         bakes?.endEncoding()
         // The giants within the world's edge: their strand maps (baked on arrival) and the frame's table of them.
         vines.update(giants: world.terrain.giants, eye: camera.xz, reach: Double(f.fade.y), origin: world.origin, seed: world.seed, into: cb)
@@ -53,7 +53,7 @@ extension Renderer {
         encodeScene(into: cb, target: sceneTex, frame: &f, birds: birdBuf, width: w, height: h)
         // The giants' hanging strands over the scene (vineFragment): the scene's bindings less the birds and the lamp
         // references, plus the strand maps. VR_PROFILE=bits2048 leaves them out.
-        if vines.tableCount > 0 && !(Renderer.profile.hasPrefix("bits") && (Int(Renderer.profile.dropFirst(4)) ?? 0) & 2048 != 0) {
+        if vines.tableCount > 0 && Knobs.current.profileBits & 2048 == 0 {
             encodeVines(into: cb, target: sceneTex, frame: &f)
         }
         // In its own pass: drawn after the scene in the scene's pass, even a draw doing nothing cost a twilight scene ~0.4 ms.

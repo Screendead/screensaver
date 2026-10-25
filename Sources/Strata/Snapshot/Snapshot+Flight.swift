@@ -8,9 +8,8 @@ extension Snapshot {
     // yaw, the altitude terms (target, climb rate, need (-1: floor clamp), rim lift, regional floor, ahead, planned climb)
     // and the routing (blocked ahead, route offset).
     static func fly(_ r: Renderer, minutes mins: Double, output tex: MTLTexture, path: String) -> Bool {
-        let env = Knobs.current.env
         var wrote = true
-        r.camera.tracing = env["VR_FTRACE"] != nil
+        r.camera.tracing = Knobs.current.flightTrace
         var maxClimb = 0.0, minClear = Double.infinity, maxY = 0.0, lows = 0
         var walled = 0, walledRun = 0, maxWalledRun = 0, fastClimb = 0, prevY = r.camera.position.y
         var lastY = r.camera.position.y
@@ -29,7 +28,7 @@ extension Snapshot {
         for i in 1...Int(mins * 60) {
             for q in 0..<4 {
                 r.simulate(0.25)
-                if env["VR_FTRACE"] != nil {
+                if Knobs.current.flightTrace {
                     let c = r.camera.position
                     print(String(format: "ft %.2f %.1f %.1f %.2f %.2f %.3f", Double(i - 1) + Double(q + 1) * 0.25, c.x, c.z, c.y, r.world.terrain.height(x: c.x, z: c.z) ?? -1, r.camera.yaw)
                           + " " + r.camera.terms.map { String(format: "%.1f", $0) }.joined(separator: " "))

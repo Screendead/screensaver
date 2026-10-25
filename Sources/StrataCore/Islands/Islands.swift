@@ -10,8 +10,6 @@ package enum Islands {
     static let mistPuffs = 6
     static let entryBytes = 80 + mistPuffs * 16
     package static let tableBytes = 16 + tableSize * entryBytes
-    // VR_ISLE_FIELD=1: the test field round (-3500, -2500) in place of island country; 2: no islands (tests).
-    package static var field: Int32 { Int32(Knobs.current.env["VR_ISLE_FIELD"] ?? "") ?? 0 }
 
     static func stretch(_ r: Double, _ h: UInt32) -> Double {
         (r > 40 && (r <= 210 || r >= 420) && Provinces.hashf(Provinces.pcg(h &+ 10)) < 0.33) ? 1.5 : 1.0

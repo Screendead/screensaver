@@ -6,8 +6,6 @@ import simd
 // appears is judged with this step's camera; one that disappears with the previous step's camera and position, the
 // last frame that drew it.
 package final class PopLog {
-    package static var enabled: Bool { Knobs.current.popLog }
-
     private struct Drawn { var pos: SIMD3<Double>; var size: Double; var kind: Wildlife.Kind; var flock: Int }
     private var drawn: [Int: Drawn] = [:]
     private var lastSight: Sight?

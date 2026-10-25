@@ -22,7 +22,7 @@ extension Renderer {
         isleShapeVariant = isles || Islands.inView(Islands.spheres(world.terrain.isles, eye: camera.position, within: edgeRadius + 1000, key: key),
                                                    eye: camera.position, fwd: tb.fwd, half: half, margin: isleShapeVariant ? 0.12 : 0.06)
         let canopyBands = world.terrain.bandsNear(cam2, radius: Clipmap.handoff(0) + 40)
-        let noband = Renderer.profile == "noband"
+        let noband = Knobs.current.profile == "noband"
         f.shadow.w = isles && !noband ? 1 : 0
         let isleTable = Islands.table(world.terrain.isles, near: cam2, within: 3000, view: (camera.position, tb.fwd, half))
         var isleBytes = isleTable.bytes

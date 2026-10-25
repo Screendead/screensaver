@@ -112,15 +112,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     var frameIndex: Float = 0
     var gpuTimes: [Double] = []
     var sceneSize = (width: 0, height: 0)
-    let popLog: PopLog? = PopLog.enabled ? PopLog() : nil
+    let popLog: PopLog? = Knobs.current.popLog ? PopLog() : nil
     var aspect: Float = 16.0 / 10.0
-    static var logTiming: Bool { Knobs.current.timing }
-    static var profile: String { Knobs.current.profile }
-    static var fullCoarse: Bool { Knobs.current.fullCoarse }
-    // VR_CHUNKED: snapshots update the coarse rings a chunk per frame, as live.
-    static var chunkedCoarse: Bool { Knobs.current.chunkedCoarse }
-    // VR_LODSHIFT=v moves the LOD rings' centre v voxels ahead of the camera: frames differing only in it isolate pops.
-    static var lodShift: Float { Knobs.current.lodShift }
     var exposure: Double = 1.5
     // Holds the time of day fixed for snapshots, so exposure and the shot director see the rendered sun.
     var pinnedPhase: Double?
@@ -216,12 +209,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         wildlife.islesAt = { [unowned(unsafe) terrain] in terrain.isles }
         camera.towersAt = { [unowned(unsafe) towers] in towers.list }
         camera.islesAt = { [unowned(unsafe) terrain] in terrain.isles }
-        // VR_START=x,z,yawDeg: the flight starts there (tests).
-        if let v = Knobs.current.env["VR_START"]?.split(separator: ",").compactMap({ Double($0) }), v.count >= 3 {
+        if let v = Knobs.current.start, v.count >= 3 {
             camera.start(at: SIMD2(v[0], v[1]), yaw: v[2] * .pi / 180)
         }
         world.placeGiants(around: camera.xz)
-        if Knobs.current.env["VR_START"] == nil, camera.startNearGiant() {
+        if Knobs.current.start == nil, camera.startNearGiant() {
             world.placeGiants(around: camera.xz)
         }
         let pre = camera.xz
@@ -245,7 +237,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         if let cb = queue.makeCommandBuffer() {
             let t0 = CACurrentMediaTime()
             clipmap.encode(into: cb, center: camera.xz, drain: true, active: activeLevels, giants: world.giantBuffer, isles: world.isleBuffer)
-            if Renderer.logTiming {
+            if Knobs.current.timing {
                 cb.addCompletedHandler { cb in
                     print(String(format: "coarse build %.1f ms (gpu %.1f)", (CACurrentMediaTime() - t0) * 1000, (cb.gpuEndTime - cb.gpuStartTime) * 1000))
                 }
@@ -274,7 +266,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             wildlife.step(dt: step, camera: camera, sight: sight(), sunY: clock.sunDirection.y, phase: clock.phase)
             popLog?.check(wildlife, sight: sight(), time: simTime + dt * timeScale - remaining + step, dt: step,
                           period: PopLog.period(sunY: clock.sunDirection.y, phase: clock.phase))
-            if Renderer.logTiming, let g = world.terrain.height(x: camera.position.x, z: camera.position.z), camera.position.y < g + 2 {
+            if Knobs.current.timing, let g = world.terrain.height(x: camera.position.x, z: camera.position.z), camera.position.y < g + 2 {
                 print(String(format: "camera low: y=%.1f ground=%.1f", camera.position.y, g))
             }
             clock.advance(step)
@@ -305,10 +297,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         let tanV = Renderer.tanV
         // As makeFrame's level-0 ring: its morph band starts 140 inside the handoff, less a cell for the floor's 4x4 grain.
         let p = camera.position - SIMD3(Double(world.origin.x), 0, Double(world.origin.y)), half = Double(MapLayout.size / 2)
-        let edge = half - 8 - max(abs(p.x - half), abs(p.z - half)) - abs(Double(Renderer.lodShift))
+        let edge = half - 8 - max(abs(p.x - half), abs(p.z - half)) - abs(Double(Knobs.current.lodShift))
         return Sight(pos: camera.position, fwd: b.fwd, right: b.right, up: b.up, tanV: tanV, aspect: Double(aspect),
                      pixelAngle: 2 * tanV / Double(max(sceneSize.height, 1)), sunY: clock.sunDirection.y,
-                     worldEdge: Clipmap.handoff(Clipmap.levels), floorReach: min(880, edge) - 140 - 6 - abs(Double(Renderer.lodShift)),
+                     worldEdge: Clipmap.handoff(Clipmap.levels), floorReach: min(880, edge) - 140 - 6 - abs(Double(Knobs.current.lodShift)),
                      terrain: world.terrain)
     }
 

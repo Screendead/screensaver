@@ -141,7 +141,7 @@ extension Wildlife {
             f.hold = kind == .raptor ? hold : (kind == .bat ? 2.5 : fl.speed * pace)
             f.transit = (o.enter + o.leave) / 2
             f.climb = o.v.y
-            if Wildlife.trace {
+            if Knobs.current.birdTrace {
                 print(String(format: "SPAWN t=%.1f %@ %@ r=%.0f in frame %.1f-%.1f s", time, "\(kind)", behindHill ? "behind a hill" : "off frame", r, o.enter, o.leave))
             }
             for i in 0..<n {
@@ -204,7 +204,7 @@ extension Wildlife {
             }
             guard staged else { continue }
             f.transit = gatherTime(f)
-            if Wildlife.trace { print(String(format: "MURMUR t=%.1f r=%.0f streams=%d n=%d gathered in %.0f s", time, r, streams, n, f.transit)) }
+            if Knobs.current.birdTrace { print(String(format: "MURMUR t=%.1f r=%.0f streams=%d n=%d gathered in %.0f s", time, r, streams, n, f.transit)) }
             flocks.append(f)
             return true
         }
@@ -226,7 +226,7 @@ extension Wildlife {
             f.drift = SIMD3(camVel.x, 0, camVel.z) * 0.8
             f.unseen = 0
             f.transit = gatherTime(f)
-            if Wildlife.trace { print(String(format: "REGATHER t=%.1f r=%.0f in %.0f s", time, r, f.transit)) }
+            if Knobs.current.birdTrace { print(String(format: "REGATHER t=%.1f r=%.0f in %.0f s", time, r, f.transit)) }
             return true
         }
         return false

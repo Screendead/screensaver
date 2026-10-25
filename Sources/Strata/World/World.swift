@@ -181,7 +181,7 @@ final class World {
             }
             job = (target, o, 0, CACurrentMediaTime())
             // VR_PIECES: one command buffer per piece, each timed (the regeneration budget is per piece).
-            if World.timePieces {
+            if Knobs.current.pieces {
                 while let j = job {
                     let k = j.next
                     let t = advance(pieces: 1, wait: true, timed: true)

@@ -12,10 +12,10 @@ extension Renderer {
         // VR_PROFILE (tests): "noshadow" drops terrain shadows, "nobake" keeps the maps but skips their rebaking.
         // "bitsN" sets profiling flags directly: 8 reflections unshaded, 16 no sky visibility, 32 no cloud shadow or veil,
         // 64 primary hits unshaded, 4096 no glow on the land, 8192 the land's glow at its far means only.
-        f.shadow.y = Renderer.profile == "nearclouds" ? 1 : Renderer.profile == "lowmax" ? 2 : Renderer.profile == "norefl" ? 4 : Float(Renderer.profile.hasPrefix("bits") ? Int(Renderer.profile.dropFirst(4)) ?? 0 : 0)
-        if Renderer.profile == "noshadow" { f.shadow.x = 3; return }
-        if Renderer.profile == "oldshadow" { f.shadow.x = 0; return }
-        if Renderer.profile == "nobake" && shadowValid { f.shadow.x = 1; return }
+        f.shadow.y = Knobs.current.profile == "nearclouds" ? 1 : Knobs.current.profile == "lowmax" ? 2 : Knobs.current.profile == "norefl" ? 4 : Float(Knobs.current.profileBits)
+        if Knobs.current.profile == "noshadow" { f.shadow.x = 3; return }
+        if Knobs.current.profile == "oldshadow" { f.shadow.x = 0; return }
+        if Knobs.current.profile == "nobake" && shadowValid { f.shadow.x = 1; return }
         guard casts, levels > 0 else { shadowValid = false; f.shadow.x = 0; return }
         let cam = camera.xz
         let jumped = shadowFrom.map { simd_length($0.cam - cam) > 300 || simd_dot($0.key, key) < 0.995 } ?? true

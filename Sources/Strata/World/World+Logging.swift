@@ -3,8 +3,6 @@ import StrataCore
 import simd
 
 extension World {
-    static var logSites: Bool { Knobs.current.sites }
-
     // VR_CAVES=r: the caves within r of the new map's centre, nearest first, and the table's counts.
     func logCaves(near o: SIMD2<Int32>, within r: Float) {
         let mid = SIMD2<Float>(Float(o.x), Float(o.y)) + Float(MapLayout.size / 2)
@@ -20,7 +18,7 @@ extension World {
         for g in terrain.giants { print(String(format: "giant at (%.0f, %.0f) ground %.0f top %.0f kind %d", g.pos.x, g.pos.y, g.ground, g.top, g.kind)) }
         var counts = [Int](repeating: 0, count: 8)
         for site in terrain.sites { counts[site.kind.rawValue] += 1 }
-        if Knobs.current.env["VR_SITES"] == "3" {
+        if Knobs.current.siteParts {
             // Parts as kind (2 house, 10 round) and dwelling style.
             let raw = buf.sites.contents()
             for site in terrain.sites {

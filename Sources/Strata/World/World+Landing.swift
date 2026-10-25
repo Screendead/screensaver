@@ -14,10 +14,10 @@ extension World {
         terrain.giants = MapTables.giants(in: buf.giants.contents())
         terrain.isles = Islands.parse(buf.isles.contents())
         terrain.caves = MapTables.caves(in: buf.giants.contents())
-        if let e = Knobs.current.env["VR_CAVES"] { logCaves(near: o, within: Float(e) ?? 1500) }
+        if let r = Knobs.current.caveList { logCaves(near: o, within: r) }
         terrain.jungleGrid = Terrain.jungleReach(origin: o, seed: seed)
         terrain.jungle = terrain.jungleGrid.contains(true)
-        if World.logSites { logSites(in: buf, origin: o) }
+        if Knobs.current.sites { logSites(in: buf, origin: o) }
         // Frames in flight hold the map they read until they complete.
         if index != active { buffers[active] = nil }
         active = index
@@ -28,6 +28,6 @@ extension World {
         terrain.ground = r.ground
         terrain.under = r.under
         pending = false
-        if Renderer.logTiming { print(String(format: "world regen %.1f ms (%@)", (CACurrentMediaTime() - t0) * 1000, sync ? "sync" : "async")) }
+        if Knobs.current.timing { print(String(format: "world regen %.1f ms (%@)", (CACurrentMediaTime() - t0) * 1000, sync ? "sync" : "async")) }
     }
 }

@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import StrataCore
 import simd
 
 // Coarse LOD rings beyond the 1-voxel map. Level k (1...4) has columns 2^k voxels wide, 2048 to a side, kept
@@ -265,7 +266,7 @@ final class Clipmap {
             }
             lo[j.level] = j.newLo
             completed[j.level] += 1
-            if Renderer.logTiming { print("coarse level \(j.level + 1) window \(j.newLo) (\(j.w)x\(j.h))") }
+            if Knobs.current.timing { print("coarse level \(j.level + 1) window \(j.newLo) (\(j.w)x\(j.h))") }
             job = nil
         }
     }

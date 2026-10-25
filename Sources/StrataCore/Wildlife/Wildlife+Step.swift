@@ -89,9 +89,9 @@ extension Wildlife {
                 let slot = empty[spawnTurn % empty.count]
                 spawnTurn += 1
                 spawnStats["\(roster[slot])", default: (0, 0, 0)].tries += 1
-                let t0 = PopLog.enabled ? ProcessInfo.processInfo.systemUptime : 0
+                let t0 = Knobs.current.popLog ? ProcessInfo.processInfo.systemUptime : 0
                 let made = spawn(kind: roster[slot], slot: slot, cam: cam, camYaw: camYaw, pitch: camPitch)
-                if PopLog.enabled { spawnMs = max(spawnMs, (ProcessInfo.processInfo.systemUptime - t0) * 1000) }
+                if Knobs.current.popLog { spawnMs = max(spawnMs, (ProcessInfo.processInfo.systemUptime - t0) * 1000) }
                 if made {
                     spawnTimer = 1.5
                     spawnStats["\(roster[slot])", default: (0, 0, 0)].made += 1
@@ -100,7 +100,7 @@ extension Wildlife {
             }
         }
         for f in flocks { advance(f, dt: dt, cam: cam) }
-        if Wildlife.trace, floor(time) != floor(time - dt) {
+        if Knobs.current.birdTrace, floor(time) != floor(time - dt) {
             let desc = flocks.map { f -> String in
                 let framed = f.birds.filter { sight.inFrame($0.pos, size: $0.size) }.count
                 let d = simd_length(f.anchor - cam)
@@ -109,5 +109,4 @@ extension Wildlife {
             print(String(format: "TRACE t=%.0f sunY=%.2f ", time, sunY) + desc.joined(separator: " | "))
         }
     }
-    static var trace: Bool { Knobs.current.birdTrace }
 }
