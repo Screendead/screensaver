@@ -8976,17 +8976,54 @@ static float3 aurora(thread const Ctx& x, float3 d) {
     return col * 0.029 * fold * prof * rays * span * env * smoothstep(0.02, 0.06, d.y);
 }
 
-static float4 skyWithClouds(thread const Ctx& x, float3 o, float3 d) {
+// Shooting stars on a dark night: one in each 30 s slot of the clock, everything about it hashed from the slot, so
+// nothing is kept between frames. The clock is wall time and dark sky lasts about 2 minutes of each 12-minute day, so
+// that is 3 to 5 a night, never two within 10 s; tools/meteors.py mirrors the schedule. It is placed on the screen's
+// 864-cell dither grid and starts in the upper part of the frame, where the sky is. Its width is at least a cell and
+// at least a scene sample, so the battery path's coarser scene still draws it unbroken.
+static float3 meteor(constant Frame& f, float night, float3 d, float time, uint seed) {
+    if (night < 0.6) return 0;
+    float k = floor(time / 30.0);
+    uint h = pcg(uint(int(k)) * 2654435761u ^ (seed + 4242u));
+    float dur = mix(0.4, 0.8, hashf(pcg(h + 1u)));
+    float u = (time - k * 30.0 - mix(5.0, 25.0 - dur, hashf(pcg(h + 2u)))) / dur;
+    float z = dot(d, f.camFwd.xyz);
+    if (u <= 0.0 || u >= 1.0 || z <= 0.0) return 0;
+    float cell = 2.0 * f.camPos.w * f.camFwd.w / 864.0;
+    float px = max(1.0, 864.0 / f.resolution.x);
+    float2 p = float2(dot(d, f.camRight.xyz), dot(d, f.camUp.xyz)) / (z * cell);
+    float2 s = float2(mix(-0.65, 0.65, hashf(pcg(h + 3u))) * 432.0, mix(0.5, 0.92, hashf(pcg(h + 4u))) * 432.0 / f.camFwd.w);
+    float a = mix(-2.7, -0.45, hashf(pcg(h + 5u)));
+    float2 dir = float2(cos(a), sin(a));
+    float headAt = mix(60.0, 120.0, hashf(pcg(h + 6u))) * u;
+    float tail = min(headAt, mix(12.0, 22.0, hashf(pcg(h + 7u))) * (0.4 + u));
+    float2 r = p - s;
+    float along = headAt - dot(r, dir), across = abs(dot(r, float2(-dir.y, dir.x))) / px;
+    if (along < -1.0 || along > tail || across > 1.0) return 0;
+    // Bright through its middle; it flares in and burns out.
+    float life = smoothstep(0.0, 0.2, u) * (1.0 - smoothstep(0.55, 1.0, u));
+    float fall = saturate(1.0 - along / max(tail, 1e-3));
+    float w = mix(0.55, 1.0, fall * fall);
+    float body = smoothstep(w, w - 0.3, across) * smoothstep(-1.0, 0.0, along);
+    float3 col = mix(float3(1.0, 0.62, 0.35), float3(0.85, 0.95, 1.1), fall) * (0.1 + 2.6 * fall * fall * fall);
+    return col * body * life * smoothstep(0.6, 1.0, night) * smoothstep(0.0, 0.05, d.y);
+}
+
+// met: a shooting star in front of the stars. Where what it adds through the clouds reaches `seen`, a is negative,
+// which tells the temporal resolve the pixel moves.
+static float4 skyWithClouds(thread const Ctx& x, float3 o, float3 d, float3 met, float seen) {
     float3 raw = skyColor(d, x.L);
     float3 bare = raw;
     // Forward-scatter glow near the horizon, matching what applyFog adds to fogged land.
     bare += x.L.keyCol * min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night) * smoothstep(0.1, 0.0, d.y);
-    float3 discs = skyDiscs(raw, d, x.L, x.seed, x.time) - raw + aurora(x, d);
+    float3 discs = skyDiscs(raw, d, x.L, x.seed, x.time) - raw + aurora(x, d) + met;
     CloudSample c = cloudSheet(x, o, d, x.prof1 ? 7000.0 : 1e9);
     // Clouds hide the stars, moon and sun behind them.
     // At night thin cloud veils the moon instead of hiding it.
-    float3 sky = bare + discs * mix(1.0 - saturate(c.a * 3.0), (1.0 - c.a) * (1.0 - c.a), x.L.night);
-    return float4(mix(sky, c.col, c.a), c.a > 0.5 ? c.t : 6e4);
+    float veil = mix(1.0 - saturate(c.a * 3.0), (1.0 - c.a) * (1.0 - c.a), x.L.night);
+    float3 sky = bare + discs * veil;
+    float depth = c.a > 0.5 ? c.t : 6e4;
+    return float4(mix(sky, c.col, c.a), max(met.r, max(met.g, met.b)) * veil * (1.0 - c.a) >= seen ? -depth : depth);
 }
 
 // Reflected sky: clouds softened (rippled water blurs them), no stars or discs; glitter handles the lights.
@@ -10515,7 +10552,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             return float4(mix(tint[h.level], tint[min(h.level + 1, 4)], w) * (0.15 + l), h.t);
         }
     } else {
-        float4 sky = skyWithClouds(x, o, d);
+        // seen: about half the dither's finest step near black, after exposure.
+        float4 sky = skyWithClouds(x, o, d, meteor(f, x.L.night, d, x.time, x.seed), 0.004 / f.misc.x);
         if (SCENE_MIST && x.isles->n.x > 0 && !(x.prof & 128)) {
             float4 m = isleMist(x, o, d, 1e5);
             sky.rgb = mix(sky.rgb, m.rgb, m.a);
