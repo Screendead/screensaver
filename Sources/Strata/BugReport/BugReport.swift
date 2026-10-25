@@ -128,9 +128,7 @@ enum BugReport {
             captureMs.append((cap.gpuEndTime - cap.gpuStartTime) * 1000)
             if i % 30 == 0 { peak = max(peak, footprintMB()) }
         }
-        var bytes = [UInt8](repeating: 0, count: w * h * 4)
-        tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
-        Snapshot.write(bytes: bytes, width: w, height: h, to: path)
+        _ = Snapshot.save(tex, to: path)
         let base = URL(fileURLWithPath: path).deletingPathExtension().path + "_reports"
         guard let dir = makeDirectory(in: URL(fileURLWithPath: base)) else { print("bugtest: no report dir"); return }
         write(to: dir, renderer: r, recorder: rec, binary: URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.path)
