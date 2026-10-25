@@ -257,7 +257,7 @@ extension FlightCamera {
         ring.sort()
         let rim = max(ring[ring.count * 3 / 4], rimAhead)
         let rough = min(max((ring.last! - ring.first! - 25) / 30, 0), 1)
-        let base = max(ahead, 19.85) + clearance
+        let base = max(ahead, Sight.sea) + clearance
         let lift = rough * max(0, rim + 18 - base)
         rimLift += (lift - rimLift) * min(1, dt * (lift > rimLift ? 0.3 : 0.04))
         // The lift stops well under the cloud slab (among lowland rims at 200), and the flight never targets above the
@@ -279,7 +279,7 @@ extension FlightCamera {
         target = max(target, min(regional, FlightCamera.ceiling))
         // At dawn the sea of cloud's top reaches up to 12 x its amount over the sea (at most 14, SEA_LID in Shaders/Atmos/CloudSea.metal):
         // fly well over it, high enough that it reads as a surface below, rising with the amount so the lift is gentle.
-        target = max(target, 19.85 + 38 * cloudSea)
+        target = max(target, Sight.sea + 38 * cloudSea)
         // Under an island: below its underside all the way through, the keel's deepest ahead included.
         var under = Double.infinity
         for dist in [0.0, 30.0, 60.0, 100.0, 140.0, 180.0, 260.0, 360.0] {

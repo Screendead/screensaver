@@ -47,7 +47,7 @@ enum Snapshot {
         for t in settings.screenshotTimes.sorted() {
             r.simulate(t - simulated)
             if let v = camSpec, v.count >= 5 {
-                let g = (v.count > 5 && v[5] == 1) ? 0 : max(r.world.terrain.height(x: v[0], z: v[1]) ?? 20, 19.85)
+                let g = (v.count > 5 && v[5] == 1) ? 0 : max(r.world.terrain.height(x: v[0], z: v[1]) ?? 20, Sight.sea)
                 r.camera.freeze(position: SIMD3(v[0], g + v[2], v[1]), yaw: v[3] * .pi / 180, pitch: v[4] * .pi / 180,
                                 roll: v.count > 6 ? v[6] * .pi / 180 : 0)
             }

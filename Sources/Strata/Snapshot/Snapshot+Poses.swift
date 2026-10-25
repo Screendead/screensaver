@@ -17,7 +17,7 @@ extension Snapshot {
                 let cam = site.pos + SIMD2(sin(b), cos(b)) * v[1]
                 let g = r.world.terrain.height(x: cam.x, z: cam.y) ?? 20
                 let sg = r.world.terrain.height(x: site.pos.x, z: site.pos.y) ?? 20
-                let y = max(g, 19.85) + v[2]
+                let y = max(g, Sight.sea) + v[2]
                 let yaw = atan2(site.pos.x - cam.x, site.pos.y - cam.y)
                 let pitch = atan2(sg + 2 - y, v[1]) + (pitch ?? 0)
                 r.camera.freeze(position: SIMD3(cam.x, y, cam.y), yaw: yaw, pitch: pitch)
@@ -61,7 +61,7 @@ extension Snapshot {
                 let dir = SIMD2(u.x * cos(b) - u.y * sin(b), u.x * sin(b) + u.y * cos(b))
                 let cam = m - dir * v[0]
                 let g = r.world.terrain.height(x: cam.x, z: cam.y) ?? 20
-                let y = max(max(g, 19.85), Double(c.yF)) + v[1]
+                let y = max(max(g, Sight.sea), Double(c.yF)) + v[1]
                 let yaw = atan2(m.x - cam.x, m.y - cam.y)
                 let pitch = atan2(Double(c.yF) + 0.4 * Double(c.hc) - y, v[0]) + (pitch ?? 0)
                 r.camera.freeze(position: SIMD3(cam.x, y, cam.y), yaw: yaw, pitch: pitch)

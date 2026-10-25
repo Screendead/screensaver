@@ -31,7 +31,7 @@ package struct Sight {
     }
 
     // Must match SEA in Shaders/Common/Constants.metal.
-    static let sea = 19.85
+    package static let sea = 19.85
     // A bird fogged below this transmittance differs from the sky behind it by under half of one of the 8 output
     // levels: applyFog's in-scatter darkening, the cool aerial tint and a bird anywhere from black to twice the sky's
     // radiance, through the post tonemap and sRGB (bisected offline; half a level is reached at T = 0.14).
