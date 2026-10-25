@@ -68,6 +68,7 @@ using namespace metal;
 #include "Light/Bio.metal"
 #include "Shade/Shore.metal"
 #include "Light/IsleSky.metal"
+#include "Shade/Albedo.metal"
 #include "Shade/Shade.metal"
 #include "Atmos/Mist.metal"
 #include "Atmos/CloudSea.metal"

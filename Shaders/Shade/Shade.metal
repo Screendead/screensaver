@@ -129,32 +129,9 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     }
     float3 alb = h.normal.y == 0 ? mix(s.albedo, s.tread, max(wf * (1.0 - keep), lone)) : mix(s.albedo, s.face, wf * sus);
     float deep = L.night * smoothstep(0.32, 0.45, -L.sun.y);
-    // Moonlight drains colour.
-    alb = mix(alb, float3(dot(alb, LUMA)), 0.4 * L.night + 0.1 * deep);
-    // Canopies would otherwise drop to cut-out silhouettes under the moon: lifted toward the luminance of a lifted
-    // green crown, never past it, or fall foliage, already several times brighter, glows like candy.
-    if (s.mat == 1 || s.mat == 2) {
-        float l = dot(alb, LUMA);
-        alb = mix(alb, float3(l), 0.4 * L.night * s.autumn);
-        alb *= 1.0 + L.night * (clamp(0.17 / max(l, 1e-3), 1.0, 2.4) - 1.0);
-    }
-    // Pale sand, salt and snow would glow under the moon brighter than the sky above them. A knee on albedo
-    // above mid-tone, not a cut keyed to the material, so tones keep their order: a stone riser never outshines
-    // its sand tread.
-    float kn = 4.5 * L.night;
-    alb *= (1.0 + 0.1 * kn) / (1.0 + kn * dot(alb, LUMA));
-    // Low light: leaves this dark under a warm key and a violet dome go to brown mud. Light passed and scattered through
-    // a crown takes the leaf's own hue, so the lift saturates as it brightens (autumn crowns are bright already).
-    float dusk = s.mat == 1 ? L.gold * (1.0 - L.night) * mix(0.5, 1.0, L.sunAmt) : 0.0;
-    // A sun on the horizon, dim and amber, lights leaves unlifted and warmed toward bronze: lifted toward green first, it
-    // turns them mustard. A golden-hour sun, and the afterglow, a broad patch of sky, light them lifted like the dome.
-    float3 albK = alb;
-    if (dusk > 0.0) {
-        float la = max(dot(alb, LUMA), 1e-4);
-        alb *= mix(float3(1.0), clamp(1.5 * sqrt(alb / la), 0.7, 2.0), dusk * (1.0 - 0.6 * s.autumn));
-        albK = mix(albK, la * float3(1.5, 0.95, 0.55), 0.5 * dusk * (1.0 - 0.6 * s.autumn)) * (1.0 + 0.3 * dusk);
-        albK = mix(alb, albK, smoothstep(-0.04, 0.0, L.sun.y) * (1.0 - L.sunAmt));
-    }
+    float dusk = s.mat == 1 ? leafDusk(L) : 0.0;
+    float3 albK;
+    alb = gradeAlbedo(L, alb, deep, s.mat == 1 || s.mat == 2, s.autumn, dusk, albK);
     float ndl = mix(max(dot(nl, L.key), 0.0), max(L.key.y, 0.0), lone);
     // A low moon lights a step's riser several times brighter than its tread, drawing a highlight line along
     // every step; under the moon only cliffs outshine the ground they stand in. A canopy's steps are steps too: no
@@ -320,6 +297,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         col += (env * fr + L.keyCol * 0.8 * pow(max(dot(rv, L.key), 0.0), 24.0) * fr * sh) * gloss * sv;
         float3 irr = col / max(dot(alb, LUMA), 0.02);
         // Foam is pale: under the moon it takes the same knee as the sand's albedo.
+        float kn = 4.5 * L.night;
         col = mix(col, irr * 0.6 * (1.0 + 0.1 * kn) / (1.0 + 0.6 * kn), 0.8 * saturate(wash.z));
     }
     // Lamplight is added in absolute terms, outside the moonlight grade, so firelit ground stays warm in a blue night.

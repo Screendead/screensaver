@@ -166,19 +166,9 @@ static float3 shadeVine(thread const Ctx& x, thread const Light& L, float3 o, fl
     float fp = t * x.pixelAngle;
     float3 alb = float3(0.036, 0.050, 0.028) * (0.85 + 0.3 * draw);
     float deep = L.night * smoothstep(0.32, 0.45, -L.sun.y);
-    alb = mix(alb, float3(dot(alb, LUMA)), 0.4 * L.night + 0.1 * deep);
-    float l = dot(alb, LUMA);
-    alb *= 1.0 + L.night * (clamp(0.17 / max(l, 1e-3), 1.0, 2.4) - 1.0);
-    float kn = 4.5 * L.night;
-    alb *= (1.0 + 0.1 * kn) / (1.0 + kn * dot(alb, LUMA));
-    float dusk = L.gold * (1.0 - L.night) * mix(0.5, 1.0, L.sunAmt);
-    float3 albK = alb;
-    if (dusk > 0.0) {
-        float la = max(dot(alb, LUMA), 1e-4);
-        alb *= mix(float3(1.0), clamp(1.5 * sqrt(alb / la), 0.7, 2.0), dusk);
-        albK = mix(albK, la * float3(1.5, 0.95, 0.55), 0.5 * dusk) * (1.0 + 0.3 * dusk);
-        albK = mix(alb, albK, smoothstep(-0.04, 0.0, L.sun.y) * (1.0 - L.sunAmt));
-    }
+    float dusk = leafDusk(L);
+    float3 albK;
+    alb = gradeAlbedo(L, alb, deep, true, 0.0, dusk, albK);
     // As a column's strand shaded (shade): with the footprint its faces turn up to the sky (the risers' prefilter, from
     // a strand's level neighbours) and its shadow lifts to the floor the far stairs keep; the cover is all footprint.
     float wf = cover ? 1.0 : smoothstep(0.025, 0.20, fp);
