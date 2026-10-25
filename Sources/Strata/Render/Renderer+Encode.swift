@@ -69,7 +69,7 @@ extension Renderer {
         birdIndex = (birdIndex + 1) % birdBuffers.count
         // Caves are carved out to level 3's handoff: shading looks them up only while one lies within it.
         let camXZ = SIMD2<Float>(Float(camera.position.x), Float(camera.position.z))
-        let caveR = Float(Clipmap.handoff(3)) + Float(World.caveReach)
+        let caveR = Float(Clipmap.handoff(3)) + Float(MapLayout.caveReach)
         f.birds.w = world.caves.contains { simd_length_squared($0.m - camXZ) < caveR * caveR } ? 1 : 0
         f.birds.x = Float(wildlife.upload(into: birdBuf, origin: SIMD3(Double(world.origin.x), 0, Double(world.origin.y))))
         let b = camera.basis

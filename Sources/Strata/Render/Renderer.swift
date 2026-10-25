@@ -156,8 +156,8 @@ final class Renderer: NSObject, MTKViewDelegate {
               let pvP = gpu.pipeline("bakeProvinces"),
               let lampP = gpu.pipeline("updateLamps"),
               let lightP = gpu.pipeline("bakeLights"),
-              let lpos = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.maxLamps * 16, options: .storageModePrivate),
-              let lstate = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.maxLamps * 16, options: .storageModePrivate),
+              let lpos = device.makeBuffer(length: MapLayout.siteGrid * MapLayout.siteGrid * MapLayout.maxLamps * 16, options: .storageModePrivate),
+              let lstate = device.makeBuffer(length: MapLayout.siteGrid * MapLayout.siteGrid * MapLayout.maxLamps * 16, options: .storageModePrivate),
               let world = World(gpu: gpu, seed: seed),
               let clipmap = Clipmap(gpu: gpu, seed: seed),
               let towers = Towers(gpu: gpu, seed: seed),
@@ -235,8 +235,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         // The lift reads the map centred on `pre` where it reaches round `post`, else the far heights: that map is built only
         // if it reaches.
         let o = World.mapOrigin(pre), r = FlightCamera.liftRadius
-        if post == pre || (post.x + r >= Double(o.x) && post.x - r < Double(o.x) + Double(World.size)
-                           && post.y + r >= Double(o.y) && post.y - r < Double(o.y) + Double(World.size)) {
+        if post == pre || (post.x + r >= Double(o.x) && post.x - r < Double(o.x) + Double(MapLayout.size)
+                           && post.y + r >= Double(o.y) && post.y - r < Double(o.y) + Double(MapLayout.size)) {
             world.ensureCentered(on: pre)
         }
         camera.liftOverGround()
@@ -306,7 +306,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         let b = camera.basis
         let tanV = tan(25.0 * .pi / 180)
         // As makeFrame's level-0 ring: its morph band starts 140 inside the handoff, less a cell for the floor's 4x4 grain.
-        let p = camera.position - SIMD3(Double(world.origin.x), 0, Double(world.origin.y)), half = Double(World.size / 2)
+        let p = camera.position - SIMD3(Double(world.origin.x), 0, Double(world.origin.y)), half = Double(MapLayout.size / 2)
         let edge = half - 8 - max(abs(p.x - half), abs(p.z - half)) - abs(Double(Renderer.lodShift))
         return Sight(pos: camera.position, fwd: b.fwd, right: b.right, up: b.up, tanV: tanV, aspect: Double(aspect),
                      pixelAngle: 2 * tanV / Double(max(sceneSize.height, 1)), sunY: clock.sunDirection.y,

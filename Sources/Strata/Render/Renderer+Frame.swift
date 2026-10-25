@@ -27,7 +27,7 @@ extension Renderer {
             f.planetPx.y = Float(cy)
         }
         f.resolution = SIMD4(Float(size.width), Float(size.height), Float(1 / Double(shadeHeight)), Float(1 / size.height))
-        f.mapInfo = SIMD4(world.origin.x, world.origin.y, Int32(World.size), Int32(bitPattern: world.seed))
+        f.mapInfo = SIMD4(world.origin.x, world.origin.y, Int32(MapLayout.size), Int32(bitPattern: world.seed))
         f.misc = SIMD4(Float(exposure), world.globalMax, 0.6, Float(cloudCover))
         f.misc2 = SIMD4(frameIndex, 1, debugMode, headroom)
         let sunY = clock.sunDirection.y
@@ -52,7 +52,7 @@ extension Renderer {
         // - ~21 (drift while a regeneration is in flight: 41 pieces at 30 fps) it covers; nearer its edge only if the camera outran
         // regeneration. Each level morphs toward the next over a band, reaching it 1.5 parent columns before the
         // handoff circle.
-        let half = Double(World.size / 2)
+        let half = Double(MapLayout.size / 2)
         let edge = half - 8 - max(abs(p.x - half), abs(p.z - half)) - abs(Double(Renderer.lodShift))
         let b01 = min(880, edge)
         var lods = [SIMD4<Float>(Float(b01 - 140), Float(b01), Float(b01 - 3), 1)]

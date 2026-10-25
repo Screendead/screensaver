@@ -86,7 +86,7 @@ extension FlightCamera {
             return (word >> 22) ^ word
         }
         func burns(_ l: SiteInfo.Lamp, _ chance: Double) -> Bool {
-            let h = pcg(site.id &+ UInt32(l.index % World.maxLamps) &* 7717)
+            let h = pcg(site.id &+ UInt32(l.index % MapLayout.maxLamps) &* 7717)
             let nightH = pcg(UInt32(bitPattern: Int32(truncatingIfNeeded: nightIndex)) &* 1597334677 ^ pcg(7 &* 3812015801 ^ h))
             return Double(nightH & 0xffffff) / 16777215.0 <= chance
         }

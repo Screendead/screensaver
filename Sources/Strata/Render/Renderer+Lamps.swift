@@ -76,7 +76,7 @@ extension Renderer {
 
     func bakeLamps(into cb: MTLCommandBuffer, frame f: inout Frame) {
         guard let enc = cb.makeComputeCommandEncoder() else { return }
-        let n = World.siteGrid * World.siteGrid * World.maxLamps
+        let n = MapLayout.siteGrid * MapLayout.siteGrid * MapLayout.maxLamps
         enc.setComputePipelineState(lampPipeline)
         enc.setBuffer(world.siteBuffer, offset: 0, index: 0)
         enc.setBuffer(lampPos, offset: 0, index: 1)
