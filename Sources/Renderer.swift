@@ -101,6 +101,19 @@ final class GPU {
         return fullscreen(try? library.makeFunction(name: "sceneFragment", constantValues: fc), .rgba16Float)
     }
 
+    // The giants' hanging strands, drawn over the scene (vineFragment): the towers and the band test compiled out.
+    func vine() -> MTLRenderPipelineState? {
+        pipeline("vine") { vineDescriptor() }
+    }
+
+    private func vineDescriptor() -> MTLRenderPipelineDescriptor {
+        let fc = MTLFunctionConstantValues()
+        var no = false
+        fc.setConstantValue(&no, type: .bool, index: 0)
+        fc.setConstantValue(&no, type: .bool, index: 1)
+        return fullscreen(try? library.makeFunction(name: "vineFragment", constantValues: fc), .rgba16Float)
+    }
+
     func taa() -> MTLRenderPipelineState? {
         pipeline("taa") { fullscreen(library.makeFunction(name: "taaFragment"), .rgba16Float) }
     }
@@ -140,6 +153,7 @@ final class GPU {
         for t in [false, true] {
             for v in GPU.sceneVariants { descriptors[GPU.sceneKey(t, v)] = sceneDescriptor(t, v) }
         }
+        descriptors["vine"] = vineDescriptor()
         for f in functions where f.functionType == .kernel {
             group.enter()
             device.makeComputePipelineState(function: f) { p, _ in
@@ -212,6 +226,19 @@ struct GiantRec {
     var kind: UInt32 = 0
 }
 
+// One cave-table entry (Shaders/Saver.metal CaveRec), kept after the giant table in its buffer.
+struct CaveRec {
+    var cell = SIMD2<Int32>()
+    var m = SIMD2<Float>()
+    var u = SIMD2<Float>()
+    var yF: Float = 0
+    var w: Float = 0
+    var l: Float = 0
+    var hc: Float = 0
+    var h: UInt32 = 0
+    var flags: UInt32 = 0
+}
+
 // A giant tree as the camera and the birds see it, in world coordinates: a cylinder of `reach` round its axis, its crown
 // top at `top`.
 struct GiantInfo {
@@ -221,11 +248,14 @@ struct GiantInfo {
     var top: Double
     // 0 banyan, 1 kapok, 2 weeping (placeGiants).
     var kind = 0
+    // The record's trunk height and hash (Vines bakes its strands from them).
+    var yT = 0.0
+    var h: UInt32 = 0
 }
 
 // A structure site as the camera and the smoke and halo lists see it, in world coordinates.
 struct SiteInfo {
-    enum Kind: Int { case none = 0, henge, cairn, ruins, hamlet, jetty, camp }
+    enum Kind: Int { case none = 0, henge, cairn, ruins, hamlet, jetty, camp, cave }
     // smoke: where its plume starts (rise > 0 only): a window lamp stands at its door, its chimney a few columns off.
     struct Lamp { var pos: SIMD3<Double>; var kind: Int; var rise: Double; var index: Int; var smoke: SIMD3<Double> }
     var index: Int
@@ -249,6 +279,9 @@ final class World {
     static let bandRows = 256
     // Must match GIANT_WIN and GIANT_CELL in Shaders/Saver.metal.
     static let giantWin = 24, giantCell = 1536.0
+    // Must match CAVE_WIN and CAVE_CELL in Shaders/Saver.metal; the cave table follows the giant table in its buffer.
+    static let caveWin = 96, caveCell = 256.0, caveReach = 64.0
+    static let caveOffset = giantWin * giantWin * MemoryLayout<GiantRec>.stride
 
     // One generated map: the column texture, the max-mip chain of its tops (r16Float: the DDA's skips fetch 2 bytes,
     // not the column's 8), and the CPU copy the camera steers by.
@@ -280,6 +313,8 @@ final class World {
         var lamps: [Int: SiteInfo.Lamp] = [:]
         var giantList: [GiantInfo] = []
         var isleList: [IslandInfo] = []
+        // The caves of the cave table (placeCaves), world xz of each mouth.
+        var caveList: [CaveRec] = []
         // Whether the jungle's roof (Shaders/Saver.metal jungleCanopy) may stand on this map.
         var jungle = false
         // The jungle's extent on this map: whether the province reaches each point of a 64-voxel grid over it.
@@ -306,7 +341,7 @@ final class World {
             bd.usage = [.shaderRead, .shaderWrite, .pixelFormatView]
             bd.storageMode = .private
             guard let bt = device.makeTexture(descriptor: bd),
-                  let gb = device.makeBuffer(length: World.giantWin * World.giantWin * MemoryLayout<GiantRec>.stride, options: .storageModeShared),
+                  let gb = device.makeBuffer(length: World.caveOffset + World.caveWin * World.caveWin * MemoryLayout<CaveRec>.stride, options: .storageModeShared),
                   let ib = device.makeBuffer(length: Islands.slots * Islands.recordSize, options: .storageModeShared) else { return nil }
             // No slot holds a cell yet (placeGiants and placeIslands fill a slot only when its cell changes).
             let none = GiantRec(cell: SIMD2(Int32.min, Int32.min))
@@ -314,6 +349,8 @@ final class World {
             for i in 0..<(World.giantWin * World.giantWin) { slots[i] = none }
             let islots = ib.contents().bindMemory(to: IsleRec.self, capacity: Islands.slots)
             for i in 0..<Islands.slots { islots[i] = IsleRec() }
+            let caveSlots = (gb.contents() + World.caveOffset).bindMemory(to: CaveRec.self, capacity: World.caveWin * World.caveWin)
+            for i in 0..<(World.caveWin * World.caveWin) { caveSlots[i] = CaveRec(cell: SIMD2(Int32.min, Int32.min)) }
             giants = gb
             isles = ib
             band = bt
@@ -350,6 +387,7 @@ final class World {
     private let sitePipeline: MTLComputePipelineState
     private let stampPipeline: MTLComputePipelineState
     private let giantPipeline: MTLComputePipelineState
+    private let cavePipeline: MTLComputePipelineState
     private let bandTopPipeline: MTLComputePipelineState
     private let bandReducePipeline: MTLComputePipelineState
     private let bandFlagPipeline: MTLComputePipelineState
@@ -387,6 +425,7 @@ final class World {
     var bandTex: MTLTexture { shown.band }
     var giantBuffer: MTLBuffer { shown.giants }
     var isleBuffer: MTLBuffer { shown.isles }
+    var caves: [CaveRec] { shown.caveList }
     var sites: [SiteInfo] { shown.siteList }
     var lamps: [Int: SiteInfo.Lamp] { shown.lamps }
     var giants: [GiantInfo] { shown.giantList }
@@ -416,7 +455,7 @@ final class World {
         guard let gen = pipeline("generateHeight"), let red = pipeline("reduceMax"), let redBase = pipeline("reduceMaxBase"), let redCpu = pipeline("reduceCpu"), let cpt = pipeline("copyTop"),
               let clean = pipeline("cleanupColumns"),
               let plant = pipeline("plantTrees"), let clim = pipeline("bakeClimate"), let place = pipeline("placeSites"), let stamp = pipeline("stampStructures"),
-              let bTop = pipeline("bandTop"), let bRed = pipeline("bandReduce"), let bFlag = pipeline("bandFlag"), let pg = pipeline("placeGiants"),
+              let bTop = pipeline("bandTop"), let bRed = pipeline("bandReduce"), let bFlag = pipeline("bandFlag"), let pg = pipeline("placeGiants"), let pc = pipeline("placeCaves"),
               let pi = pipeline("placeIslands"), let ri = pipeline("resolveIslands"),
               let q = device.makeCommandQueue(), let a = Buffer(device: device) else { return nil }
         var mips: [MTLTexture] = []
@@ -442,6 +481,7 @@ final class World {
         sitePipeline = place
         stampPipeline = stamp
         giantPipeline = pg
+        cavePipeline = pc
         bandTopPipeline = bTop
         bandReducePipeline = bRed
         bandFlagPipeline = bFlag
@@ -553,10 +593,13 @@ final class World {
                     n -= 1
                     continue
                 case 1:
+                    // The cave table first: the heights carve its caves.
+                    if band == 0 { encodeCaves(enc, into: buf, origin: j.origin) }
                     enc.setComputePipelineState(genPipeline)
                     enc.setTexture(scratch, index: 0)
                     enc.setTexture(buf.rawGaps, index: 1)
                     enc.setBuffer(buf.isles, offset: 0, index: 2)
+                    enc.setBuffer(buf.giants, offset: World.caveOffset, index: 3)
                 case 2:
                     enc.setComputePipelineState(cleanupPipeline)
                     enc.setTexture(scratch, index: 0)
@@ -684,6 +727,16 @@ final class World {
             buf.lamps = Dictionary(buf.siteList.flatMap { $0.lamps.map { ($0.index, $0) } }, uniquingKeysWith: { $1 })
             buf.giantList = World.readGiants(buf.giants)
             buf.isleList = Islands.parse(buf.isles)
+            buf.caveList = World.readCaves(buf.giants)
+            if let e = Knobs.current.env["VR_CAVES"] {
+                let mid = SIMD2<Float>(Float(o.x), Float(o.y)) + Float(World.size / 2)
+                let r = Float(e) ?? 1500
+                for c in buf.caveList.filter({ simd_length($0.m - mid) < r }).sorted(by: { simd_length($0.m - mid) < simd_length($1.m - mid) }) {
+                    print(String(format: "cave at (%.0f, %.0f) floor %.0f in (%.2f, %.2f) W %.1f L %.0f H %.0f%@%@%@", c.m.x, c.m.y, c.yF, c.u.x, c.u.y, c.w, c.l, c.hc,
+                                 c.flags & 2 != 0 ? " home" : "", c.flags & 4 != 0 ? " grotto" : "", c.flags & 8 != 0 ? " lowland" : ""))
+                }
+                print("caves in table: \(buf.caveList.count) (lowland \(buf.caveList.filter { $0.flags & 8 != 0 }.count)), within \(Int(r)): \(buf.caveList.filter { simd_length($0.m - mid) < r }.count)")
+            }
             buf.jungleGrid = stride(from: 0, through: World.size, by: 64).flatMap { z in
                 stride(from: 0, through: World.size, by: 64).map { x in
                     Provinces.at(Double(Int(o.x) + x), Double(Int(o.y) + z), seed: self.seed).0 > 0.1
@@ -694,7 +747,7 @@ final class World {
                 for g in buf.giantList { print(String(format: "giant at (%.0f, %.0f) ground %.0f top %.0f kind %d", g.pos.x, g.pos.y, g.ground, g.top, g.kind)) }
             }
             if World.logSites {
-                var counts = [Int](repeating: 0, count: 7)
+                var counts = [Int](repeating: 0, count: 8)
                 for site in buf.siteList { counts[site.kind.rawValue] += 1 }
                 if Knobs.current.env["VR_SITES"] == "3" {
                     // Parts as kind (2 house, 10 round) and dwelling style.
@@ -711,7 +764,7 @@ final class World {
                         print("  site \(site.kind) \(Int(site.pos.x)),\(Int(site.pos.y)) r\(Int(site.radius)) lamps \(site.lamps.count)\(desc)")
                     }
                 }
-                print("sites at (\(o.x),\(o.y)): henge \(counts[1]) cairn \(counts[2]) ruins \(counts[3]) hamlet \(counts[4]) jetty \(counts[5]) camp \(counts[6]) total \(buf.siteList.count)")
+                print("sites at (\(o.x),\(o.y)): henge \(counts[1]) cairn \(counts[2]) ruins \(counts[3]) hamlet \(counts[4]) jetty \(counts[5]) camp \(counts[6]) cave \(counts[7]) total \(buf.siteList.count)")
             }
             // Frames in flight hold the map they read until they complete.
             if index != self.active { self.buffers[self.active] = nil }
@@ -753,12 +806,28 @@ final class World {
                             threadsPerThreadgroup: MTLSize(width: 8, height: 4, depth: 1))
     }
 
+    // The cave table round the map at `origin`, centred on its middle cell.
+    private func encodeCaves(_ enc: MTLComputeCommandEncoder, into buf: Buffer, origin: SIMD2<Int32>) {
+        // VR_NOCAVES (tests): an empty table, which must render as master did.
+        if Knobs.current.env["VR_NOCAVES"] != nil { return }
+        let mid = SIMD2<Double>(Double(origin.x), Double(origin.y)) + Double(World.size / 2)
+        var ci = SIMD4<Int32>(Int32(floor(mid.x / World.caveCell)) - Int32(World.caveWin / 2),
+                              Int32(floor(mid.y / World.caveCell)) - Int32(World.caveWin / 2), 0, Int32(bitPattern: seed))
+        enc.setComputePipelineState(cavePipeline)
+        enc.setBuffer(buf.giants, offset: World.caveOffset, index: 0)
+        enc.setBytes(&ci, length: MemoryLayout<SIMD4<Int32>>.stride, index: 1)
+        enc.dispatchThreads(MTLSize(width: World.caveWin, height: World.caveWin, depth: 1),
+                            threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+    }
+
     // Before the first map: the giant table (and `giants`) the map centred on `center` would have, so the start can be
     // chosen by it without building a map there. placeGiants depends on the cells alone; the map keeps the slots it fills.
     func placeGiants(around center: SIMD2<Double>) {
         guard shown.origin.x == Int32.min, let cb = genQueue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() else { return }
         let buf = shown
         for half in 0..<2 { encodeGiants(enc, into: buf, origin: World.mapOrigin(center), half: half) }
+        // The coarse rings may be built from this table before the first map: they carve its caves.
+        encodeCaves(enc, into: buf, origin: World.mapOrigin(center))
         enc.endEncoding()
         cb.commit()
         cb.waitUntilCompleted()
@@ -794,13 +863,18 @@ final class World {
         return list
     }
 
+    private static func readCaves(_ buf: MTLBuffer) -> [CaveRec] {
+        let p = (buf.contents() + World.caveOffset).bindMemory(to: CaveRec.self, capacity: World.caveWin * World.caveWin)
+        return (0..<(World.caveWin * World.caveWin)).compactMap { p[$0].flags & 1 != 0 ? p[$0] : nil }
+    }
+
     private static func readGiants(_ buf: MTLBuffer) -> [GiantInfo] {
         let p = buf.contents().bindMemory(to: GiantRec.self, capacity: World.giantWin * World.giantWin)
         return (0..<(World.giantWin * World.giantWin)).compactMap { i in
             let r = p[i]
             // The crown's top: giantPad's dome in Shaders/Saver.metal rises about yT + 36 + 0.55 * 56 + 9.5, the high limbs'
             // clumps to about yT + 84.
-            return r.g > 0 ? GiantInfo(pos: SIMD2(Double(r.c.x), Double(r.c.y)), ground: Double(r.g), top: Double(r.g + r.yT) + 85, kind: Int(r.kind)) : nil
+            return r.g > 0 ? GiantInfo(pos: SIMD2(Double(r.c.x), Double(r.c.y)), ground: Double(r.g), top: Double(r.g + r.yT) + 85, kind: Int(r.kind), yT: Double(r.yT), h: r.h) : nil
         }
     }
 
@@ -1139,6 +1213,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     // or close by an island), and the islands' constants (GPU.SceneVariant). Each costs every pixel a little even unused,
     // so each tile of the scene pass takes the variant its pixels need.
     let scenePipelines: [[MTLRenderPipelineState]]
+    // The giants' hanging strands, a pass over the scene while a giant stands within the world's edge (vineFragment).
+    private let vinePipeline: MTLRenderPipelineState
     let postPipeline: MTLRenderPipelineState
     let taaPipeline: MTLRenderPipelineState
     // The glowing bugs (bioFragment), drawn over the scene in a pass of their own from sunset.
@@ -1198,7 +1274,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     // Sun height the glowing bugs start from (BIO_SUN in Shaders/Saver.metal).
     static let bioSun: Float = 0.07
     // Bug sprites: one per cube of the MOTE_N^3 block round the camera (bioVertex in Shaders/Saver.metal).
-    static let moteCount = 18 * 18 * 18
+    static let moteCount = 23 * 23 * 23
     // Islands farther than this need no band test (past it the coarsest rings' columns are wide enough to walk under
     // them), shade without their sky occlusion and cast no island shade (only a long dusk shadow reaches back).
     static let isleShadeReach = 4000.0
@@ -1213,6 +1289,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     let world: World
     let clipmap: Clipmap
     let towers: Towers
+    // The giants' hanging strands: their slots of baked maps and the frame's table.
+    let vines: Vines
     let camera: FlightCamera
     let wildlife: Wildlife
     // Ring of bird buffers, one per frame in flight; the semaphore keeps the CPU from overwriting one the GPU reads.
@@ -1250,6 +1328,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     // The screen's size in pixels: the dither grid follows it, while the drawable holds just one pixel per cell.
     private(set) var screenPixels = CGSize.zero
     var recorder: BugRecorder?
+    // Set by the S key: the next frame is saved here as a PNG at screen size.
+    var shotPath: String?
 
     // Cover drifts between clear and broken skies over tens of minutes.
     var cloudCover: Double {
@@ -1263,6 +1343,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             GPU.sceneVariants.compactMap { gpu.scene(towers: t, $0) }
         }
         guard sceneStates.allSatisfy({ $0.count == GPU.sceneVariants.count }),
+              let vp = gpu.vine(),
               let tp = gpu.taa(),
               let bp = gpu.bio(),
               let pp = gpu.post(outputFormat, dither: dither),
@@ -1278,7 +1359,8 @@ final class Renderer: NSObject, MTKViewDelegate {
               let lstate = device.makeBuffer(length: World.siteGrid * World.siteGrid * World.maxLamps * 16, options: .storageModePrivate),
               let world = World(gpu: gpu, seed: seed),
               let clipmap = Clipmap(gpu: gpu, seed: seed),
-              let towers = Towers(gpu: gpu, seed: seed) else { return nil }
+              let towers = Towers(gpu: gpu, seed: seed),
+              let vines = Vines(gpu: gpu) else { return nil }
         self.device = device
         self.queue = queue
         scenePipelines = sceneStates
@@ -1315,6 +1397,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         self.world = world
         self.clipmap = clipmap
         self.towers = towers
+        self.vines = vines
+        vinePipeline = vp
         // Spec offset displays by 90 s of the same flight; steering reads GPU heights, so displays
         // instead start at different places in the same world.
         camera = FlightCamera(seed: seed &+ UInt32(screenIndex) &* 7919, world: world, far: far)
@@ -1408,7 +1492,9 @@ final class Renderer: NSObject, MTKViewDelegate {
     // Advances the simulation; large steps are subdivided so steering stays stable.
     func simulate(_ dt: Double) {
         var remaining = dt * timeScale
-        while remaining > 0 {
+        // Snapshots simulate long stretches outside any run loop: without a pool per step, the autoreleased command
+        // buffers of each map rebuild, and the world buffers they retain, pile up (1 GB per simulated half hour).
+        while remaining > 0 { autoreleasepool {
             let step = min(remaining, 1.0 / 30.0)
             if let p = pinnedPhase { clock.phase = p }
             camera.sun = clock.sunDirection
@@ -1421,6 +1507,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 print(String(format: "camera low: y=%.1f ground=%.1f", camera.position.y, g))
             }
             clock.advance(step)
+            if let p = pinnedPhase { clock.phase = p }
             world.ensureCentered(on: SIMD2(camera.position.x, camera.position.z))
             towers.update(center: SIMD2(camera.position.x, camera.position.z), queue: queue, wait: world.synchronous)
             // Snapshots simulate long stretches without frames: keep the far heights following the camera.
@@ -1429,7 +1516,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 refreshFar()
             }
             remaining -= step
-        }
+        } }
         simTime += dt * timeScale
         // Out to the AC edge only once its level is built (after battery mode it is rebuilt in pieces).
         let full = Clipmap.handoff(Clipmap.levels), part = Clipmap.handoff(Clipmap.levels - 1)
@@ -1593,12 +1680,18 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.dispatchThreads(MTLSize(width: 64, height: 1024, depth: 1), threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
         }
         bakes?.endEncoding()
+        // The giants within the world's edge: their strand maps (baked on arrival) and the frame's table of them.
+        vines.update(giants: world.giants, eye: SIMD2(camera.position.x, camera.position.z), reach: Double(f.fade.y), origin: world.origin, seed: world.seed, into: cb)
         // Snapshots refresh the far heights synchronously as they simulate.
         if !world.synchronous { updateFar(into: cb) }
         birdSlots.wait()
         cb.addCompletedHandler { [birdSlots] _ in birdSlots.signal() }
         let birdBuf = birdBuffers[birdIndex]
         birdIndex = (birdIndex + 1) % birdBuffers.count
+        // Caves are carved out to level 3's handoff: shading looks them up only while one lies within it.
+        let camXZ = SIMD2<Float>(Float(camera.position.x), Float(camera.position.z))
+        let caveR = Float(Clipmap.handoff(3)) + Float(World.caveReach)
+        f.birds.w = world.caves.contains { simd_length_squared($0.m - camXZ) < caveR * caveR } ? 1 : 0
         f.birds.x = Float(wildlife.upload(into: birdBuf, origin: SIMD3(Double(world.origin.x), 0, Double(world.origin.y))))
         let b = camera.basis
         prevCamera = (camera.position, b.fwd, b.right, b.up)
@@ -1722,6 +1815,49 @@ final class Renderer: NSObject, MTKViewDelegate {
                 }
             }
             enc.endEncoding()
+        }
+        // The giants' hanging strands over the scene (vineFragment): the scene's bindings less the birds and the lamp
+        // references, plus the strand maps. VR_PROFILE=bits2048 leaves them out.
+        if vines.tableCount > 0 && !(Renderer.profile.hasPrefix("bits") && (Int(Renderer.profile.dropFirst(4)) ?? 0) & 2048 != 0) {
+            let vp = MTLRenderPassDescriptor()
+            vp.colorAttachments[0].texture = sceneTex
+            vp.colorAttachments[0].loadAction = .load
+            vp.colorAttachments[0].storeAction = .store
+            if let enc = cb.makeRenderCommandEncoder(descriptor: vp) {
+                enc.setRenderPipelineState(vinePipeline)
+                enc.setFragmentBytes(&f, length: MemoryLayout<Frame>.stride, index: 0)
+                enc.setFragmentTexture(world.heightTex, index: 0)
+                enc.setFragmentTexture(cloudTex, index: 1)
+                enc.setFragmentTexture(world.climateTex, index: 2)
+                enc.setFragmentBuffer(world.siteBuffer, offset: 0, index: 1)
+                enc.setFragmentTexture(world.structTex, index: 3)
+                enc.setFragmentTexture(lightMap, index: 4)
+                enc.setFragmentTexture(lightDir, index: 5)
+                enc.setFragmentTexture(clipmap.height, index: 6)
+                enc.setFragmentTexture(clipmap.climate, index: 7)
+                enc.setFragmentTexture(clipmap.cover, index: 8)
+                enc.setFragmentTexture(shadowMaps[0], index: 9)
+                enc.setFragmentTexture(shadowMaps[1], index: 10)
+                enc.setFragmentTexture(slowTex, index: 11)
+                enc.setFragmentTexture(world.maxTex, index: 12)
+                enc.setFragmentTexture(world.gapTex, index: 13)
+                enc.setFragmentTexture(clipmap.gaps, index: 14)
+                enc.setFragmentTexture(clipmap.gaps2, index: 17)
+                enc.setFragmentTexture(world.bandTex, index: 15)
+                enc.setFragmentTexture(provTex, index: 16)
+                enc.setFragmentBuffer(lampPos, offset: 0, index: 2)
+                enc.setFragmentBuffer(lampState, offset: 0, index: 3)
+                enc.setFragmentBytes(&tileMasks, length: tileMasks.count * 4, index: 7)
+                enc.setFragmentBuffer(world.giantBuffer, offset: 0, index: 8)
+                enc.setFragmentBytes(towers.table, length: Towers.tableBytes, index: 9)
+                enc.setFragmentBytes(vines.table, length: Vines.tableBytes, index: 10)
+                enc.setFragmentTexture(vines.fine, index: 18)
+                enc.setFragmentTexture(vines.coarse, index: 19)
+                enc.setFragmentTexture(vines.sup, index: 20)
+                enc.setFragmentTexture(vines.bands, index: 21)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                enc.endEncoding()
+            }
         }
         // In its own pass: drawn after the scene in the scene's pass, even a draw doing nothing cost a twilight scene ~0.4 ms.
         if f.sunDir.y < Renderer.bioSun {
@@ -1968,7 +2104,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         let levels = (1...Clipmap.levels).prefix { clipmap.ready($0) }.count
         // VR_PROFILE (tests): "noshadow" drops terrain shadows, "nobake" keeps the maps but skips their rebaking.
         // "bitsN" sets profiling flags directly: 8 reflections unshaded, 16 no sky visibility, 32 no cloud shadow or veil,
-        // 64 primary hits unshaded.
+        // 64 primary hits unshaded, 4096 no glow on the land, 8192 the land's glow at its far means only.
         f.shadow.y = Renderer.profile == "nearclouds" ? 1 : Renderer.profile == "lowmax" ? 2 : Renderer.profile == "norefl" ? 4 : Float(Renderer.profile.hasPrefix("bits") ? Int(Renderer.profile.dropFirst(4)) ?? 0 : 0)
         if Renderer.profile == "noshadow" { f.shadow.x = 3; return }
         if Renderer.profile == "oldshadow" { f.shadow.x = 0; return }
@@ -2073,6 +2209,10 @@ final class Renderer: NSObject, MTKViewDelegate {
         guard let drawable = view.currentDrawable, let cb = queue.makeCommandBuffer() else { return }
         encode(into: cb, output: drawable.texture, outputSize: screenPixels)
         recorder?.capture(self, into: cb, source: drawable.texture, time: now)
+        if let path = shotPath {
+            shotPath = nil
+            saveShot(drawable.texture, into: cb, path: path)
+        }
         if Renderer.logTiming {
             cb.addCompletedHandler { [weak self] cb in
                 guard let self else { return }
@@ -2088,6 +2228,47 @@ final class Renderer: NSObject, MTKViewDelegate {
         cb.present(drawable)
         cb.commit()
     }
+
+    // The drawable is the dither-cell grid, which the layer scales up with nearest filtering, so the PNG does the same.
+    private func saveShot(_ src: MTLTexture, into cb: MTLCommandBuffer, path: String) {
+        let w = src.width, h = src.height
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: src.pixelFormat, width: w, height: h, mipmapped: false)
+        d.storageMode = .shared
+        guard let copy = queue.device.makeTexture(descriptor: d), let blit = cb.makeBlitCommandEncoder() else { return }
+        blit.copy(from: src, to: copy)
+        blit.endEncoding()
+        let W = Int(screenPixels.width), H = Int(screenPixels.height)
+        cb.addCompletedHandler { _ in
+            DispatchQueue.global(qos: .utility).async {
+                var cells = [UInt8](repeating: 255, count: w * h * 4)
+                if copy.pixelFormat == .rgba16Float {
+                    // Extended linear sRGB; light above 1 clips, as on a screen without headroom.
+                    var half = [Float16](repeating: 0, count: w * h * 4)
+                    copy.getBytes(&half, bytesPerRow: w * 8, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+                    for i in 0..<w * h {
+                        for c in 0..<3 {
+                            let x = min(max(Float(half[i * 4 + c]), 0), 1)
+                            let e = x <= 0.0031308 ? 12.92 * x : 1.055 * pow(x, 1 / 2.4) - 0.055
+                            cells[i * 4 + c] = UInt8(e * 255 + 0.5)
+                        }
+                    }
+                } else {
+                    copy.getBytes(&cells, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+                    for i in 0..<w * h { cells.swapAt(i * 4, i * 4 + 2) }
+                }
+                var out = [UInt8](repeating: 255, count: W * H * 4)
+                for y in 0..<H {
+                    let sy = y * h / H
+                    for x in 0..<W {
+                        let s = (sy * w + x * w / W) * 4, o = (y * W + x) * 4
+                        out[o] = cells[s]; out[o + 1] = cells[s + 1]; out[o + 2] = cells[s + 2]
+                    }
+                }
+                let ok = Snapshot.write(bytes: out, width: W, height: H, to: path)
+                BugLog.note("screenshot \(ok ? "saved" : "failed"): \(path)")
+            }
+        }
+    }
 }
 
 // Offscreen render to PNG, for checking visuals without a display.
@@ -2095,7 +2276,7 @@ enum Snapshot {
     // False if the renderer could not start or a PNG could not be written.
     static func run(settings: Settings, path: String, gpu shared: GPU? = nil) -> Bool {
         guard let gpu = shared ?? MTLCreateSystemDefaultDevice().flatMap({ GPU(device: $0) }),
-              let r = Renderer(gpu: gpu, outputFormat: .rgba8Unorm, seed: settings.seed == 0 ? 1 : settings.seed,
+              let r = Renderer(gpu: gpu, outputFormat: .rgba8Unorm, seed: Biome.seed(settings.seed == 0 ? 1 : settings.seed, biome: settings.biome ?? 0),
                                screenIndex: 0, battery: settings.forceBattery, dither: !settings.noDither) else {
             FileHandle.standardError.write("renderer init failed\n".data(using: .utf8)!)
             return false
@@ -2158,6 +2339,50 @@ enum Snapshot {
                     print(String(format: "showing %@ site %u at (%.0f, %.0f), %d of %d", "\(site.kind)", site.id, site.pos.x, site.pos.y, rank + 1, pick.count))
                 } else {
                     print("no site of kind \(Int(v[0])) rank \(rank) (\(pick.count) on this map)")
+                }
+            }
+        }
+        // VR_CAVE=distance,height,bearing[,rank[,homes]]: hold the camera on the rank-th nearest cave (with homes 1, of those
+        // someone lives in), `distance` out from its mouth turned `bearing` degrees off its axis, `height` over the ground
+        // there or the cave's floor, whichever is higher, looking at the mouth.
+        if let spec = env["VR_CAVE"] {
+            let v = spec.split(separator: ",").compactMap { Double($0) }
+            if v.count >= 3 {
+                let here = SIMD2<Float>(Float(r.camera.position.x), Float(r.camera.position.z))
+                // homes: 1 lived-in caves only; 2 any cave of a good size seen clear across `distance` (by the CPU heights); 3 grottoes.
+                let b0 = v[2] * .pi / 180
+                func clear(_ c: CaveRec) -> Bool {
+                    let m = SIMD2(Double(c.m.x), Double(c.m.y)), u = SIMD2(Double(c.u.x), Double(c.u.y))
+                    let dir = SIMD2(u.x * cos(b0) - u.y * sin(b0), u.x * sin(b0) + u.y * cos(b0))
+                    guard c.w >= 6, c.hc >= 8, let g = r.world.height(x: m.x - dir.x * v[0], z: m.y - dir.y * v[0]) else { return false }
+                    let y0 = max(g, Double(c.yF)) + v[1], y1 = Double(c.yF) + 0.5 * Double(c.hc)
+                    for t in stride(from: 12.0, to: v[0], by: 6.0) {
+                        let q = m - dir * t
+                        guard let h = r.world.height(x: q.x, z: q.y) else { return false }
+                        if h > y1 + (y0 - y1) * t / v[0] { return false }
+                    }
+                    return true
+                }
+                let mode = v.count > 4 ? Int(v[4]) : 0
+                let pick = r.world.caves.filter { mode == 0 || (mode == 1 && $0.flags & 2 != 0) || (mode == 2 && clear($0)) || (mode == 3 && $0.flags & 4 != 0) }
+                    .sorted { simd_length($0.m - here) < simd_length($1.m - here) }
+                let rank = v.count > 3 ? Int(v[3]) : 0
+                if rank < pick.count {
+                    let c = pick[rank]
+                    let m = SIMD2(Double(c.m.x), Double(c.m.y)), u = SIMD2(Double(c.u.x), Double(c.u.y))
+                    let b = v[2] * .pi / 180
+                    let dir = SIMD2(u.x * cos(b) - u.y * sin(b), u.x * sin(b) + u.y * cos(b))
+                    let cam = m - dir * v[0]
+                    let g = r.world.height(x: cam.x, z: cam.y) ?? 20
+                    let y = max(max(g, 19.85), Double(c.yF)) + v[1]
+                    let yaw = atan2(m.x - cam.x, m.y - cam.y)
+                    let pitch = atan2(Double(c.yF) + 0.4 * Double(c.hc) - y, v[0]) + (settings.pitch ?? 0)
+                    r.camera.freeze(position: SIMD3(cam.x, y, cam.y), yaw: yaw, pitch: pitch)
+                    r.camera.pitchOverride = nil
+                    print(String(format: "showing cave at (%.0f, %.0f) floor %.0f W %.1f H %.0f L %.0f%@, %d of %d; VR_CAM=%.1f,%.1f,%.1f,%.2f,%.2f,1", c.m.x, c.m.y, c.yF, c.w, c.hc, c.l,
+                                 c.flags & 2 != 0 ? " home" : "", rank + 1, pick.count, cam.x, cam.y, y, yaw * 180 / .pi, pitch * 180 / .pi))
+                } else {
+                    print("no cave rank \(rank) (\(pick.count) in the table)")
                 }
             }
         }
@@ -2309,6 +2534,37 @@ enum Snapshot {
             // VR_EXPOSURE=e: the exposure a bug report recorded (snapshots jump straight to the target the saver eases toward).
             if let e = Double(env["VR_EXPOSURE"] ?? "") { r.exposure = e }
             simulated = t
+            // VR_PATH=file: renders each line "simTime x z y yawDeg pitchDeg rollDeg exposure [phase day]" (a bug report's
+            // recorded frames, bugclip.sh) in turn as <screenshot>_pNNNN.png, carrying the temporal history across them as live.
+            // Phase and day hold the sky clock where the report's frame had it: the menu's Time of Day pins the phase in the
+            // saver, and the day picks each night's lit beacons and rites.
+            if let pf = env["VR_PATH"], let text = try? String(contentsOfFile: pf, encoding: .utf8) {
+                var bytes = [UInt8](repeating: 0, count: w * h * 4)
+                var n = 0
+                for line in text.split(separator: "\n") {
+                    let v = line.split(separator: " ").compactMap { Double($0) }
+                    guard v.count == 8 || v.count == 10 else { continue }
+                    if v.count == 10 { r.pinnedPhase = v[8] }
+                    r.simulate(max(v[0] - simulated, 0))
+                    simulated = v[0]
+                    if v.count == 10 {
+                        r.clock.phase = v[8]
+                        r.clock.day = Int(v[9])
+                        r.camera.sun = r.clock.sunDirection
+                        r.camera.nightIndex = r.clock.nightIndex
+                    }
+                    r.camera.freeze(position: SIMD3(v[1], v[3], v[2]), yaw: v[4] * .pi / 180, pitch: v[5] * .pi / 180, roll: v[6] * .pi / 180)
+                    r.exposure = v[7]
+                    let cb = r.queue.makeCommandBuffer()!
+                    r.encode(into: cb, output: tex, outputSize: CGSize(width: w, height: h))
+                    cb.commit()
+                    cb.waitUntilCompleted()
+                    tex.getBytes(&bytes, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+                    wrote = write(bytes: bytes, width: w, height: h, to: path.replacingOccurrences(of: ".png", with: String(format: "_p%04d.png", n))) && wrote
+                    n += 1
+                }
+                return wrote
+            }
             if let d = Double(env["VR_BIRDTEST"] ?? "") { r.wildlife.testPattern(camera: r.camera, distance: d) }
             if let d = Double(env["VR_MURMUR"] ?? "") { r.wildlife.testMurmuration(camera: r.camera, distance: d) }
             var times: [Double] = []
@@ -2322,6 +2578,11 @@ enum Snapshot {
                 // VR_POWER_FLIP=i switches between battery and AC power at frame i (render scale kept).
                 if Int(env["VR_POWER_FLIP"] ?? "") == i { r.battery.toggle() }
                 if env["VR_MOTION"] != nil { r.simulate(1.0 / 60) }
+                // VR_DOLLY=v: a held camera moves v voxels a frame along its heading, level (approaches across the rings).
+                if let v = Double(env["VR_DOLLY"] ?? ""), i > 0 {
+                    let c = r.camera
+                    c.freeze(position: c.position + SIMD3(sin(c.yaw), 0, cos(c.yaw)) * v, yaw: c.yaw, pitch: c.pitch)
+                }
                 let cb = r.queue.makeCommandBuffer()!
                 r.encode(into: cb, output: tex, outputSize: CGSize(width: w, height: h))
                 cb.commit()

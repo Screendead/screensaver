@@ -67,6 +67,7 @@ struct Settings {
     var debugMode: Float = 0
     var renderScale: Double?
     var phase: Double?
+    var biome: Int?
     var timeScale: Double = 1
     var pitch: Double?
     var headroom: Float?
@@ -93,6 +94,7 @@ struct Settings {
             case "--debug": s.debugMode = Float(next()) ?? 0
             case "--scale": s.renderScale = Double(next())
             case "--phase": s.phase = Double(next())
+            case "--biome": s.biome = Biome.number(next())
             case "--speed": s.timeScale = Double(next()) ?? 1
             case "--pitch": s.pitch = Double(next())
             case "--headroom": s.headroom = Float(next())
@@ -133,10 +135,17 @@ struct Knobs {
 final class SaverWindow: NSWindow {
     var onInput: (() -> Void)?
     var onBugKey: (() -> Void)?
+    var onShotKey: (() -> Void)?
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
     // Swallow input here: unhandled keys would otherwise reach NSApp and beep.
-    override func keyDown(with event: NSEvent) { event.keyCode == BugReport.key ? onBugKey?() : onInput?() }
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case BugReport.key: onBugKey?()
+        case SaverController.shotKey: if !event.isARepeat { onShotKey?() }
+        default: onInput?()
+        }
+    }
     override func keyUp(with event: NSEvent) {}
     override func flagsChanged(with event: NSEvent) { onInput?() }
     override func mouseDown(with event: NSEvent) { onInput?() }
@@ -148,6 +157,18 @@ final class SaverWindow: NSWindow {
 final class SaverController {
     private var windows: [SaverWindow] = []
     private var renderers: [(Renderer, MTKView)] = []
+
+    func prefsChanged() {
+        let phase = Prefs.timeOfDay
+        for (r, _) in renderers { r.pinnedPhase = phase }
+        // A new biome is a new world: fade out and start again in it.
+        if isShowing, !dismissing, settings.biome == nil, Prefs.biome != shownBiome {
+            restartAfterDismiss = true
+            dismiss()
+        }
+    }
+    private var shownBiome = 0
+    private var restartAfterDismiss = false
     private var watchTimer: Timer?
     private var shownAt: TimeInterval = 0 // monotonic
     private var previousApp: NSRunningApplication?
@@ -184,7 +205,8 @@ final class SaverController {
         previousApp = front?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : front
         battery = settings.forceBattery || SystemState.onBattery()
         // A different seed per session keeps the world non-repeating across activations.
-        let sessionSeed = settings.seed != 0 ? settings.seed : UInt32.random(in: 1...UInt32.max)
+        shownBiome = settings.biome ?? Prefs.biome
+        let sessionSeed = Biome.seed(settings.seed != 0 ? settings.seed : UInt32.random(in: 1...Biome.maxSeed), biome: shownBiome)
         let gpu = MTLCreateSystemDefaultDevice().flatMap { GPU(device: $0) }
 
         screenFrames = screens.map(\.frame)
@@ -200,15 +222,19 @@ final class SaverController {
             window.setFrame(screen.frame, display: false)
             window.onInput = { [weak self] in self?.inputReceived() }
             window.onBugKey = { [weak self] in self?.reportBug() }
+            window.onShotKey = { [weak self] in self?.screenshot() }
 
             // A screen whose renderer can't start still gets covered, in black.
             if let gpu {
                 let view = MTKView(frame: CGRect(origin: .zero, size: screen.frame.size), device: gpu.device)
                 if let renderer = Renderer(view: view, gpu: gpu, screen: screen, seed: sessionSeed, screenIndex: index, battery: battery, dither: !settings.noDither && Prefs.dither) {
                     renderer.timeScale = settings.timeScale
+                    renderer.pinnedPhase = settings.phase ?? Prefs.timeOfDay
                     window.contentView = view
                     renderers.append((renderer, view))
                     let ds = view.drawableSize
+                    // The recorder and the S key read the first screen's drawable.
+                    if index == 0 { view.framebufferOnly = false }
                     if index == 0, let rec = BugRecorder(gpu: gpu, width: Int(ds.width), height: Int(ds.height), info: [
                         "seed": sessionSeed, "screenIndex": index, "screenCount": screens.count, "screenName": screen.localizedName,
                         "screenPoints": [Int(screen.frame.width), Int(screen.frame.height)], "backingScale": screen.backingScaleFactor,
@@ -216,8 +242,6 @@ final class SaverController {
                         "drawable": [Int(ds.width), Int(ds.height)], "edr": view.colorPixelFormat == .rgba16Float,
                         "dither": !settings.noDither && Prefs.dither, "manualStart": manual,
                     ]) {
-                        // The recorder reads the drawable.
-                        view.framebufferOnly = false
                         renderer.recorder = rec
                         recorder = rec
                     }
@@ -243,7 +267,7 @@ final class SaverController {
 
         shownAt = SaverController.now
         inputGrace = manual ? 1.5 : 0
-        let grace = inputGrace
+        inputFloor = shownAt + inputGrace
         var lastPowerCheck = shownAt
         watchTimer?.invalidate()
         watchTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
@@ -251,13 +275,17 @@ final class SaverController {
             let age = SaverController.now - self.shownAt
             // Any physical input after the moment we appeared, including during the fade-in.
             let idle = SystemState.idleSeconds()
-            if idle < age - grace - 0.15 {
-                // The key event itself may not arrive (macOS can refuse to activate the agent), so B is read from the HID state.
+            let shotHeld = CGEventSource.keyState(.hidSystemState, key: SaverController.shotKey)
+            if idle < SaverController.now - self.inputFloor - 0.15 {
+                // The key event itself may not arrive (macOS can refuse to activate the agent), so B and S are read from the HID state.
                 if CGEventSource.keyState(.hidSystemState, key: BugReport.key) { self.reportBug(); return }
+                if shotHeld { self.screenshot(); return }
                 BugLog.note(String(format: "input detected: idle %.2f s, shown %.1f s", idle, age))
                 self.dismiss()
                 return
             }
+            // While S is held its autorepeat and release are not input.
+            if shotHeld { self.inputFloor = SaverController.now }
             if self.settings.previewDuration > 0 && age > self.settings.previewDuration { self.dismiss(); return }
             if SaverController.now - lastPowerCheck > 5 {
                 lastPowerCheck = SaverController.now
@@ -271,6 +299,27 @@ final class SaverController {
         }
         watchTimer?.tolerance = 0.005
         RunLoop.main.add(watchTimer!, forMode: .common)
+    }
+
+    static let shotKey: CGKeyCode = 1 // kVK_ANSI_S
+    static var shotFolder: URL {
+        FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0].appendingPathComponent("STRATA", isDirectory: true)
+    }
+    // Input older than this is not a reason to dismiss.
+    private var inputFloor: TimeInterval = 0
+    private var lastShot: TimeInterval = -1
+
+    // S: saves the first screen's next frame and keeps the saver showing.
+    private func screenshot() {
+        let now = SaverController.now
+        inputFloor = now
+        guard isShowing, !dismissing, now - lastShot > 0.5, let r = renderers.first?.0 else { return }
+        lastShot = now
+        let dir = SaverController.shotFolder
+        guard (try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)) != nil else { return }
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+        r.shotPath = dir.appendingPathComponent("STRATA \(f.string(from: Date())).png").path
     }
 
     // B: writes the report's state now, finishes the clip in the background, and asks for a note once the saver is gone.
@@ -342,7 +391,11 @@ final class SaverController {
             self.dismissing = false
             self.recorder?.discard()
             self.recorder = nil
-            if let dir = self.pendingReport {
+            let restart = self.restartAfterDismiss && self.pendingReport == nil
+            self.restartAfterDismiss = false
+            if restart {
+                self.show(manual: true)
+            } else if let dir = self.pendingReport {
                 self.pendingReport = nil
                 self.askForNote(dir)
             } else {
@@ -407,7 +460,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.systemSaverRunning = false
             self?.schedule(after: 0)
         }
-        dnc.addObserver(forName: Prefs.changed, object: nil, queue: .main) { [weak self] _ in self?.schedule(after: 0) }
+        dnc.addObserver(forName: Prefs.changed, object: nil, queue: .main) { [weak self] _ in
+            self?.saver.prefsChanged()
+            self?.schedule(after: 0)
+        }
         dnc.addObserver(forName: Prefs.startNow, object: nil, queue: .main) { [weak self] _ in
             guard let self, !self.saver.isShowing, !SystemState.screenIsLockedOrInactive(), !SystemState.displaysAsleep() else { return }
             self.saver.show(manual: true)
