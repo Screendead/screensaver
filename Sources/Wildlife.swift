@@ -88,8 +88,6 @@ final class Wildlife {
         // Circling an island: its centre (x, z), the ring's radius and height, and which way round.
         var orbit: SIMD4<Double>?
         var orbitSense = 1.0
-        // Flying in on a fast glide (raptors among islands): its birds may go as fast as its anchor.
-        var glide = false
 
         init(kind: Kind, slot: Int, anchor: SIMD3<Double>, heading: Double, speed: Double, altitude: Double, life: Double, seedPhase: Double) {
             self.kind = kind
@@ -273,7 +271,7 @@ final class Wildlife {
                 spawnTurn += 1
                 spawnStats["\(roster[slot])", default: (0, 0, 0)].tries += 1
                 let t0 = PopLog.enabled ? ProcessInfo.processInfo.systemUptime : 0
-                let made = spawn(kind: roster[slot], slot: slot, cam: cam, camYaw: camYaw, pitch: camPitch, isles: isles)
+                let made = spawn(kind: roster[slot], slot: slot, cam: cam, camYaw: camYaw, pitch: camPitch)
                 if PopLog.enabled { spawnMs = max(spawnMs, (ProcessInfo.processInfo.systemUptime - t0) * 1000) }
                 if made {
                     spawnTimer = 1.5
@@ -385,7 +383,7 @@ final class Wildlife {
     // the camera will be, and keeps it there a while: against a camera faster than the birds that is mostly a flock
     // flying along with it, drifting in across a side, gliding down past the top edge or rising over a ridge. Where
     // no such path exists, the flock waits.
-    private func spawn(kind wanted: Kind, slot: Int, cam: SIMD3<Double>, camYaw: Double, pitch: Double, isles: Bool = false) -> Bool {
+    private func spawn(kind wanted: Kind, slot: Int, cam: SIMD3<Double>, camYaw: Double, pitch: Double) -> Bool {
         if wanted == .starling { return spawnMurmuration(slot: slot, cam: cam, camYaw: camYaw, pitch: pitch) }
         guard let s = sight else { return false }
         let roll = rand()
@@ -419,10 +417,9 @@ final class Wildlife {
             var fl = Wildlife.flight(kind)
             // Flying in they go near their top speed, so some can keep pace with the camera; then raptors circle, bats
             // jink about where they arrived, and the rest settle to their own pace and the camera overtakes them.
-            // Among islands a raptor at its top speed could not overtake the frame's edges as the camera closes on them,
-            // so none would reach an island to circle it: it glides in at three quarters of the camera's pace.
-            let glide = kind == .raptor && isles
-            let cruise = max(fl.maxSpeed * (0.92 + 0.08 * pace), glide ? 0.75 * simd_length(SIMD2(camVel.x, camVel.z)) : 0)
+            // Against a camera much faster than their top speed no path would overtake the frame's edges as it closes on
+            // them, so none would spawn: they glide in at three quarters of the camera's pace, over their top speed.
+            let cruise = max(fl.maxSpeed * (0.92 + 0.08 * pace), 0.75 * simd_length(SIMD2(camVel.x, camVel.z)))
             let spread: Double = kind == .raptor ? 25 : 6 + Double(n) * 0.4
             let size = fl.span * 1.12
             // The start: out past a side or the top of the frame, or (one in five) low inside it, hoping for a hill
@@ -475,7 +472,6 @@ final class Wildlife {
             let f = Flock(kind: kind, slot: slot, anchor: start, heading: heading, speed: cruise, altitude: start.y, life: life, seedPhase: seedPhase)
             f.serial = nextId
             f.cruise = cruise
-            f.glide = glide
             f.hold = kind == .raptor ? hold : (kind == .bat ? 2.5 : fl.speed * pace)
             f.transit = (o.enter + o.leave) / 2
             f.climb = o.v.y
@@ -635,7 +631,9 @@ final class Wildlife {
         f.age += dt
         f.transit -= dt
         let arrived = f.transit <= 0
-        f.speed += (((arrived || f.kind == .starling) && !f.leaving ? f.hold ?? f.cruise : f.cruise) - f.speed) * min(1, dt * 0.3)
+        // Leaving, they go no faster than their top speed, even if they glided in faster.
+        let target = f.leaving ? min(f.cruise, fl.maxSpeed) : (arrived || f.kind == .starling ? f.hold ?? f.cruise : f.cruise)
+        f.speed += (target - f.speed) * min(1, dt * 0.3)
 
         // Anchor: a heading that drifts on the noise flow field, bends down valleys (toward the lower side ahead),
         // and for gulls toward water. Flocks flying in hold course; leaving flocks in frame turn for its nearer side.
@@ -844,7 +842,8 @@ final class Wildlife {
 
             b.vel += acc * dt
             var s = simd_length(b.vel)
-            let top = f.glide ? max(fl.maxSpeed, f.speed) : fl.maxSpeed
+            // A flock gliding in may go over its top speed, and eases back to it as its speed falls to its own pace.
+            let top = max(fl.maxSpeed, f.speed)
             if s > top { b.vel *= top / s; s = top }
             if s < fl.minSpeed { b.vel = (s > 1e-3 ? b.vel / s : SIMD3(sin(f.heading), 0, cos(f.heading))) * fl.minSpeed; s = fl.minSpeed }
             // Birds climb and dive at modest angles.
