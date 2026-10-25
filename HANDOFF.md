@@ -49,12 +49,12 @@ The flight runs at twice its old speed (11-30 voxels/s by height, Jack's call 20
    - **All picks in one merge: `strata/overnight-picks`** holds every branch below at its bracketed pick (cloud sea included), conflicts resolved, one PR away from master.
    - **Jack's picks: `strata/overnight-picks2`** is that bundle (with the cloud-sea gate) at Jack's answers where they differ from the brackets, marked "Jack:" below.
    - Floating islands, `strata/islands3` (master merged in, conflicts reviewed): merge now [yes]; follow-ups: birds no longer circle islands at the doubled flight speed, island tops dark at night.
-   - Moon glints, `strata/pitch-moon-glints`: A keep / B soft roll-off [B] / C finer. Jack: C.
-   - Near-camera night glow, `strata/pitch-near-glow`: A keep / B 40% lower near [B] / C plus slower pulse.
-   - Sunrise clock, `strata/pitch-slow-dawn`: A keep / B slow dawn in 12 min / C slow dawn, ~15-min day [C]. Jack: A, the 12-minute clock stays (slow dawn removed).
+   - Moon glints, `archive/strata-pitch-moon-glints`: A keep / B soft roll-off [B] / C finer. Jack: C.
+   - Near-camera night glow, `archive/strata-pitch-near-glow`: A keep / B 40% lower near [B] / C plus slower pulse.
+   - Sunrise clock, `archive/strata-pitch-slow-dawn`: A keep / B slow dawn in 12 min / C slow dawn, ~15-min day [C]. Jack: A, the 12-minute clock stays (slow dawn removed).
    - Archive waves, tundra, drama, mesa, noonart, texel, far2 (rename to `archive/`) [yes].
    - Sun jumps half a turn at every dawn wrap (a bug on master since the clock was written), `strata/fix-sun-wrap`: A full turn a day / B catch up at night / C out by day, back by night [C]. Jack: A, a full turn a day (sun sets opposite where it rose).
-   - Prototypes, each reviewed and passed: `strata/idea-aurora-nights`, `strata/idea-moon-phases`, `strata/idea-shooting-stars`, `strata/idea-evening-star`, `strata/idea-wet-sand` [merge each]. Jack: merge each, the aurora brighter and moon phases with darker crescent nights. `strata/idea-crepuscular-rays` was dropped (beams never form). `strata/idea-cloud-sea` (dawn sea of cloud in basins) is still being tuned: it must not change with the camera's height.
+   - Prototypes, each reviewed and passed: `archive/strata-idea-aurora-nights`, `archive/strata-idea-moon-phases`, `archive/strata-idea-shooting-stars`, `archive/strata-idea-evening-star`, `archive/strata-idea-wet-sand` [merge each]. Jack: merge each, the aurora brighter and moon phases with darker crescent nights. `archive/strata-idea-crepuscular-rays` was dropped (beams never form). `archive/strata-idea-cloud-sea` (dawn sea of cloud in basins) is still being tuned: it must not change with the camera's height.
    - Fixed overnight without asking (defects): far giants shedding slabs in the morph band (PR #10), dark-foliage dither flicker (PR #13, Jack's pick), and birds starved by the doubled flight speed (PR #15: raptors and bats never spawned).
 
 ## Bug reports (triaged 2026-10-24)
