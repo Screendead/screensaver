@@ -178,24 +178,18 @@ final class Renderer: NSObject, MTKViewDelegate {
         horizonPipeline = hzP
         horizonBuf = hzB
         provPipeline = pvP
-        let pd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: Renderer.provN, height: Renderer.provN, mipmapped: false)
-        pd.usage = [.shaderRead, .shaderWrite]
-        pd.storageMode = .private
+        let pd = MTLTextureDescriptor.kernel(.rgba16Float, width: Renderer.provN, height: Renderer.provN)
         guard let pt = device.makeTexture(descriptor: pd) else { return nil }
         provTex = pt
         // (S, Sa, island shade's floor and roof): halves hold heights to a voxel, and the sentinels.
-        let sd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: Renderer.shadowN, height: Renderer.shadowN, mipmapped: false)
-        sd.usage = [.shaderRead, .shaderWrite]
-        sd.storageMode = .private
+        let sd = MTLTextureDescriptor.kernel(.rgba16Float, width: Renderer.shadowN, height: Renderer.shadowN)
         guard let sm0 = device.makeTexture(descriptor: sd), let sm1 = device.makeTexture(descriptor: sd) else { return nil }
         shadowMaps = [sm0, sm1]
         lampPipeline = lampP
         lightPipeline = lightP
         lampPos = lpos
         lampState = lstate
-        let ld = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: Renderer.lightTexels, height: Renderer.lightTexels, mipmapped: false)
-        ld.usage = [.shaderRead, .shaderWrite]
-        ld.storageMode = .private
+        let ld = MTLTextureDescriptor.kernel(.rgba16Float, width: Renderer.lightTexels, height: Renderer.lightTexels)
         guard let lmT = device.makeTexture(descriptor: ld), let ldT = device.makeTexture(descriptor: ld) else { return nil }
         lightMap = lmT
         lightDir = ldT

@@ -6,9 +6,7 @@ extension Renderer {
     func bakeClouds(into cb: MTLCommandBuffer, frame f: inout Frame) {
         let n = Renderer.cloudTexels, span = Double(n) * Renderer.cloudTexel
         if cloudTex == nil {
-            let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: n, height: n, mipmapped: false)
-            td.usage = [.shaderRead, .shaderWrite]
-            td.storageMode = .private
+            let td = MTLTextureDescriptor.kernel(.r32Float, width: n, height: n)
             cloudTex = device.makeTexture(descriptor: td)
         }
         guard let cloudTex else { return }
@@ -30,9 +28,7 @@ extension Renderer {
         // The slow part of the cloud cover evolves and drifts: baked every frame around the camera, in world coordinates.
         let sn = Renderer.slowTexels, sspan = Double(sn) * Renderer.slowTexel
         if slowTex == nil {
-            let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Float, width: sn, height: sn, mipmapped: false)
-            td.usage = [.shaderRead, .shaderWrite]
-            td.storageMode = .private
+            let td = MTLTextureDescriptor.kernel(.r32Float, width: sn, height: sn)
             slowTex = device.makeTexture(descriptor: td)
         }
         guard let slowTex, let enc = cb.makeComputeCommandEncoder() else { return }

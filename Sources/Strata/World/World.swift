@@ -38,25 +38,13 @@ final class World {
         var globalMax: Float = 255
 
         init?(device: MTLDevice) {
-            let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: MapLayout.size, height: MapLayout.size, mipmapped: false)
-            td.usage = [.shaderRead, .shaderWrite]
-            td.storageMode = .private
-            let xd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r16Float, width: MapLayout.size, height: MapLayout.size, mipmapped: true)
-            xd.usage = [.shaderRead, .shaderWrite, .pixelFormatView]
-            xd.storageMode = .private
-            let cd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: MapLayout.size, height: MapLayout.size, mipmapped: false)
-            cd.usage = [.shaderRead, .shaderWrite, .pixelFormatView]
-            cd.storageMode = .private
-            let sd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r32Uint, width: MapLayout.size, height: MapLayout.size, mipmapped: false)
-            sd.usage = [.shaderRead, .shaderWrite]
-            sd.storageMode = .private
-            let gd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Uint, width: MapLayout.size, height: MapLayout.size, mipmapped: false)
-            gd.usage = [.shaderRead, .shaderWrite]
-            gd.storageMode = .private
+            let td = MTLTextureDescriptor.kernel(.rgba16Float, width: MapLayout.size, height: MapLayout.size)
+            let xd = MTLTextureDescriptor.kernel(.r16Float, width: MapLayout.size, height: MapLayout.size, mipmapped: true, views: true)
+            let cd = MTLTextureDescriptor.kernel(.rgba16Float, width: MapLayout.size, height: MapLayout.size, views: true)
+            let sd = MTLTextureDescriptor.kernel(.r32Uint, width: MapLayout.size, height: MapLayout.size)
+            let gd = MTLTextureDescriptor.kernel(.rgba16Uint, width: MapLayout.size, height: MapLayout.size)
             // From the column mips' level 1 up: mip m here is their level m + 1.
-            let bd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rg16Float, width: MapLayout.size / 2, height: MapLayout.size / 2, mipmapped: true)
-            bd.usage = [.shaderRead, .shaderWrite, .pixelFormatView]
-            bd.storageMode = .private
+            let bd = MTLTextureDescriptor.kernel(.rg16Float, width: MapLayout.size / 2, height: MapLayout.size / 2, mipmapped: true, views: true)
             guard let bt = device.makeTexture(descriptor: bd),
                   let gb = device.makeBuffer(length: MapTables.giantTableBytes, options: .storageModeShared),
                   let ib = device.makeBuffer(length: Islands.slots * Islands.recordSize, options: .storageModeShared) else { return nil }
@@ -134,9 +122,7 @@ final class World {
     init?(gpu: GPU, seed: UInt32) {
         let device = gpu.device
         let pipeline = gpu.pipeline as (String) -> MTLComputePipelineState?
-        let sd = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: MapLayout.size, height: MapLayout.size, mipmapped: false)
-        sd.usage = [.shaderRead, .shaderWrite]
-        sd.storageMode = .private
+        let sd = MTLTextureDescriptor.kernel(.rgba16Float, width: MapLayout.size, height: MapLayout.size)
         guard let gen = pipeline("generateHeight"), let red = pipeline("reduceMax"), let redBase = pipeline("reduceMaxBase"), let redCpu = pipeline("reduceCpu"), let cpt = pipeline("copyTop"),
               let clean = pipeline("cleanupColumns"),
               let plant = pipeline("plantTrees"), let clim = pipeline("bakeClimate"), let place = pipeline("placeSites"), let stamp = pipeline("stampStructures"),
@@ -145,8 +131,7 @@ final class World {
               let q = device.makeCommandQueue(), let a = Buffer(device: device) else { return nil }
         var mips: [MTLTexture] = []
         for l in 1...MapLayout.cpuLevel {
-            let md = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float, width: MapLayout.size >> l, height: MapLayout.size >> l, mipmapped: false)
-            md.usage = [.shaderRead, .shaderWrite]
+            let md = MTLTextureDescriptor.kernel(.rgba16Float, width: MapLayout.size >> l, height: MapLayout.size >> l)
             md.storageMode = l == MapLayout.cpuLevel ? .shared : .private
             guard let t = device.makeTexture(descriptor: md) else { return nil }
             mips.append(t)
