@@ -5688,7 +5688,7 @@ static float3 propShade(Part P, float3 a, int feat, int3 v, int3 n, float2 uv, f
 // Coarse columns are s voxels wide but still unit voxels tall, and carry no structures.
 // lite: seen in rippled water, so detail finer than the ripples' blur is shaded at its mean.
 static inline float3 bioHue(float2 w, uint seed);
-static inline float bioPulse(float2 w, float t, uint seed, float warp);
+static inline float bioPulse(float2 w, float t, uint seed, float warp, bool soft = false);
 
 // A cave's dressing at world xz wq, height wy on a face of terrain column w: in green country (green 0...1) moss on its
 // floor and the foot of its walls toward the light, ferns in the moss, ivy hanging over the mouth and roots under its lip;
@@ -7091,11 +7091,23 @@ static inline float3 bioHue(float2 w, uint seed) {
 
 // Slow swells of light that travel across a grove (a front ~70 voxels apart, bent by warp, a noise in about
 // [-0.75, 0.75] over ~150 voxels, every ~8 s) over a slower breathing per region: from about half to full, never a flicker.
-static inline float bioPulse(float2 w, float t, uint seed, float warp) {
+static inline float bioPulse(float2 w, float t, uint seed, float warp, bool soft) {
     float a0 = float(seed & 1023u) * 0.00614;
-    float ph = dot(w, float2(cos(a0), sin(a0))) * (6.2831853 / 70.0) + 4.0 * warp - t * 0.75;
+    // Soft (pitch C): half the speed and about half the swing, about the same mean (0.584), so the far glow keeps its level.
+    float r = soft ? 0.5 : 1.0;
+    float ph = dot(w, float2(cos(a0), sin(a0))) * (6.2831853 / 70.0) + 4.0 * warp - t * 0.75 * r;
     float sw = 0.5 + 0.5 * sin(ph);
-    return (0.5 + 0.5 * sw * sw) * (0.85 + 0.15 * sin(t * 0.45 + dot(w, float2(0.013, 0.01))));
+    float br = sin(t * 0.45 * r + dot(w, float2(0.013, 0.01)));
+    if (soft) return (0.6875 + 0.25 * (sw * sw - 0.375)) * (0.85 + 0.08 * br);
+    return (0.5 + 0.5 * sw * sw) * (0.85 + 0.15 * br);
+}
+
+// Pitch variants for the near-camera glow, chosen with VR_PROFILE: bits16384 is B (the glow on land, vines and bugs
+// 40% lower near the camera, untouched past ~150 voxels), bits32768 is C (B with the slower, softer pulse).
+constant int BIO_PITCH_B = 16384, BIO_PITCH_C = 32768;
+static inline bool bioSoft(int prof) { return (prof & BIO_PITCH_C) != 0; }
+static inline float bioNear(int prof, float dist) {
+    return prof & (BIO_PITCH_B | BIO_PITCH_C) ? mix(0.6, 1.0, smoothstep(30.0, 150.0, dist)) : 1.0;
 }
 
 // Means of the near patterns below, per unit of glow; far off each surface takes its mean, so the land keeps one level
@@ -7120,7 +7132,7 @@ static float3 bioLight(thread const Ctx& x, thread const Surface& s, int k, int3
     float jw = s.bioJ;
     if (D <= 0.0) return 0;
     float3 hue = bioHue(wp.xz, x.seed);
-    float pulse = bioPulse(wp.xz, x.time, x.seed, g);
+    float pulse = bioPulse(wp.xz, x.time, x.seed, g, bioSoft(x.prof));
     // Pattern to mean as the footprint grows, before any of it nears a pixel, and across the 1-voxel map's morph band:
     // the coarser maps hold no trunks to pool round, so there the pattern is all mean.
     float band = k == 0 ? morphAt(x.tr, 0, p.xz) : 1.0;
@@ -7198,7 +7210,7 @@ static float3 bioLight(thread const Ctx& x, thread const Surface& s, int k, int3
     pulse = mix(pulse, 0.58, 0.5 * far);
     // Violet pockets gain half as much: far off they would crowd out the regional teal and blue.
     float gain = 1.0 + BIO_FAR_GAIN * far * (1.0 - 0.5 * saturate(3.0 * (hue.r - hue.g)));
-    return hue * D * pulse * glade * gain * (e + alb * halo * 0.2 * (1.3 - 0.5 * sv));
+    return hue * D * pulse * glade * gain * bioNear(x.prof, fp / x.pixelAngle) * (e + alb * halo * 0.2 * (1.3 - 0.5 * sv));
 }
 
 static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, int mistSamples = -1);
@@ -8220,7 +8232,8 @@ vertex MoteOut bioVertex(uint vid [[vertex_id]], uint iid [[instance_id]], const
     float3 wo = f.camPos.xyz + float3(org.x, 0.0, org.y);
     int3 c = int3(floor((wo - MOTE_REACH) / MOTE_CELL)) + int3(int(iid) % MOTE_N, (int(iid) / MOTE_N) % MOTE_N, int(iid) / (MOTE_N * MOTE_N));
     uint hh = pcg(uint(c.x) * 1597334677u ^ uint(c.y) * 3812015801u ^ uint(c.z) * 2798796415u ^ (seed + 710u));
-    if (hashf(hh) >= 0.5) return o;
+    int pv0 = int(f.shadow.y);
+    if (hashf(hh) >= (pv0 & (BIO_PITCH_B | BIO_PITCH_C) ? 0.3 : 0.5)) return o;
     uint h1 = pcg(hh), h2 = pcg(h1), h3 = pcg(h2), h4 = pcg(h3), h5 = pcg(h4);
     float3 a = float3(c) * MOTE_CELL + 1.3 + (MOTE_CELL - 2.6) * float3(hashf(h1), hashf(h2), hashf(h3));
     float ph = 6.283 * hashf(h4);
@@ -8249,6 +8262,8 @@ vertex MoteOut bioVertex(uint vid [[vertex_id]], uint iid [[instance_id]], const
     o.re = re;
     // Each flashes on its own slow rhythm, fading in and out over a second or so.
     float blink = 0.15 + 0.85 * smoothstep(0.3, 1.0, sin(time * (0.5 + 0.6 * hashf(pcg(h5))) + ph));
+    // Pitch C: half the rate and fades across the whole swing, scaled to the same mean (0.377).
+    if (bioSoft(pv0)) blink = 0.581 * (0.3 + 0.7 * smoothstep(-1.0, 1.0, sin(time * 0.5 * (0.5 + 0.6 * hashf(pcg(h5))) + ph)));
     // The glow's hue where it flies, a little paler or deeper bug by bug.
     float3 hue = bioHue(a.xz, seed) * (0.8 + 0.4 * hashf(pcg(h5 + 1u)));
     o.col = hue * blink * fade * sky;
@@ -8918,7 +8933,8 @@ static float3 shadeVine(thread const Ctx& x, thread const Light& L, float3 o, fl
         float2 wp = p.xz + float2(x.origin);
         float jw = smoothstep(0.65, 0.9, climateL(x.tr, min(k, x.tr.levels - 1), p.xz).jungle);
         float e = 0.035 * (0.4 + 0.6 * draw) * smoothstep(10.0, 40.0, top - p.y);
-        col += bioHue(wp, x.seed) * bioPulse(wp, x.time, x.seed, bioNoise(wp / 150.0, x.seed + 724u)) * (e + alb * 0.15) * bio * (1.0 - jw);
+        col += bioHue(wp, x.seed) * bioPulse(wp, x.time, x.seed, bioNoise(wp / 150.0, x.seed + 724u), bioSoft(x.prof)) * (e + alb * 0.15) * bio
+             * (1.0 - jw) * bioNear(x.prof, t);
     }
     return col;
 }
