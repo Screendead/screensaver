@@ -34,7 +34,13 @@ The flight runs at twice its old speed (11-30 voxels/s by height, Jack's call 20
 ## Open questions for Jack
 
 1. **What is missing when you don't use it?** If there are days the saver isn't running, or you turn it off, say why (too hot, too slow on battery, a fault, a scene you tire of). Each answer becomes the next step.
-2. **Unmerged branches.** Should `strata/islands2` (floating islands) and the other unmerged branches above be finished or archived?
+2. **Overnight pitches (2026-10-25).** Each has its own branch, pushed, with media in `build/overnight/` and a report page for Jack. Recommended picks in brackets:
+   - Floating islands, `strata/islands3` (master merged in, conflicts reviewed): merge now [yes]; follow-ups: birds no longer circle islands at the doubled flight speed, island tops dark at night.
+   - Moon glints, `strata/pitch-moon-glints`: A keep / B soft roll-off [B] / C finer.
+   - Near-camera night glow, `strata/pitch-near-glow`: A keep / B 40% lower near [B] / C plus slower pulse.
+   - Sunrise clock, `strata/pitch-slow-dawn`: A keep / B slow dawn in 12 min / C slow dawn, ~15-min day [C].
+   - Archive waves, tundra, drama, mesa, noonart, texel, far2 (rename to `archive/`) [yes].
+   - Prototypes, each reviewed: `strata/idea-aurora-nights`, `strata/idea-moon-phases`, `strata/idea-shooting-stars`, `strata/idea-evening-star` [merge each]. `strata/idea-crepuscular-rays` was dropped (beams never form).
 
 ## Bug reports (triaged 2026-10-24)
 
@@ -78,4 +84,4 @@ Taste questions for Jack, not faults: should moon glints roll off softly rather 
 
 ## The plan
 
-**Next step: the battery soak on Jack's MacBook, overnight.** Run `tools/powersoak` (after `make`) and leave the laptop unplugged and untouched: it waits for battery power and 5 idle minutes, measures 20 minutes of baseline with the display held on, then runs the live saver until the battery reaches 3%, logging watts, battery %, battery temperature and the saver's memory every 30 s into `build/power/`. Its `summary.txt` gives the saver's watts over baseline, battery %/hour and whether memory stays flat; those decide the next step.
+**Next step: act on Jack's replies to the overnight pitches** (above), merging each chosen branch through its own PR and proving it live. The battery soak (`tools/powersoak`, unplugged overnight) is still pending and remains the way to learn the saver's cost on battery.
