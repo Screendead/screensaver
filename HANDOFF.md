@@ -20,6 +20,7 @@ Statuses come from the commit history as of 2026-10-24 (master at 440f08b). "Mer
 | Bug reports | B while the saver shows files a report (clip, per-frame state, replay commands, note); merged 2026-10-12 | 55bfef4, 4478756 |
 | Render server | `--serve` answers `--screenshot` requests without a fresh process; prewarm race fixed; merged 2026-10-12 | 4abe916, aae1492, e394297 |
 | bugclip | `bugclip.sh` added 2026-10-23 and used to prove PR #1 (giants' skirts across the morph band), merged 2026-10-23 | d661c58, 74d61e1, 2b71c8e |
+| Floating islands | Not merged. `strata/islands3` (2026-10-25) is `strata/islands2` with master merged in (caves, giant vines, the giant morph band, shadow dither, faster flight kept). With no island in view it renders as master (0.1% of pixels one dither step apart from float rounding; flights on seed 1 match master to the voxel). Seed 303: 15-min flight passes under 3 islands, never low; islands in view cost +1.3 to +2.5 ms at 3456x2234. Flocks no longer circle islands at the doubled flight speed (53 s at the old speed, 0 at the new) | 6b2d55c, 0a15650 |
 
 Branches with commits that master lacks (from `git branch --no-merged master`): `strata/islands2` (31 commits, floating islands), `strata/islands-fix`, `strata/islands-b`, `strata/islands`, `strata/giant-C3` and `strata/giant-C2-roots` (morph-band work from 2026-10-13, before PR #1), `strata/vines3`, `strata/waves`, `strata/tundra`, `strata/merge4`, and single-commit prototypes. None of them is described in a merge message, so whether any is still wanted is unknown.
 
@@ -34,7 +35,7 @@ The flight runs at twice its old speed (11-30 voxels/s by height, Jack's call 20
 ## Open questions for Jack
 
 1. **What is missing when you don't use it?** If there are days the saver isn't running, or you turn it off, say why (too hot, too slow on battery, a fault, a scene you tire of). Each answer becomes the next step.
-2. **Unmerged branches.** Should `strata/islands2` (floating islands) and the other unmerged branches above be finished or archived?
+2. **Floating islands.** `strata/islands3` is ready to merge (media in `build/overnight/islands3/`): merge, merge after retuning circling flocks for the faster flight, or archive? The other unmerged branches above are still undecided.
 
 ## Bug reports (triaged 2026-10-24)
 
