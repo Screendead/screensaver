@@ -9,6 +9,10 @@ final class SceneTilesTests: XCTestCase {
                  2, 0, 1]
         let rects = SceneTiles.rects(v, nx: 3, ny: 3).map { [$0.v, $0.x0, $0.x1, $0.y0, $0.y1] }
         XCTAssertEqual(rects, [[0, 0, 1, 0, 1], [1, 2, 2, 0, 2], [2, 0, 0, 2, 2], [0, 1, 1, 2, 2]])
+        // A run starting under a rectangle but narrower or wider than it starts its own.
+        let w = [0, 0, 0,
+                 0, 0, 1]
+        XCTAssertEqual(SceneTiles.rects(w, nx: 3, ny: 2).map { [$0.v, $0.x0, $0.x1, $0.y0, $0.y1] }, [[0, 0, 2, 0, 0], [0, 0, 1, 1, 1], [1, 2, 2, 1, 1]])
     }
 
     // Every tile lies in exactly one rectangle, of its own variant.

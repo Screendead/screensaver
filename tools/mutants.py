@@ -64,21 +64,23 @@ MUTANTS = [
     ('FlightCameraTests/testLongFlightsAreSmoothAndKeepTheirClearance', S + 'Camera/FlightCamera+Autopilot.swift',
      'climbRate += max(-accel * dt, min(accel * dt, want - climbRate))', 'climbRate = want'),
     ('FlightCameraTests/testLongFlightsAreSmoothAndKeepTheirClearance', S + 'Camera/FlightCamera+Autopilot.swift',
-     'let floor = footprintMax(position.x, position.z, radius: 4) + 8', 'let floor = -Double.infinity'),
+     'radius: dist == 0 ? 14 : 8) + 12 - position.y', 'radius: dist == 0 ? 14 : 8) - 40 - position.y'),
     # The birds.
     ('WildlifeTests/testASeedRaisesTheSameBirds', S + 'Wildlife/Wildlife.swift', 'return Double((z ^ (z >> 31)) >> 11) / Double(1 << 53)',
      'return Double.random(in: 0..<1)'),
     ('WildlifeTests/testFlocksStayInTheAirAndInTheBuffer', S + 'Wildlife/Wildlife+Advance.swift',
-     'if b.pos.y < g + clear { acc.y += (g + clear - b.pos.y) * 4 }', ''),
-    ('WildlifeTests/testFlocksStayInTheAirAndInTheBuffer', S + 'Wildlife/Wildlife+Upload.swift',
+     'let lift = gAhead + fl.clearance * (f.kind == .raptor ? 2 : 1.5)', 'let lift = gAhead - 30'),
+    ('WildlifeTests/testUploadWritesEveryBirdWhereTheShaderReadsIt', S + 'Wildlife/Wildlife+Upload.swift',
      'let birds = (Wildlife.maxFlocks + Wildlife.maxClusters) * 2', 'let birds = (Wildlife.maxFlocks + Wildlife.maxClusters) * 2 + 8'),
     ('WildlifeTests/testOnlyBatsFlyAtNight', S + 'Wildlife/Wildlife+Step.swift', 'if sunY < -0.16 { return [.bat, .bat, .bat] }',
      'if sunY < -0.6 { return [.bat, .bat, .bat] }'),
     # Scene tiles and the terrain lookup (tests from the Swift restructure).
     ('SceneTilesTests/testRectsMergeRunsAndRows', S + 'Render/SceneTiles.swift', 'rects[i].x1 == x1, rects[i].v == v', 'rects[i].v == v'),
+    ('SceneTilesTests/testRectsMergeRunsAndRows', S + 'Render/SceneTiles.swift', 'rects[i].y1 = ty', 'rects[i].y1 = max(ty, 1)'),
     ('SceneTilesTests/testRectsCoverEveryTileOnce', S + 'Render/SceneTiles.swift', 'tx = x1 + 1', 'tx = x1 + 2'),
     ('SceneTilesTests/testVariantPicksTheCheapestThatCovers', S + 'Render/SceneTiles.swift', 'return need & 4 != 0 ? 6 : 5', 'return need & 4 != 0 ? 5 : 6'),
-    ('TerrainTests/testNothingBeforeTheFirstMap', S + 'World/Terrain.swift', ', !heights.isEmpty else', ' else'),
+    # TerrainTests/testNothingBeforeTheFirstMap has none: before the first map both the origin sentinel and the empty
+    # arrays put every point off the map, so removing either alone changes nothing.
     ('TerrainTests/testLooksUpTheCellUnderAPoint', S + 'World/Terrain.swift', 'return cz * s + cx', 'return cx * s + cz'),
     ('TerrainTests/testColumnReportsAnIslandOnlyWhereOneHangs', S + 'World/Terrain.swift', 'u < 4000 ? u : nil', 'u < 5000 ? u : nil'),
 ]

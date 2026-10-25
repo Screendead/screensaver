@@ -35,15 +35,43 @@ final class WildlifeTests: XCTestCase {
             most = max(most, w.flocks.map(\.birds.count).reduce(0, +))
         }
         XCTAssertGreaterThan(most, 40)
+    }
 
-        let guardBytes = 256
+    // The bird buffer as the shader walks it: per flock a sphere and its clusters, per cluster a sphere and its birds, each
+    // bird map-local; every drawn bird inside its cluster's and flock's spheres, nothing written past the buffer. A
+    // murmuration of 320 to 420 starlings fills it most.
+    func testUploadWritesEveryBirdWhereTheShaderReadsIt() {
+        let a = Aviary(seed: 303, phase: 0.05)
+        a.fly(seconds: 20)
+        a.wildlife.testMurmuration(camera: a.flight.camera, distance: 300)
+        a.fly(seconds: 1)
+        let origin = SIMD3<Double>(1024, 0, -2048), guardBytes = 256
         let buffer = UnsafeMutableRawPointer.allocate(byteCount: Wildlife.bufferLength + guardBytes, alignment: 16)
         defer { buffer.deallocate() }
         buffer.initializeMemory(as: UInt8.self, repeating: 0xA5, count: Wildlife.bufferLength + guardBytes)
-        let flocks = a.wildlife.upload(into: buffer, origin: SIMD3(1000, 0, -1000))
-        XCTAssertEqual(flocks, min(a.wildlife.flocks.filter { !$0.birds.isEmpty }.count, Wildlife.maxFlocks))
+        let n = a.wildlife.upload(into: buffer, origin: origin)
         let tail = UnsafeBufferPointer(start: (buffer + Wildlife.bufferLength).assumingMemoryBound(to: UInt8.self), count: guardBytes)
         XCTAssertTrue(tail.allSatisfy { $0 == 0xA5 })
+
+        let v = buffer.bindMemory(to: SIMD4<Float>.self, capacity: Wildlife.bufferLength / 16)
+        let clusters = Wildlife.maxFlocks * 2, birds = (Wildlife.maxFlocks + Wildlife.maxClusters) * 2
+        let drawn = a.wildlife.drawList()
+        XCTAssertEqual(n, drawn.count)
+        XCTAssertGreaterThan(drawn.map { $0.flock.birds.count }.max() ?? 0, 300)
+        func inside(_ p: SIMD4<Float>, _ s: SIMD4<Float>) -> Bool { simd_length(SIMD3(p.x, p.y, p.z) - SIMD3(s.x, s.y, s.z)) <= s.w + 1e-2 }
+        for (i, d) in drawn.enumerated() {
+            let fs = v[2 * i], fr = v[2 * i + 1]
+            XCTAssertEqual(Int(fr.y), d.clusters.count)
+            for (j, range) in d.clusters.enumerated() {
+                let c = Int(fr.x) + j, cs = v[clusters + 2 * c], cr = v[clusters + 2 * c + 1]
+                XCTAssertEqual(Int(cr.y), range.count)
+                for (k, b) in range.enumerated() {
+                    let bird = v[birds + 4 * (Int(cr.x) + k)], want = SIMD3<Float>(d.flock.birds[b].pos - origin)
+                    XCTAssertEqual(SIMD3(bird.x, bird.y, bird.z), want)
+                    XCTAssertTrue(inside(bird, cs) && inside(bird, fs))
+                }
+            }
+        }
     }
 
     // Deep in the night only bats fly.
