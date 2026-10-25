@@ -36,7 +36,7 @@ elif mode == 'basin':
         t += 1 / 30
 else:
     # Starts past the phase wrap at 1.0, where the sun's azimuth jumps half a turn. Descends to 42 over the water, the
-    # autopilot's floor at dawn (22 over the sea).
+    # autopilot's floor at full sunrise (22 over the sea).
     fps = float(sys.argv[2]) if len(sys.argv) > 2 else 30.0
     n = int(10 * fps)
     ph, x, z = 0.0, X0, Z0

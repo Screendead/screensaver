@@ -577,8 +577,9 @@ final class FlightCamera {
         clearance += 25 * hug
         // Passing the site a shot was built around: a little lower, so the windows read.
         if let f = focus, simd_length(f - p) < 150 { clearance = max(clearance - 8, min(clearance, 22)) }
-        // At dawn the sea of cloud's lid lies 14 over the sea (SEA_LID in Saver.metal): skim over it, never into it.
-        clearance = max(clearance, 22 * cloudSea)
+        // At dawn the sea of cloud's top reaches up to 14 over the sea (SEA_LID in Saver.metal), and a thin layer up to 6:
+        // skim over it, never into it, from the moment it forms.
+        clearance = max(clearance, cloudSea > 0 ? 12 + 10 * cloudSea : 0)
         // Canyon and mesa country: down among the walls they fill the frame, so rise to look across the rims.
         // The rim level is the upper quartile of a 150-voxel neighbourhood, so a lone peak off to the side does
         // not lift the flight, or the highest rim ahead, out to where a wall would still fill the frame. Eased
