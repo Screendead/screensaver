@@ -67,6 +67,8 @@ Every report under `~/Library/Application Support/STRATA/Bug Reports/` replayed 
 
 Taste questions for Jack, not faults: should moon glints roll off softly rather than clip to flat white, and is the dense blue glow near the camera the Avatar look he wants? Pitched on `strata/pitch-near-glow`: B (near glow 40% lower within 60-220 voxels, far untouched) and C (B with a pulse at half the speed and about half the swing, same mean) sit behind `VR_PROFILE=bits16384` and `bits32768`, compared at the 13.13 report's pose; the recommendation is B, made unconditional once Jack picks.
 
+Moon glints: pitched on `strata/pitch-moon-glints` (media in `build/overnight/moon-glints/`). `MOON_GLINT` in Saver.metal picks 0 as shipped, 1 (B) glints graded to their crests with a soft shoulder just under white, 2 (C) B plus a mid ripple octave for smaller glints. At the 10-12 12.54 pose, white cells among glint cells: 5.4% / 2.2% / 1.8% (exposure 1.6), 22% / 6.2% / 5.6% (exposure 2.4); bright-water flicker 7.6% / 7.2% / 9.4% flips a frame. On an EDR display A lifts the moon's mirror core into the headroom (a small spot, `--headroom 2 --debug 4`); B and C keep it under white. Recommended B; adopting it means making 1 the code and dropping the switch.
+
 `bugclip.sh` itself was the open fault: it replayed every report at the free-running clock, so night reports filed with Time of Day pinned replayed at dusk; it ignored dither off; and ffmpeg kept only about 25 of each 60 replayed frames. Fixed on `fix/bugclip-phase`.
 
 ## Soak results (2026-10-24)
