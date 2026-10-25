@@ -42,7 +42,7 @@ The flight runs at twice its old speed (11-30 voxels/s by height, Jack's call 20
    - Near-camera night glow, `strata/pitch-near-glow`: A keep / B 40% lower near [B] / C plus slower pulse.
    - Sunrise clock, `strata/pitch-slow-dawn`: A keep / B slow dawn in 12 min / C slow dawn, ~15-min day [C]. Jack: A, the 12-minute clock stays (slow dawn removed).
    - Archive waves, tundra, drama, mesa, noonart, texel, far2 (rename to `archive/`) [yes].
-   - Sun jumps half a turn at every dawn wrap (a bug on master since the clock was written), `strata/fix-sun-wrap`: A full turn a day / B catch up at night / C out by day, back by night [C].
+   - Sun jumps half a turn at every dawn wrap (a bug on master since the clock was written), `strata/fix-sun-wrap`: A full turn a day / B catch up at night / C out by day, back by night [C]. Jack: A, a full turn a day (sun sets opposite where it rose).
    - Prototypes, each reviewed and passed: `strata/idea-aurora-nights`, `strata/idea-moon-phases`, `strata/idea-shooting-stars`, `strata/idea-evening-star`, `strata/idea-wet-sand` [merge each]. `strata/idea-crepuscular-rays` was dropped (beams never form). `strata/idea-cloud-sea` (dawn sea of cloud in basins) is still being tuned: it must not change with the camera's height.
    - Fixed overnight without asking (defects): far giants shedding slabs in the morph band (PR #10), dark-foliage dither flicker (PR #13, Jack's pick), and birds starved by the doubled flight speed (PR #15: raptors and bats never spawned).
 
