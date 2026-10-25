@@ -5121,6 +5121,8 @@ struct Light {
     float sunAmt;
     float night;
     float gold;     // golden and blue hour; 0 at noon and deep night
+    float3 planet;  // direction to the evening or morning star
+    float planetAmt;
 };
 
 // Keyframes by sun elevation: night, blue hour, sunrise, golden, midday.
@@ -5134,7 +5136,20 @@ static inline float3 key5(float e, float3 a, float3 b, float3 c, float3 d, float
 
 static inline float goldAmount(float e) { return smoothstep(0.30, 0.12, e) * smoothstep(-0.16, -0.04, e); }
 
-static Light makeLight(float3 sunDir) {
+// The sun's direction at day phase p: must match SkyClock.elevation and sunDirection (Renderer.swift).
+static float3 clockSunDir(float p) {
+    float w = sin(2.0 * M_PI_F * p);
+    float y = w * (w > 0.0 ? 0.42 : 0.56) + 0.07;
+    float az = M_PI_F * p + 0.9;
+    float h = sqrt(1.0 - y * y);
+    return float3(h * sin(az), y, h * cos(az));
+}
+
+// How far along the sun's path the evening star trails it (and the morning star leads it), in day phase.
+constant float PLANET_LAG = 0.07;
+
+static Light makeLight(float4 sunPhase) {
+    float3 sunDir = sunPhase.xyz;
     Light L;
     float e = sunDir.y;
     L.sun = sunDir;
@@ -5153,6 +5168,10 @@ static Light makeLight(float3 sunDir) {
     L.sunAmt = smoothstep(-0.02, 0.05, e);
     L.night = smoothstep(-0.04, -0.20, e);
     L.gold = goldAmount(e);
+    // The evening star follows the sun down and sets a while after it; the morning star rises a while before it.
+    float3 ev = clockSunDir(sunPhase.w - PLANET_LAG), mo = clockSunDir(sunPhase.w + PLANET_LAG);
+    L.planet = ev.y > mo.y ? ev : mo;
+    L.planetAmt = smoothstep(0.02, -0.05, e);
     if (e > -0.02) {
         L.key = sunDir;
         L.keyCol = sunCol * L.sunAmt + float3(1.3, 0.5, 0.3) * 0.4 * (1.0 - L.sunAmt);
@@ -5197,12 +5216,23 @@ static float3 skyColor(float3 d, Light L) {
 }
 
 // The sky c (skyColor) with the sun's and moon's discs, and at night the stars and the Milky Way.
-static float3 skyDiscs(float3 c, float3 d, Light L, uint seed, float time) {
+static float3 skyDiscs(float3 c, float3 d, Light L, uint seed, float time, float pixelAngle) {
     float s = max(dot(d, L.sun), 0.0);
     // Disc takes the key light's hue (amber near the horizon) and blooms into the haze.
     float3 tint = L.keyCol / max(max(L.keyCol.r, max(L.keyCol.g, L.keyCol.b)), 1e-3);
     c += tint * 12.0 * smoothstep(0.99955, 0.9998, s) * L.sunAmt;
     c += L.keyCol * (pow(s, 1200.0) * mix(0.8, 0.35, L.gold) + pow(s, 180.0) * 0.25) * L.sunAmt;
+
+    // The planet: one steady cell (it does not twinkle) in a faint halo, out from the moment the sun sets, dimmed
+    // and warmed by the thick air near the horizon.
+    if (L.planetAmt > 0.0) {
+        float r = length(d - L.planet) / pixelAngle;
+        if (r < 12.0) {
+            float low = smoothstep(-0.01, 0.08, d.y);
+            float3 col = mix(float3(1.0, 0.62, 0.36), float3(1.0, 0.95, 0.86), low);
+            c += col * (smoothstep(1.0, 0.45, r) * 6.0 + exp(-r * 0.7) * 0.18) * L.planetAmt * low;
+        }
+    }
 
     if (L.night > 0.0) {
         float md = max(dot(d, L.moon), 0.0);
@@ -7747,7 +7777,7 @@ static float4 skyWithClouds(thread const Ctx& x, float3 o, float3 d) {
     float3 bare = raw;
     // Forward-scatter glow near the horizon, matching what applyFog adds to fogged land.
     bare += x.L.keyCol * min(hg(dot(d, x.L.key), 0.6) * 0.35, 0.15) * (1.0 - x.L.night) * smoothstep(0.1, 0.0, d.y);
-    float3 discs = skyDiscs(raw, d, x.L, x.seed, x.time) - raw;
+    float3 discs = skyDiscs(raw, d, x.L, x.seed, x.time, x.pixelAngle) - raw;
     CloudSample c = cloudSheet(x, o, d, x.prof1 ? 7000.0 : 1e9);
     // Clouds hide the stars, moon and sun behind them.
     // At night thin cloud veils the moon instead of hiding it.
@@ -8955,7 +8985,7 @@ fragment float4 vineFragment(VOut in [[stage_in]], float4 dst [[color(0)]], cons
     if (int(f.shadow.y) & 2) gmax = min(gmax, 260.0);
     Terrain tr { hm, coarse, coarseCover, coarseClim, clim, f.lod, f.mapInfo.xy, f.mapInfo.z, levels, f.camPos.xz + normalize(f.camFwd.xz + 1e-6) * f.fade.w, f.fade.y, f.fade.x, gmax, hx, gx, cg, cg2, hb, uint(f.mapInfo.w), giants, pvTex, towers, 0 };
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
-            2.0 * tanH * f.resolution.z, f.misc.w, makeLight(f.sunDir.xyz),
+            2.0 * tanH * f.resolution.z, f.misc.w, makeLight(f.sunDir),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
             cloudTex, f.cloud.xyz, st, sites, lampPos, lampState, lightMap, lightDir, f.lights, shadowNear, shadowFar,
             f.misc2.z == 14 ? 2.0 : f.shadow.x, (int(f.shadow.y) & 1) != 0, int(f.shadow.y), slowTex,
@@ -9008,7 +9038,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
     tr.caveNight = f.birds.w > 0.0 ? bioLandRamp(f.lights.x) : 0.0;
     tr.caveFire = mix(1.0, 0.02, smoothstep(-0.02, 0.05, f.lights.x)) * (1.0 - 0.75 * smoothstep(0.6, 0.66, f.lights.y));
     Ctx x { tr, f.mapInfo.xy, uint(f.mapInfo.w), f.camRight.w, f.camUp.w,
-            2.0 * tanH * f.resolution.z, f.misc.w, makeLight(f.sunDir.xyz),
+            2.0 * tanH * f.resolution.z, f.misc.w, makeLight(f.sunDir),
             fract(52.9829189 * fract(dot(in.pos.xy + f.misc2.x * float2(5.588, 2.31), float2(0.06711056, 0.00583715)))),
             cloudTex, f.cloud.xyz, st, sites, lampPos, lampState, lightMap, lightDir, f.lights, shadowNear, shadowFar,
             f.misc2.z == 14 ? 2.0 : f.shadow.x, (int(f.shadow.y) & 1) != 0, int(f.shadow.y), slowTex,
