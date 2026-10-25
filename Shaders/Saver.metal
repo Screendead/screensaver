@@ -1,4 +1,16 @@
 #include <metal_stdlib>
+
+// Moon glints on water: 0 as shipped, 1 soft roll-off of the peaks, 2 that plus finer, smaller glints.
+#ifndef MOON_GLINT
+#define MOON_GLINT 0
+#endif
+#if MOON_GLINT >= 2
+#define MOON_LOBE 7000.0
+#define MOON_FINE 2.2
+#else
+#define MOON_LOBE 4000.0
+#define MOON_FINE 1.6
+#endif
 using namespace metal;
 
 // Must match `Frame` in Sources/Renderer.swift.
@@ -9188,7 +9200,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         under *= float(life.underMul);
         col = mix(under, refl, fres) + float3(life.add);
         // Glitter path toward the sun or moon: the main EDR highlight.
-        col += x.L.keyCol * 6.0 * pow(max(dot(r, x.L.key), 0.0), mix(mix(900.0, 4000.0, x.L.night), 350.0, x.L.gold)) * fres * (x.L.shadows ? 1.0 : 0.3) * (1.0 + 0.5 * x.L.night) * open;
+        col += x.L.keyCol * 6.0 * pow(max(dot(r, x.L.key), 0.0), mix(mix(900.0, MOON_LOBE, x.L.night), 350.0, x.L.gold)) * fres * (x.L.shadows ? 1.0 : 0.3) * (1.0 + 0.5 * x.L.night) * open;
         // Golden hour: a broad sheen of the aureole on the water under the sun.
         col += x.L.keyCol * 0.5 * pow(max(dot(r, x.L.key), 0.0), 40.0) * fres * x.L.gold * open;
         if (x.L.night > 0.0 && open > 0.0) {
@@ -9206,19 +9218,28 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             // its features shrink toward a pixel, measured along the foreshortened view; far out, swells long
             // across the moon's bearing break the path into bands, and past them the cover itself remains.
             float fpv = tw * x.pixelAngle / max(-d.y, 0.1);
-            float fine = perlin3(float3(ww * 1.6, x.time * 0.7), x.seed + 61u);
+            float fine = perlin3(float3(ww * MOON_FINE, x.time * 0.7), x.seed + 61u);
             // Crests face the moon's midnight bearing, within 45 degrees of it all night. Facing the moon itself
             // turned the axes with every step of its bearing about a world origin some 10^5 voxels off, so the swell
             // under the path jumped frame to frame.
             constexpr float az0 = 0.75 * M_PI_F + 0.9;
             const float2 mz = -float2(sin(az0), cos(az0));
             float swell = perlin3(float3(dot(ww, mz) * 0.07, (ww.x * mz.y - ww.y * mz.x) * 0.02, x.time * 0.1), x.seed + 62u);
-            float rip = mix(swell, mix(e0, fine, saturate(2.0 - fpv * 10.0)), saturate(2.0 - fpv * 1.8));
+            float rip = mix(swell, mix(e0, fine, saturate(2.0 - fpv * 6.25 * MOON_FINE)), saturate(2.0 - fpv * 1.8));
             // The ripple noise is near-Gaussian (sd ~0.22); a logistic quantile turns cover into its threshold.
             float thr = 0.13 * log((1.0 - cover) / max(cover, 1e-4));
             float glint = mix(cover, smoothstep(thr - 0.08, thr + 0.16, rip), saturate(2.0 - fpv * 0.43));
             col += float3(0.75, 0.82, 1.0) * x.L.night * (0.05 * cover + 0.55 * glint);
         }
+#if MOON_GLINT >= 1
+        if (x.L.night > 0.0) {
+            // Moonlit water rolls off toward a peak just under white (post-exposure 1.25, about half the dither
+            // cells at the top level) instead of clipping: the glints keep a falloff rather than a flat plateau.
+            float ex = f.misc.x, k = 0.55 / ex, P = 1.25 / ex;
+            float m = max3(col.r, col.g, col.b);
+            if (m > k) col *= mix(1.0, (k + (P - k) * (1.0 - exp(-(m - k) / (P - k)))) / m, x.L.night);
+        }
+#endif
         // Water past the 1-voxel map lies beyond the light map, which would clamp its edge onto it.
         if (x.lights.w > 0.0 && all(wp.xz > 0.0) && all(wp.xz < float(x.tr.size))) {
             // Lamplight on the water: a soft pool, and a broken streak drawn toward the viewer as ripples
