@@ -23,11 +23,11 @@ def warp_current(y):
 
 
 # Slow dawn: half speed within |y| < 0.08 (about 4.6 degrees), easing back by 0.15; everything else runs `hurry` times
-# faster so the day keeps its length.
+# as fast. The saver ships hurry 1, so the day grows to about 15 minutes; solve_hurry finds the hurry that keeps 12.
 LOW, BAND = 0.08, 0.15
 
 
-def warp_slow(y, hurry=1.488):
+def warp_slow(y, hurry=1.0):
     return warp_current(y) * (0.5 + (hurry - 0.5) * ss((abs(y) - LOW) / (BAND - LOW)))
 
 
@@ -91,7 +91,7 @@ def chart(path, series, total):
     for name, colour, pts, label in series:
         xy = [(X(t), Y(math.degrees(math.asin(y)))) for t, y in pts[::20]]
         d.line(xy, fill=colour, width=2 * S, joint="curve")
-    d.text((L, 22 * S), "Sun elevation over one 12-minute day", fill=ink, font=f20)
+    d.text((L, 22 * S), "Sun elevation over one day", fill=ink, font=f20)
     lx = L
     for name, colour, pts, label in series:
         d.rounded_rectangle([lx, 60 * S, lx + 18 * S, 64 * S], radius=2 * S, fill=colour)
@@ -102,9 +102,9 @@ def chart(path, series, total):
 
 if __name__ == "__main__":
     total, cur = day(warp_current)
-    hurry = solve_hurry(total)
+    hurry = 1.0
     tot2, slow = day(lambda y: warp_slow(y, hurry))
-    print(f"current day {total:.1f} s; slow-dawn hurry {hurry:.3f}, day {tot2:.1f} s")
+    print(f"current day {total:.1f} s; slow dawn (hurry 1) {tot2:.1f} s; hurry {solve_hurry(total):.3f} would keep the day")
     rows = []
     for name, s, w in (("current", cur, warp_current), ("slow dawn", slow, lambda y: warp_slow(y, hurry))):
         gold = seconds_where(s, *GOLD)
@@ -115,4 +115,4 @@ if __name__ == "__main__":
         rows.append(gold / 2)
     if len(sys.argv) > 1:
         chart(sys.argv[1], [("current", (42, 120, 214), cur, f"Current: {rows[0]:.0f} s golden hour each sunrise and sunset"),
-                            ("slow", (235, 104, 52), slow, f"Slow dawn: {rows[1]:.0f} s")], total)
+                            ("slow", (235, 104, 52), slow, f"Slow dawn: {rows[1]:.0f} s")], max(total, tot2))

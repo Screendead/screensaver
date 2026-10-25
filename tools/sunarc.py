@@ -33,6 +33,8 @@ def run():
         y = elevation(p)
         s = min(max((abs(y) - 0.22) / 0.35, 0), 1)
         warp = 5.0 if y < -0.25 else 0.5 + 1.5 * s * s * (3 - 2 * s)
+        b = min(max((abs(y) - 0.08) / 0.07, 0), 1)
+        warp *= 0.5 + 0.5 * b * b * (3 - 2 * b)  # slow dawn
         rows.append((t, p, y))
         p += dt / 720 * warp * 1.05
         t += dt

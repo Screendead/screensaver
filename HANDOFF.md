@@ -35,6 +35,7 @@ The flight runs at twice its old speed (11-30 voxels/s by height, Jack's call 20
 
 1. **What is missing when you don't use it?** If there are days the saver isn't running, or you turn it off, say why (too hot, too slow on battery, a fault, a scene you tire of). Each answer becomes the next step.
 2. **Overnight pitches (2026-10-25).** Each has its own branch, pushed, with media in `build/overnight/` and a report page for Jack. Recommended picks in brackets:
+   - **All picks in one merge: `strata/overnight-picks`** holds every branch below at its bracketed pick (cloud sea included), conflicts resolved, one PR away from master.
    - Floating islands, `strata/islands3` (master merged in, conflicts reviewed): merge now [yes]; follow-ups: birds no longer circle islands at the doubled flight speed, island tops dark at night.
    - Moon glints, `strata/pitch-moon-glints`: A keep / B soft roll-off [B] / C finer.
    - Near-camera night glow, `strata/pitch-near-glow`: A keep / B 40% lower near [B] / C plus slower pulse.

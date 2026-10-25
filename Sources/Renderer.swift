@@ -124,7 +124,7 @@ final class GPU {
     private func taaDescriptor(_ star: Bool) -> MTLRenderPipelineDescriptor {
         let fc = MTLFunctionConstantValues()
         var s = star
-        fc.setConstantValue(&s, type: .bool, index: 3)
+        fc.setConstantValue(&s, type: .bool, index: 7)
         return fullscreen(try? library.makeFunction(name: "taaFragment", constantValues: fc), .rgba16Float)
     }
 
@@ -253,10 +253,9 @@ struct SkyClock {
         // Linger in golden and blue hour, hurry through midday and deep night.
         let warp = y < -0.25 ? 5.0 : 0.5 + 1.5 * s * s * (3 - 2 * s)
         // Half speed within ~4.6 degrees of the horizon, so cloud shadows cross the land at half the pace; the rest of
-        // the day runs `hurry` times faster so the day keeps its length (tools/dayclock.py solves hurry).
-        let hurry = 1.488
+        // the day keeps its pace, so a day runs about 15 minutes rather than 12 (tools/dayclock.py models it).
         let b = min(max((abs(y) - 0.08) / 0.07, 0), 1)
-        let slow = 0.5 + (hurry - 0.5) * b * b * (3 - 2 * b)
+        let slow = 0.5 + 0.5 * b * b * (3 - 2 * b)
         phase += dt / SkyClock.dayLength * warp * slow * 1.05
         if phase > 1 { phase -= 1; day += 1 }
     }
