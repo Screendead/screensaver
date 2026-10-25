@@ -7220,21 +7220,23 @@ static float3 shoreWash(thread const Ctx& x, float3 p, float H, float fp) {
     constexpr float R = 3.0;
     float2 lo = p.xz - R;
     int2 i0 = int2(floor(lo));
-    float wsum = 0.0;
+    // The same box gives the shares of ground a step up the beach and of ground no longer beach, so the band fades
+    // across tread edges rather than stepping with them.
+    float3 sum = 0.0;
     for (int j = 0; j < 7; j++) {
         float wz = saturate(min(float(i0.y + j + 1), p.z + R) - max(float(i0.y + j), lo.y));
-        float row = 0.0;
+        float3 row = 0.0;
         for (int i = 0; i < 7; i++) {
             int2 cc = clamp(i0 + int2(i, j), int2(0), int2(x.tr.size - 1));
             float top = abs(x.tr.hx.read(uint2(cc), 0).r);
             float wx = saturate(min(float(i0.x + i + 1), p.x + R) - max(float(i0.x + i), lo.x));
-            row += top < SEA ? wx : 0.0;
+            row += wx * float3(top < SEA, top > SEA + 0.5, top > SEA + 1.2);
         }
-        wsum += row * wz;
+        sum += row * wz;
     }
-    if (wsum <= 0.0) return 0;
-    // A tread a step up the beach lies further up the swash.
-    float m = R * (1.0 - 2.0 * wsum / (4.0 * R * R)) + 1.0 * (H - SEA - 0.15);
+    sum /= 4.0 * R * R;
+    if (sum.x <= 0.0 || sum.z >= 0.5) return 0;
+    float m = R * (1.0 - 2.0 * sum.x) + 1.2 * sum.y;
     float2 ww = p.xz + float2(x.tr.origin);
     float t = x.time;
     // Each stretch of shore its own phase and reach, drifting slowly, so the line never runs up as one rule.
@@ -7244,7 +7246,7 @@ static float3 shoreWash(thread const Ctx& x, float3 p, float H, float fp) {
     // Runs up over 40% of the period, easing to a stop, then slides back down more slowly.
     float rise = u < 0.4 ? 1.0 - (1.0 - u / 0.4) * (1.0 - u / 0.4) : 1.0 - smoothstep(0.4, 1.0, u);
     float reach = 0.15 + amp * rise;
-    float wet = 1.0 - smoothstep(1.0 + amp, 2.4 + amp, m);
+    float wet = (1.0 - smoothstep(1.0 + amp, 2.4 + amp, m)) * smoothstep(0.0, 0.1, sum.x) * (1.0 - smoothstep(0.0, 0.5, sum.z));
     // The film thins as the wash drains back.
     float film = (1.0 - smoothstep(reach - 0.5, reach, m)) * (u < 0.4 ? 1.0 : mix(0.35, 1.0, rise));
     // The front a fraction of a voxel wide; as it nears a pixel it widens and dims to the same share of light.
