@@ -88,6 +88,8 @@ final class Wildlife {
         // Circling an island: its centre (x, z), the ring's radius and height, and which way round.
         var orbit: SIMD4<Double>?
         var orbitSense = 1.0
+        // Flying in on a fast glide (raptors among islands): its birds may go as fast as its anchor.
+        var glide = false
 
         init(kind: Kind, slot: Int, anchor: SIMD3<Double>, heading: Double, speed: Double, altitude: Double, life: Double, seedPhase: Double) {
             self.kind = kind
@@ -216,7 +218,8 @@ final class Wildlife {
         hiddenFrames = []
         let cam = camera.position
         let cam2 = SIMD2(cam.x, cam.z)
-        let roster = Wildlife.roster(sunY: sunY, phase: phase, isles: islesAt().contains { $0.radius >= 40 && simd_length($0.pos - cam2) < $0.reach + 1500 })
+        let isles = islesAt().contains { $0.radius >= 40 && simd_length($0.pos - cam2) < $0.reach + 1500 }
+        let roster = Wildlife.roster(sunY: sunY, phase: phase, isles: isles)
         let fwd = camera.forward
         let camYaw = atan2(fwd.x, fwd.z), camPitch = asin(max(-1, min(1, fwd.y)))
         if let l = lastCam, dt > 0 { camVel += ((cam - l) / dt - camVel) * min(1, dt) }
@@ -270,7 +273,7 @@ final class Wildlife {
                 spawnTurn += 1
                 spawnStats["\(roster[slot])", default: (0, 0, 0)].tries += 1
                 let t0 = PopLog.enabled ? ProcessInfo.processInfo.systemUptime : 0
-                let made = spawn(kind: roster[slot], slot: slot, cam: cam, camYaw: camYaw, pitch: camPitch)
+                let made = spawn(kind: roster[slot], slot: slot, cam: cam, camYaw: camYaw, pitch: camPitch, isles: isles)
                 if PopLog.enabled { spawnMs = max(spawnMs, (ProcessInfo.processInfo.systemUptime - t0) * 1000) }
                 if made {
                     spawnTimer = 1.5
@@ -284,7 +287,7 @@ final class Wildlife {
             let desc = flocks.map { f -> String in
                 let framed = f.birds.filter { sight.inFrame($0.pos, size: $0.size) }.count
                 let d = simd_length(f.anchor - cam)
-                return String(format: "%@%@ n=%d framed=%d d=%.0f tr=%.0f", "\(f.kind)", f.leaving ? "(L)" : "", f.birds.count, framed, d, max(0, f.transit))
+                return String(format: "%@%@%@ n=%d framed=%d d=%.0f tr=%.0f", "\(f.kind)", f.leaving ? "(L)" : "", f.orbit != nil ? "(O)" : "", f.birds.count, framed, d, max(0, f.transit))
             }
             print(String(format: "TRACE t=%.0f sunY=%.2f ", time, sunY) + desc.joined(separator: " | "))
         }
@@ -382,7 +385,7 @@ final class Wildlife {
     // the camera will be, and keeps it there a while: against a camera faster than the birds that is mostly a flock
     // flying along with it, drifting in across a side, gliding down past the top edge or rising over a ridge. Where
     // no such path exists, the flock waits.
-    private func spawn(kind wanted: Kind, slot: Int, cam: SIMD3<Double>, camYaw: Double, pitch: Double) -> Bool {
+    private func spawn(kind wanted: Kind, slot: Int, cam: SIMD3<Double>, camYaw: Double, pitch: Double, isles: Bool = false) -> Bool {
         if wanted == .starling { return spawnMurmuration(slot: slot, cam: cam, camYaw: camYaw, pitch: pitch) }
         guard let s = sight else { return false }
         let roll = rand()
@@ -416,7 +419,10 @@ final class Wildlife {
             var fl = Wildlife.flight(kind)
             // Flying in they go near their top speed, so some can keep pace with the camera; then raptors circle, bats
             // jink about where they arrived, and the rest settle to their own pace and the camera overtakes them.
-            let cruise = fl.maxSpeed * (0.92 + 0.08 * pace)
+            // Among islands a raptor at its top speed could not overtake the frame's edges as the camera closes on them,
+            // so none would reach an island to circle it: it glides in at three quarters of the camera's pace.
+            let glide = kind == .raptor && isles
+            let cruise = max(fl.maxSpeed * (0.92 + 0.08 * pace), glide ? 0.75 * simd_length(SIMD2(camVel.x, camVel.z)) : 0)
             let spread: Double = kind == .raptor ? 25 : 6 + Double(n) * 0.4
             let size = fl.span * 1.12
             // The start: out past a side or the top of the frame, or (one in five) low inside it, hoping for a hill
@@ -469,6 +475,7 @@ final class Wildlife {
             let f = Flock(kind: kind, slot: slot, anchor: start, heading: heading, speed: cruise, altitude: start.y, life: life, seedPhase: seedPhase)
             f.serial = nextId
             f.cruise = cruise
+            f.glide = glide
             f.hold = kind == .raptor ? hold : (kind == .bat ? 2.5 : fl.speed * pace)
             f.transit = (o.enter + o.leave) / 2
             f.climb = o.v.y
@@ -674,7 +681,7 @@ final class Wildlife {
             var best: IslandInfo?, bd = Double.infinity
             for s in islesAt() where s.radius >= 40 && s.radius <= 320 {
                 let l = simd_length(ap - s.pos)
-                if l < s.reach + 450 && l < bd { bd = l; best = s }
+                if l < s.reach + 900 && l < bd { bd = l; best = s }
             }
             if let s = best {
                 let d = ap - s.pos, fd = SIMD2(sin(f.heading), cos(f.heading))
@@ -837,7 +844,8 @@ final class Wildlife {
 
             b.vel += acc * dt
             var s = simd_length(b.vel)
-            if s > fl.maxSpeed { b.vel *= fl.maxSpeed / s; s = fl.maxSpeed }
+            let top = f.glide ? max(fl.maxSpeed, f.speed) : fl.maxSpeed
+            if s > top { b.vel *= top / s; s = top }
             if s < fl.minSpeed { b.vel = (s > 1e-3 ? b.vel / s : SIMD3(sin(f.heading), 0, cos(f.heading))) * fl.minSpeed; s = fl.minSpeed }
             // Birds climb and dive at modest angles.
             let maxY = 0.45 * s
