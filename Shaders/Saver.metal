@@ -7542,8 +7542,9 @@ static inline float cloudShadow(thread const Ctx& x, float3 p, float3 L) {
     if (L.y <= 0.02 || p.y >= CLOUD_Y1) return 1.0;
     float2 q = p.xz + L.xz / L.y * (CLOUD_Y - p.y) + float2(x.origin);
     float dens = cloudFineBaked(x, q) + cloudSlowBaked(x, q);
-    // Land inside the slab is in its cloud; land above it is in sunlight.
-    return mix(1.0, mix(0.6, 0.32, smoothstep(0.3, 0.5, L.y)), smoothstep(0.0, 0.14, dens) * smoothstep(CLOUD_Y1, CLOUD_Y0, p.y));
+    // Land inside the slab is in its cloud; land above it is in sunlight. The shade fades out as the sun nears the
+    // horizon: at L.y 0.02 it cut off at 40% and the whole land flashed as the sun crossed it.
+    return mix(1.0, 0.32, smoothstep(0.02, 0.5, L.y) * smoothstep(0.0, 0.14, dens) * smoothstep(CLOUD_Y1, CLOUD_Y0, p.y));
 }
 
 // MARK: - Shadow-height maps
