@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# The shooting stars meteor() in Shaders/Saver.metal draws for a seed, timed against the live sky clock (SkyClock in
-# Sources/Renderer.swift, stepped at 60 Hz from the saver's start). The hashes and constants must match the shader.
+# The shooting stars meteor() in Shaders/Saver.metal draws for a seed, timed against the live sky clock (skyclock.py,
+# stepped at 60 Hz from the saver's start). The hashes and constants must match the shader.
 #   tools/sky/meteors.py <seed> <from s> <to s>   every meteor in a range: start, duration, screen start, brightness
 #   tools/sky/meteors.py <seed> --nights N        meteors per night and the gaps between them over the first N nights
-import math
 import sys
+
 import numpy as np
+
+from skyclock import advance, elevation
 
 M = 0xffffffff
 SLOT = 30.0
@@ -30,12 +32,8 @@ def nights(seconds):
     """L.night at each 1/60 s from the saver's start."""
     phase, out = -0.035, np.zeros(int(seconds / DT) + 1)
     for i in range(len(out)):
-        w = math.sin(2 * math.pi * phase)
-        y = w * (0.42 if w > 0 else 0.56) + 0.07
-        out[i] = smooth(-0.04, -0.20, y)
-        s = min(max((abs(y) - 0.22) / 0.35, 0), 1)
-        warp = 5.0 if y < -0.25 else 0.5 + 1.5 * s * s * (3 - 2 * s)
-        phase += DT / 720 * warp * 1.05
+        out[i] = smooth(-0.04, -0.20, elevation(phase))
+        phase = advance(phase, DT)
         if phase > 1:
             phase -= 1
     return out
