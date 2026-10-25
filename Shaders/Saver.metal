@@ -6918,7 +6918,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     if (bio && !underGap && !built && !(isleBody && n.y <= 0)) {
         float d = max(smoothstep(0.1, 0.5, provinceAmount(c)), smoothstep(0.25, 0.55, c.moist)) * smoothstep(0.18, 0.4, c.temp)
                 * (1.0 - smoothstep(0.1, 0.4, desert)) * (1.0 - rimW) * (1.0 - 0.5 * painted) * (1.0 - wallM)
-                * (1.0 - smoothstep(SEA + 60.0, SEA + 150.0, H)) * (1.0 - smoothstep(snowline - 8.0, snowline, H));
+                * (1.0 - smoothstep(SEA + 60.0, SEA + 150.0, Hc)) * (1.0 - smoothstep(snowline - 8.0, snowline, Hc));
         if (d > 0.0) {
             float2 wp = p.xz + float2(mapOrigin);
             float g = bioNoise(wp / 170.0, seed + 710u) + 0.5 * bioNoise(wp / 47.0, seed + 711u);
