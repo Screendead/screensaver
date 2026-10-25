@@ -27,32 +27,29 @@ package final class Terrain {
 
     // Conservative (4x4 max) height in world coords.
     package func height(x: Double, z: Double) -> Double? {
-        let s = MapLayout.size >> MapLayout.cpuLevel
-        let cx = Int(floor((x - Double(origin.x)) / Double(1 << MapLayout.cpuLevel)))
-        let cz = Int(floor((z - Double(origin.y)) / Double(1 << MapLayout.cpuLevel)))
-        guard cx >= 0, cz >= 0, cx < s, cz < s, !heights.isEmpty else { return nil }
-        return Double(heights[cz * s + cx])
+        cell(x, z).map { Double(heights[$0]) }
     }
 
     // The 4x4 cell under world (x, z) as islands shape it: its highest top, its highest ground islands aside, and the
     // lowest island underside over it (nil: no island).
     package func column(x: Double, z: Double) -> (top: Double, ground: Double, under: Double?)? {
-        let s = MapLayout.size >> MapLayout.cpuLevel
-        let cx = Int(floor((x - Double(origin.x)) / Double(1 << MapLayout.cpuLevel)))
-        let cz = Int(floor((z - Double(origin.y)) / Double(1 << MapLayout.cpuLevel)))
-        guard cx >= 0, cz >= 0, cx < s, cz < s, !under.isEmpty else { return nil }
-        let i = cz * s + cx
+        guard let i = cell(x, z) else { return nil }
         let u = Double(under[i])
         return (Double(heights[i]), Double(ground[i]), u < 4000 ? u : nil)
     }
 
     // Lower bound in world coords: every column of the 4x4 cell is solid from the ground up to at least this.
     func solidFloor(x: Double, z: Double) -> Double? {
+        cell(x, z).map { Double(floors[$0]) }
+    }
+
+    // The CPU cell under world (x, z); nil off the map, or before the first (the four arrays are filled together).
+    private func cell(_ x: Double, _ z: Double) -> Int? {
         let s = MapLayout.size >> MapLayout.cpuLevel
         let cx = Int(floor((x - Double(origin.x)) / Double(1 << MapLayout.cpuLevel)))
         let cz = Int(floor((z - Double(origin.y)) / Double(1 << MapLayout.cpuLevel)))
-        guard cx >= 0, cz >= 0, cx < s, cz < s, !floors.isEmpty else { return nil }
-        return Double(floors[cz * s + cx])
+        guard cx >= 0, cz >= 0, cx < s, cz < s, !heights.isEmpty else { return nil }
+        return cz * s + cx
     }
 
     // Whether the jungle province reaches each point of a 64-voxel grid over the map at `origin`.
