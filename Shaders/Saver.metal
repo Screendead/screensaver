@@ -5945,6 +5945,7 @@ struct Light {
     float3 key;     // direction to the current key light (sun, afterglow or moon)
     float3 keyCol;
     bool shadows;
+    float shade;    // how much of its shadows land: fades in with the sun from the afterglow's handover
     float3 zenith;   // terrain/cloud fill
     float3 horizon;
     float3 skyZen;   // sky radiance, kept darker and more saturated than the fill so twilight skies hold colour
@@ -6006,9 +6007,13 @@ static Light makeLight(float3 sunDir, uint seed, float nightIndex, float3 planet
     L.planetReach = planetPx.z + 0.5;
     L.planetAmt = smoothstep(0.02, -0.05, e);
     if (e > -0.02) {
-        L.key = sunDir;
+        // Held at the afterglow's height until the sun clears it, and its shadows faded in: the key dropped from 0.05
+        // to the sun's -0.02 at the handover, shadows switched on there and again at 0 (the maps bake only for a light
+        // above the horizon), and sunlit faces darkened by a tenth in one frame each time. Must match Renderer.keyLight.
+        L.key = e >= 0.05 ? sunDir : normalize(float3(sunDir.x, 0.05, sunDir.z));
         L.keyCol = sunCol * L.sunAmt + float3(1.3, 0.5, 0.3) * 0.4 * (1.0 - L.sunAmt);
         L.shadows = true;
+        L.shade = smoothstep(-0.02, 0.03, e);
     } else {
         // Below the horizon an afterglow from the sun's azimuth hands over to the moon.
         float3 glowDir = normalize(float3(sunDir.x, 0.05, sunDir.z));
@@ -6017,6 +6022,7 @@ static Light makeLight(float3 sunDir, uint seed, float nightIndex, float3 planet
         L.key = normalize(mix(glowDir, L.moon, m));
         L.keyCol = mix(glowCol, float3(0.60, 0.66, 0.80) * L.night * L.moonAmt, m);
         L.shadows = m > 0.5;
+        L.shade = 1.0;
     }
     return L;
 }
@@ -8558,6 +8564,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         if (wf2 > 0.0 && !planar) sh = mix(sh, min(sh, stairShadow(x.tr, k, p.xz, s.gy, L.key, d, contact, 0.35, fp > 3.0 || shadows == 2)), wf2);
         float floorSh = mix(mix(0.5, 0.25, hiSun), 0.32, L.gold);
         sh = mix(sh, floorSh + (1.0 - floorSh) * sh, wf);
+        if (L.shade < 1.0) sh = mix(1.0, sh, L.shade);
         shRay = sh;
         sh = mix(sh, 1.0, 0.3 * L.night);
         // After the lifts, which stand for light slipping between distant steps: none slips under a roof.
@@ -10332,6 +10339,7 @@ static float3 shadeVine(thread const Ctx& x, thread const Light& L, float3 o, fl
         sh = min(sh, mapLit);
         float floorSh = mix(mix(0.5, 0.25, hiSun), 0.32, L.gold);
         sh = mix(sh, floorSh + (1.0 - floorSh) * sh, wf);
+        if (L.shade < 1.0) sh = mix(1.0, sh, L.shade);
         sh = mix(sh, 1.0, 0.3 * L.night);
     }
     if (!(x.prof & 32) && L.sunAmt > 0.0) sh *= mix(1.0, cloudShadow(x, p, L.key), L.sunAmt);
@@ -10655,7 +10663,7 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
         under *= float(life.underMul);
         col = mix(under, refl, fres) + float3(life.add);
         // Glitter path toward the sun or moon: the main EDR highlight.
-        col += x.L.keyCol * 6.0 * pow(max(dot(r, x.L.key), 0.0), mix(mix(900.0, 7000.0, x.L.night), 350.0, x.L.gold)) * fres * (x.L.shadows ? 1.0 : 0.3) * (1.0 + 0.5 * x.L.night) * open;
+        col += x.L.keyCol * 6.0 * pow(max(dot(r, x.L.key), 0.0), mix(mix(900.0, 7000.0, x.L.night), 350.0, x.L.gold)) * fres * (x.L.shadows ? (x.L.shade < 1.0 ? mix(0.3, 1.0, x.L.shade) : 1.0) : 0.3) * (1.0 + 0.5 * x.L.night) * open;
         // Golden hour: a broad sheen of the aureole on the water under the sun.
         col += x.L.keyCol * 0.5 * pow(max(dot(r, x.L.key), 0.0), 40.0) * fres * x.L.gold * open;
         if (x.L.night > 0.0 && open > 0.0) {
