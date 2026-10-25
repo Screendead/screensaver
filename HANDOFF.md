@@ -35,6 +35,7 @@ The flight runs at twice its old speed (11-30 voxels/s by height, Jack's call 20
 
 1. **What is missing when you don't use it?** If there are days the saver isn't running, or you turn it off, say why (too hot, too slow on battery, a fault, a scene you tire of). Each answer becomes the next step.
 2. **Unmerged branches.** Should `strata/islands2` (floating islands) and the other unmerged branches above be finished or archived?
+3. **Aurora nights (prototype, `strata/idea-aurora-nights`).** About one night in four (hashed from the night index and seed) a faint pleated green-to-violet curtain hangs 7-19 degrees up toward a bearing fixed per seed, behind clouds and mirrored faintly in water; it builds after the stars are out and is gone before dawn. Byte-identical by day and on other nights; on an aurora night +0.1 ms on mains (noise). Keep, tune or drop? Next step if kept: a live look on the laptop, then merge.
 
 ## Bug reports (triaged 2026-10-24)
 
