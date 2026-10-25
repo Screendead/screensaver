@@ -4,10 +4,11 @@ import StrataCore
 import simd
 
 extension World {
-    static var logSites: Bool { Knobs.current.sites }
+    // A map's CPU copy (Terrain's arrays), and the highest top on it.
+    typealias Readback = (heights: [Float], floors: [Float], ground: [Float], under: [Float], top: Float)
 
     // The CPU copy's heights are 4x4 maxima of the column tops, so their maximum is the map's.
-    static func readBack(_ cpu: MTLTexture) -> (heights: [Float], floors: [Float], ground: [Float], under: [Float], top: Float) {
+    static func readBack(_ cpu: MTLTexture) -> Readback {
         let s = MapLayout.size >> MapLayout.cpuLevel
         var raw = [Float16](repeating: 0, count: s * s * 4)
         cpu.getBytes(&raw, bytesPerRow: s * 8, from: MTLRegionMake2D(0, 0, s, s), mipmapLevel: 0)

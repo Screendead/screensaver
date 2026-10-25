@@ -184,77 +184,17 @@ extension World {
         guard done else { cb.commit(); return 0 }
 
         let index = j.index, o = j.origin, t0 = j.t0
-        // Strong captures: a weak reference would give World a side table, which slows every retain of it (the camera
-        // and the birds look heights up thousands of times a frame).
-        let finish = { (r: (heights: [Float], floors: [Float], ground: [Float], under: [Float], top: Float)) in
-            buf.origin = o
-            buf.globalMax = r.top + 1
-            let terrain = self.terrain
-            terrain.sites = MapTables.sites(in: buf.sites.contents())
-            terrain.lamps = Dictionary(terrain.sites.flatMap { $0.lamps.map { ($0.index, $0) } }, uniquingKeysWith: { $1 })
-            terrain.giants = MapTables.giants(in: buf.giants.contents())
-            terrain.isles = Islands.parse(buf.isles.contents())
-            terrain.caves = MapTables.caves(in: buf.giants.contents())
-            if let e = Knobs.current.env["VR_CAVES"] {
-                let mid = SIMD2<Float>(Float(o.x), Float(o.y)) + Float(MapLayout.size / 2)
-                let r = Float(e) ?? 1500
-                for c in terrain.caves.filter({ simd_length($0.m - mid) < r }).sorted(by: { simd_length($0.m - mid) < simd_length($1.m - mid) }) {
-                    print(String(format: "cave at (%.0f, %.0f) floor %.0f in (%.2f, %.2f) W %.1f L %.0f H %.0f%@%@%@", c.m.x, c.m.y, c.yF, c.u.x, c.u.y, c.w, c.l, c.hc,
-                                 c.flags & 2 != 0 ? " home" : "", c.flags & 4 != 0 ? " grotto" : "", c.flags & 8 != 0 ? " lowland" : ""))
-                }
-                print("caves in table: \(terrain.caves.count) (lowland \(terrain.caves.filter { $0.flags & 8 != 0 }.count)), within \(Int(r)): \(terrain.caves.filter { simd_length($0.m - mid) < r }.count)")
-            }
-            terrain.jungleGrid = stride(from: 0, through: MapLayout.size, by: 64).flatMap { z in
-                stride(from: 0, through: MapLayout.size, by: 64).map { x in
-                    Provinces.at(Double(Int(o.x) + x), Double(Int(o.y) + z), seed: self.seed).0 > 0.1
-                }
-            }
-            terrain.jungle = terrain.jungleGrid.contains(true)
-            if World.logSites {
-                for g in terrain.giants { print(String(format: "giant at (%.0f, %.0f) ground %.0f top %.0f kind %d", g.pos.x, g.pos.y, g.ground, g.top, g.kind)) }
-            }
-            if World.logSites {
-                var counts = [Int](repeating: 0, count: 8)
-                for site in terrain.sites { counts[site.kind.rawValue] += 1 }
-                if Knobs.current.env["VR_SITES"] == "3" {
-                    // Parts as kind (2 house, 10 round) and dwelling style.
-                    let raw = buf.sites.contents()
-                    for site in terrain.sites {
-                        let base = raw + site.index * MapLayout.siteStride
-                        let np = Int((base + 16).load(as: SIMD4<Float>.self).z)
-                        var desc = ""
-                        for k in 0..<np {
-                            let v = (base + 32 + 16 * MapLayout.maxLamps + 16 * k).load(as: SIMD4<Int32>.self)
-                            let kind = (v.y >> 16) & 0xff, style = (v.w >> 28) & 15
-                            desc += kind == 2 || kind == 10 ? " p\(kind)s\(style)" : kind == 11 ? " p11t\(v.z >> 16)" : " p\(kind)"
-                        }
-                        print("  site \(site.kind) \(Int(site.pos.x)),\(Int(site.pos.y)) r\(Int(site.radius)) lamps \(site.lamps.count)\(desc)")
-                    }
-                }
-                print("sites at (\(o.x),\(o.y)): henge \(counts[1]) cairn \(counts[2]) ruins \(counts[3]) hamlet \(counts[4]) jetty \(counts[5]) camp \(counts[6]) cave \(counts[7]) total \(terrain.sites.count)")
-            }
-            // Frames in flight hold the map they read until they complete.
-            if index != self.active { self.buffers[self.active] = nil }
-            self.active = index
-            self.scratch = nil
-            terrain.origin = o
-            terrain.heights = r.heights
-            terrain.floors = r.floors
-            terrain.ground = r.ground
-            terrain.under = r.under
-            self.pending = false
-            if Renderer.logTiming { print(String(format: "world regen %.1f ms (%@)", (CACurrentMediaTime() - t0) * 1000, wait ? "sync" : "async")) }
-        }
         if wait {
             cb.commit()
             cb.waitUntilCompleted()
-            finish(World.readBack(cpuMips.last!))
+            land(World.readBack(cpuMips.last!), into: buf, index: index, origin: o, started: t0, sync: true)
             return (cb.gpuEndTime - cb.gpuStartTime) * 1000
         } else {
+            // Strong captures: a weak reference would give World a side table, which slows every retain of it.
             cb.addCompletedHandler { cb in
                 guard cb.status == .completed else { DispatchQueue.main.async { self.pending = false }; return }
                 let r = World.readBack(self.cpuMips.last!)
-                DispatchQueue.main.async { finish(r) }
+                DispatchQueue.main.async { self.land(r, into: buf, index: index, origin: o, started: t0, sync: false) }
             }
             cb.commit()
         }

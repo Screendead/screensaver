@@ -55,6 +55,15 @@ package final class Terrain {
         return Double(floors[cz * s + cx])
     }
 
+    // Whether the jungle province reaches each point of a 64-voxel grid over the map at `origin`.
+    package static func jungleReach(origin o: SIMD2<Int32>, seed: UInt32) -> [Bool] {
+        stride(from: 0, through: MapLayout.size, by: 64).flatMap { z in
+            stride(from: 0, through: MapLayout.size, by: 64).map { x in
+                Provinces.at(Double(Int(o.x) + x), Double(Int(o.y) + z), seed: seed).0 > 0.1
+            }
+        }
+    }
+
     // Whether a flagged cell of the map's band mips (under a giant's crown or the jungle's roof) may lie within r of
     // world xz p.
     package func bandsNear(_ p: SIMD2<Double>, radius r: Double) -> Bool {
