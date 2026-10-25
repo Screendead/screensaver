@@ -1,6 +1,3 @@
-static inline float snowlineAt(float temp);
-static inline float altitudeTemp(float temp, float H);
-
 // Finds a cave on a cliff at P: the steepest rise along the fall line through it (a riser of a range's cliff band, a
 // karst tower's or tepui's wall, an escarpment), its foot the floor, rock behind deep enough to roof it.
 static bool caveTry(float2 P, uint h, uint seed, thread CaveRec& r) {

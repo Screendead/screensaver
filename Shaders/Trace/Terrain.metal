@@ -55,12 +55,6 @@ struct Terrain {
 
 static inline int2 levelOrigin(thread const Terrain& tr, int k) { return k == 0 ? int2(0) : tr.origin >> k; }
 
-// Max height of mip-m cell mc (in the level's own aligned cell index).
-static inline float maxAt(thread const Terrain& tr, int k, int2 mc, int m) {
-    if (k == 0) return abs(tr.hx.read(uint2(clamp(mc, int2(0), int2((tr.size >> m) - 1))), m).r);
-    return abs(tr.ch.read(uint2(mc & ((COARSE_N >> m) - 1)), uint(k - 1), uint(m)).r);
-}
-
 // Whether column c's principal gap (col: columnL) is an island's air: on the 1-voxel map a rock gap at least ISLE_AIR
 // tall (no other gap is), further out its floor's sign.
 static inline bool isleGapL(thread const Terrain& tr, int k, int2 c, float4 col) {
@@ -106,11 +100,6 @@ static inline float groundSmoothL(thread const Terrain& tr, int k, float2 p, flo
 }
 // As the sea sees it: under an island, the bed.
 static inline float groundSmoothL(thread const Terrain& tr, int k, float2 p) { return groundSmoothL(tr, k, p, SEA); }
-
-static inline float coverL(thread const Terrain& tr, int k, int2 c) {
-    if (k == 0) return 0.0;
-    return tr.cv.read(uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1)), uint(k - 1), 0).r;
-}
 
 // (cover, depth of the leaves under the column's top in voxels: coarseVeg; 64 on a giant's columns) of coarse column c.
 static inline float2 coverDepthL(thread const Terrain& tr, int k, int2 c) {

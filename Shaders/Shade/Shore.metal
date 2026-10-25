@@ -1,5 +1,3 @@
-static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, int mistSamples = -1);
-
 // The swash on a beach tread just above the sea: x wetness out to the wash's highest reach, y the film of a wash that
 // has just run up, z its foam front. Zero beyond the 1-voxel map's near ring, where the band is under a pixel.
 static float3 shoreWash(thread const Ctx& x, float3 p, float H, float fp) {

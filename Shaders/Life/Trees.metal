@@ -30,7 +30,27 @@ static inline float groveDensity(float2 w, float g, uint seed) {
 
 struct Tree { bool ok; int2 c; float g; int lo; int top; int kind; };
 
-static Tree treeShape(Tree t, uint h, Climate c, float dense, float2 w, uint seed);
+// A planted tree's kind and leaf span from its hash h, the climate c and grove density at its trunk w (world); t.g is
+// its ground. Also builds the coarse rings' trees (coarseVeg).
+static Tree treeShape(Tree t, uint h, Climate c, float dense, float2 w, uint seed) {
+    uint r = pcg(h + 5u);
+    // 0 shrub, 1 small round, 2 round, 3 conifer, 4 birch.
+    if (paintedAmount(c) > 0.3) t.kind = 0;
+    else if (autumnAmount(c) > 0.3 && birchAmount(w, seed) > 0.5) t.kind = 4;
+    else if (hashf(r) < coniferAmount(c)) t.kind = 3;
+    else if (dense < 0.15) t.kind = int(hashf(pcg(r)) * 3.0);
+    else t.kind = hashf(pcg(r)) < 0.3 ? 1 : 2;
+    // A lone one-voxel shrub on open sand or salt reads as debris.
+    if (t.kind == 0 && (saltAmount(c) > 0.02 || lagoonAmount(c) > 0.2 || desertAmount(c) > 0.3)) return t;
+    int g = int(t.g);
+    if (t.kind == 0) { t.lo = g; t.top = g + 1 + int(r >> 30 & 1u); }
+    else if (t.kind == 1) { t.lo = g + 2 + int(r >> 29 & 1u); t.top = t.lo + 3; }
+    else if (t.kind == 2) { t.lo = g + 2 + int(r >> 29 & 1u); t.top = t.lo + 4; }
+    else if (t.kind == 4) { t.lo = g + 3 + int(r >> 29 & 1u); t.top = t.lo + 5; }
+    else { t.lo = g + 1; t.top = g + 6 + int(r >> 28 & 3u); }
+    t.ok = true;
+    return t;
+}
 
 static Tree treeInCell(texture2d<float, access::read> src, texture2d<uint, access::read_write> gx, int2 cell, int2 origin, uint seed) {
     Tree t;
@@ -65,28 +85,6 @@ static Tree treeInCell(texture2d<float, access::read> src, texture2d<uint, acces
     Climate c = climate(w, seed);
     c.temp = altitudeTemp(c.temp, t.g);
     return treeShape(t, h, c, dense, w, seed);
-}
-
-// A planted tree's kind and leaf span from its hash h, the climate c and grove density at its trunk w (world); t.g is
-// its ground. Also builds the coarse rings' trees (coarseVeg).
-static Tree treeShape(Tree t, uint h, Climate c, float dense, float2 w, uint seed) {
-    uint r = pcg(h + 5u);
-    // 0 shrub, 1 small round, 2 round, 3 conifer, 4 birch.
-    if (paintedAmount(c) > 0.3) t.kind = 0;
-    else if (autumnAmount(c) > 0.3 && birchAmount(w, seed) > 0.5) t.kind = 4;
-    else if (hashf(r) < coniferAmount(c)) t.kind = 3;
-    else if (dense < 0.15) t.kind = int(hashf(pcg(r)) * 3.0);
-    else t.kind = hashf(pcg(r)) < 0.3 ? 1 : 2;
-    // A lone one-voxel shrub on open sand or salt reads as debris.
-    if (t.kind == 0 && (saltAmount(c) > 0.02 || lagoonAmount(c) > 0.2 || desertAmount(c) > 0.3)) return t;
-    int g = int(t.g);
-    if (t.kind == 0) { t.lo = g; t.top = g + 1 + int(r >> 30 & 1u); }
-    else if (t.kind == 1) { t.lo = g + 2 + int(r >> 29 & 1u); t.top = t.lo + 3; }
-    else if (t.kind == 2) { t.lo = g + 2 + int(r >> 29 & 1u); t.top = t.lo + 4; }
-    else if (t.kind == 4) { t.lo = g + 3 + int(r >> 29 & 1u); t.top = t.lo + 5; }
-    else { t.lo = g + 1; t.top = g + 6 + int(r >> 28 & 3u); }
-    t.ok = true;
-    return t;
 }
 
 // Leaf interval [lo, hi) a tree contributes to the column at offset o from its trunk; empty if lo >= hi.

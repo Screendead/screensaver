@@ -133,9 +133,6 @@ static float2 coarseVeg(int2 cw, int k, float4 hs4, float H, uint seed, thread c
 
 // Mip 1 of the 1-voxel map also bounds the level-1 column over it, which the morph band slides toward: the
 // four raw columns combined as coarseHeight combines them.
-static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantRec* giants, device const IsleRec* isles, thread float2& g2, thread float& depth);
-static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantRec* giants, device const IsleRec* isles) { float2 g2; float dp; return coarseColumn(cw, k, seed, giants, isles, g2, dp); }
-
 kernel void reduceMaxBase(texture2d<float, access::read> src [[texture(0)]],
                           texture2d<float, access::read> raw [[texture(1)]],
                           texture2d<float, access::write> dst [[texture(2)]],

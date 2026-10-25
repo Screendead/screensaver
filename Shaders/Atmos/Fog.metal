@@ -17,7 +17,7 @@ static inline float airAloft(float y) { return exp(-max(y - 120.0, 0.0) / 400.0)
 
 // Exponential height fog plus a slow-drifting noise modulation that pools mist in valleys.
 // mistSamples < 0 takes the quality's count; 0 leaves out the valley mist (the closed-form terms only).
-static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, int mistSamples) {
+static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, int mistSamples = -1) {
     float hf = 30.0;
     float a = 0.0009, c2 = 1.3e-6;
     // Air: the near haze saturates into a thin linear tail, so far ranges read as layered haze rather than vanish.

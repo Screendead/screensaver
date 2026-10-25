@@ -41,8 +41,6 @@ static inline float2 columnBand(texture2d<float, access::read> src, texture2d<ui
     return b;
 }
 
-static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantRec* giants, device const IsleRec* isles, thread float2& g2, thread float& depth);
-
 // A band texel's floor and whether it holds for every morph toward level 1 (stored as -1 - floor), so the trace may use
 // it inside the morph band too.
 static inline float2 bandLo(float x) { return x < 0.0 ? float2(-1.0 - x, 1.0) : float2(x, 0.0); }

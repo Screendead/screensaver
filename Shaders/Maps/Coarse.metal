@@ -159,6 +159,7 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
     // An island's air is flagged by its floor's sign (columnL and parentGap read the magnitude).
     return float3(Hv, isl ? -lo : lo, hi);
 }
+static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantRec* giants, device const IsleRec* isles) { float2 g2; float dp; return coarseColumn(cw, k, seed, giants, isles, g2, dp); }
 
 // Writes the world cells region.xy + [0, region.zw) of level info.x into its toroidal slice (texel = cell & 2047):
 // height and canopy cover, and every second cell also the half-resolution climate texel it starts.

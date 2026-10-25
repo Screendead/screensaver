@@ -1,3 +1,6 @@
+// Surface of level k's column v (xz in level cells) on face n; uv is the face position in [0, 1) of the column.
+// Coarse columns are s voxels wide but still unit voxels tall, and carry no structures.
+// lite: seen in rippled water, so detail finer than the ripples' blur is shaded at its mean.
 static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device const Site* sites, device const float4* lampState,
                          int k, int3 v, int3 n, float2 uv, float fp, float fpA, float3 p, uint seed, float time, bool lite = false,
                          bool bio = false) {

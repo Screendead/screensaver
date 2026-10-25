@@ -1,9 +1,3 @@
-// Surface of level k's column v (xz in level cells) on face n; uv is the face position in [0, 1) of the column.
-// Coarse columns are s voxels wide but still unit voxels tall, and carry no structures.
-// lite: seen in rippled water, so detail finer than the ripples' blur is shaded at its mean.
-static inline float3 bioHue(float2 w, uint seed);
-static inline float bioPulse(float2 w, float t, uint seed, float warp);
-
 // A cave's dressing at world xz wq, height wy on a face of terrain column w: in green country (green 0...1) moss on its
 // floor and the foot of its walls toward the light, ferns in the moss, ivy hanging over the mouth and roots under its lip;
 // deep in, a few mosses glowing at night; and how much of the sky and the bounce its depth keeps from the face (s.cave).
