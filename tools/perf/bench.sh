@@ -1,7 +1,7 @@
 #!/bin/zsh
 # A/B GPU timing over fixed scenes (twelve, two floating-island ones and a close beach): VR_BENCH=12 stills at 3456x2234 scale 1 per scene and build, the build order
 # rotating each round, reporting each scene's minimum gpu ms per build. Run it inside the exclusive lock:
-#   tools/vrgpu --time -- tools/bench.sh ROUNDS "label=app label=app" [scene filter regex]
+#   tools/vrgpu --time -- tools/perf/bench.sh ROUNDS "label=app label=app" [scene filter regex]
 # A label of the form name@prof=app runs that build with VR_PROFILE=prof; PROFILE=... in the environment applies to all.
 # Copy each build's app aside first (e.g. into build/bench/), since make overwrites build/VoxelReverie.app.
 # BATTERY=1 runs every scene on the battery path (--battery). BENCH_SCENES replaces the scene list with its own
@@ -11,7 +11,7 @@ pairs=(${=2})
 F=${3:-.}
 labels=() apps=()
 for p in $pairs; do labels+=(${p%%=*}); apps+=(${p#*=}); done
-D=${BENCH_OUT:-${0:A:h}/../build/bench}
+D=${BENCH_OUT:-${0:A:h:h:h}/build/bench}
 mkdir -p $D
 RAW=$D/bench_raw_$$.txt
 : > $RAW

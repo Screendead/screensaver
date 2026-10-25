@@ -60,3 +60,4 @@ Live frame times are measured at `--size 3456x2234 --scale 1`: the scene renders
 - `Sources/Camera.swift`: valley- and ridge-following autopilot with a pitch cycle, so the horizon sweeps the whole screen.
 - `Shaders/Saver.metal`: noise, terrain generation, the quadtree voxel DDA, shading, sky, clouds, fog, water, and the temporal and EDR post passes.
 - `tools/golden.sh`: output regression check; renders a fixed set and compares sha256s with `tests/golden/manifest.sha256` (`tests/fixtures/golden_path.txt` is its recorded-path replay).
+- `tools/`: `vrgpu` (the shared GPU lock) and `vrr` (the warm render server), the render sets `render.sh` and `golden.sh`; `perf/` GPU and battery timing (`bench.sh`, `soak.sh`, `powersoak`); `frames/` measures and stacks rendered frame sequences; `sky/` mirrors the sky clock (VR_PATH files, the meteor schedule).

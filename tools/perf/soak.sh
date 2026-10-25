@@ -1,10 +1,10 @@
 #!/bin/zsh
 # Soak test off screen: flies the autopilot frame by frame on mains and on battery, then approaches two caves, logging
 # each frame's GPU time. Nothing opens on screen. Runs under the exclusive GPU lock, so the times are comparable.
-# Usage: tools/soak.sh [out dir, default build/soak] [app, default build/VoxelReverie.app] [seed, default 1]
+# Usage: tools/perf/soak.sh [out dir, default build/soak] [app, default build/VoxelReverie.app] [seed, default 1]
 set -euo pipefail
-here=${0:A:h}
-out=${1:-$here/../build/soak} app=${2:-$here/../build/VoxelReverie.app} seed=${3:-1}
+tools=${0:A:h:h}
+out=${1:-$tools/../build/soak} app=${2:-$tools/../build/VoxelReverie.app} seed=${3:-1}
 bin=$app/Contents/MacOS/voxelreverie
 mkdir -p "$out"
 cat > "$out/run.sh" <<EOF
@@ -24,7 +24,7 @@ VR_CAVE=300,10,0,0,1 VR_DOLLY=1 VR_BENCH=280 VR_CHUNKED=1 "$bin" --screenshot ca
     --seed $seed --times 600 > cave_home.log
 EOF
 chmod +x "$out/run.sh"
-"$here/vrgpu" --time -- "$out/run.sh"
+"$tools/vrgpu" --time -- "$out/run.sh"
 python3 -I - "$out" <<'EOF'
 import re, statistics, sys, glob, os
 for f in sorted(glob.glob(sys.argv[1] + '/*.log')):

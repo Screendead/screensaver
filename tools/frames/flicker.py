@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Frame-to-frame flicker in a sequence of PNGs (a clip's decoded frames or VR_PATH / VR_FRAMES renders).
-# Usage: tools/flicker.py <dir or glob> [--dark Y] [--step N] [--crop WxH] [--skip n] [--vs <dir or glob> [--vsdiff D]] (n leading frames, e.g. bugclip's warm-up)
+# Usage: tools/frames/flicker.py <dir or glob> [--dark Y] [--step N] [--crop WxH] [--skip n] [--vs <dir or glob> [--vsdiff D]] (n leading frames, e.g. bugclip's warm-up)
 # Per frame pair, on BT.709 luma in 8-bit levels: "flip" is the share of pixels that change by at least N levels;
 # "blink" the share that jump at least N away from both neighbours in the same direction (a one-frame pop, which
 # smooth camera motion rarely makes). Dark is pixels whose mean luma over the sequence is under Y, in the lower
