@@ -1,5 +1,5 @@
-// Kernels that expose the shader's own functions, constants and layouts to ShaderContractTests, which builds this file
-// against Shaders/ at test time. Never part of the app's metallib.
+// Kernels that expose the shader's own functions, constants and layouts to ShaderFunctionTests and ShaderLayoutTests,
+// which build this file against Shaders/ at test time. Never part of the app's metallib.
 #include "Saver.metal"
 
 // x pcg(v), y hash2i((a, b), s), z pinnedBiome(v) for each (v, a, b, s).
@@ -35,7 +35,7 @@ kernel void probeLamp(device const uint4* in [[buffer(0)]], device float* out [[
     out[i] = lampLevel(int(q.w), pcg(q.x + q.y * 7717u), float4(-0.5, 0.5, float(int(q.z)), 0.0));
 }
 
-// The constants the CPU mirrors, in ShaderContractTests.constants' order.
+// The constants the CPU mirrors, in ShaderLayoutTests.constants' order.
 kernel void probeConstants(device float* out [[buffer(0)]]) {
     const float v[] = {
         SEA, float(SITE_GRID), float(SITE_CELL), float(MAX_LAMPS), float(MAX_PARTS), float(GIANT_WIN), GIANT_CELL,
@@ -50,7 +50,7 @@ kernel void probeConstants(device float* out [[buffer(0)]]) {
 #define SIZE(T) int(sizeof(T))
 #define AT(T, f) int(__builtin_offsetof(T, f))
 
-// Sizes and field offsets of the records the CPU writes or reads, in ShaderContractTests.layouts' order.
+// Sizes and field offsets of the records the CPU writes or reads, in ShaderLayoutTests.layouts' order.
 kernel void probeLayouts(device int* out [[buffer(0)]]) {
     const int v[] = {
         SIZE(Frame), AT(Frame, sunDir), AT(Frame, mapInfo), AT(Frame, lights), AT(Frame, refs), AT(Frame, birds), AT(Frame, lod),

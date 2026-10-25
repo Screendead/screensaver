@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # The shooting stars meteor() in Shaders/Saver.metal draws for a seed, timed against the live sky clock (SkyClock in
-# Sources/Renderer.swift, stepped at 60 Hz from the saver's start). The hashes and constants must match the shader.
+# Sources/StrataCore/Sky/SkyClock.swift, stepped at 60 Hz from the saver's start). The hashes and constants must match the shader.
 #   tools/meteors.py <seed> <from s> <to s>   every meteor in a range: start, duration, screen start, brightness
 #   tools/meteors.py <seed> --nights N        meteors per night and the gaps between them over the first N nights
 import math
