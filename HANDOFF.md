@@ -48,7 +48,7 @@ The flight runs at twice its old speed (11-30 voxels/s by height, Jack's call 20
 5. **Overnight pitches (2026-10-25), merged as PR #17.** Each has its own branch, pushed, with media in `build/overnight/` and a report page for Jack. Recommended picks in brackets:
    - **All picks in one merge: `strata/overnight-picks`** holds every branch below at its bracketed pick (cloud sea included), conflicts resolved, one PR away from master.
    - **Jack's picks: `strata/overnight-picks2`** is that bundle (with the cloud-sea gate) at Jack's answers where they differ from the brackets, marked "Jack:" below.
-   - Floating islands, `strata/islands3` (master merged in, conflicts reviewed): merge now [yes]; follow-ups: birds no longer circle islands at the doubled flight speed, island tops dark at night.
+   - Floating islands, `strata/islands3` (master merged in, conflicts reviewed): merge now [yes]; follow-ups: birds no longer circle islands at the doubled flight speed, island tops dark at night. Both were fixed on the branch before the merge (ff1774d circling raptors; 0a15650 and f94e8a0 the land glow on island tops). Rechecked on master 2026-10-25 (seed 303, phases 0.56 to 0.95): with the glow off an island top is as bright as open ground under the same moon, and with it on it glows like the lowland beneath it. The night hero still in the pitch media predates the fix.
    - Moon glints, `archive/strata-pitch-moon-glints`: A keep / B soft roll-off [B] / C finer. Jack: C.
    - Near-camera night glow, `archive/strata-pitch-near-glow`: A keep / B 40% lower near [B] / C plus slower pulse.
    - Sunrise clock, `archive/strata-pitch-slow-dawn`: A keep / B slow dawn in 12 min / C slow dawn, ~15-min day [C]. Jack: A, the 12-minute clock stays (slow dawn removed).
