@@ -30,6 +30,7 @@ struct Frame {
     var fade = SIMD4<Float>()
     var shadow = SIMD4<Float>()
     var slowCloud = SIMD4<Float>()
+    var planet = SIMD4<Float>()
 }
 
 // The shader library and its pipeline states, shared by the renderers of one activation (a screen each).
@@ -178,10 +179,21 @@ struct SkyClock {
         return w * (w > 0 ? 0.42 : 0.56) + 0.07
     }
 
-    var sunDirection: SIMD3<Double> {
+    static func direction(_ phase: Double) -> SIMD3<Double> {
         let el = asin(SkyClock.elevation(phase))
         let az = 2 * .pi * phase * 0.5 + 0.9
         return SIMD3(cos(el) * sin(az), sin(el), cos(el) * cos(az))
+    }
+
+    var sunDirection: SIMD3<Double> { SkyClock.direction(phase) }
+
+    // The evening star trails the sun along its path and sets this much later; the morning star leads it and rises
+    // this much earlier.
+    static let planetLag = 0.09
+
+    var planetDirection: SIMD3<Double> {
+        let evening = SkyClock.direction(phase - SkyClock.planetLag), morning = SkyClock.direction(phase + SkyClock.planetLag)
+        return evening.y > morning.y ? evening : morning
     }
 
     // Steps at mid-morning rather than at the dawn wrap, so a night keeps its beacons and rites until daylight.
@@ -1414,6 +1426,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         f.camRight = SIMD4(SIMD3<Float>(b.right), Float(simTime))
         f.camUp = SIMD4(SIMD3<Float>(b.up), battery ? 0 : 1)
         f.sunDir = SIMD4(SIMD3<Float>(clock.sunDirection), Float(clock.phase))
+        f.planet = SIMD4(SIMD3<Float>(clock.planetDirection), 0)
         f.resolution = SIMD4(Float(size.width), Float(size.height), Float(1 / Double(shadeHeight)), Float(1 / size.height))
         f.mapInfo = SIMD4(world.origin.x, world.origin.y, Int32(World.size), Int32(bitPattern: world.seed))
         f.misc = SIMD4(Float(exposure), world.globalMax, 0.6, Float(cloudCover))
