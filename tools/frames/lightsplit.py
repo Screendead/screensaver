@@ -4,7 +4,7 @@
 Reads the renders tools/frames/lightsplit.sh writes for one pose: <stem>.png (as seen), <stem>_v1.png (class view) and
 <stem>_v2.png ... _v8.png (VR_PROFILE=bits(16384 * view), see Shaders/Shade/Shade.metal), plus <stem>.txt (the render's
 log line, for exposure and sunY). Prints one row per class: pixel count, as-seen luminance, the terms, and each class's
-ratio to the ground's as-seen luminance.
+ratio to the ground's as-seen luminance. 'other' is as seen less the three terms: glow, fog (the term views are fogless) and the small extras.
 
 usage: lightsplit.py <stem> [<stem> ...]
 """
@@ -49,7 +49,7 @@ def main():
         v = {i: scene_linear(f"{stem}_v{i}.png", scale) for i in range(2, 9)}
         print(f"{stem.split('/')[-1]}  exposure {exp}  sunY {sun}")
         print(f"  {'class':11s} {'px':>6s} {'seen':>8s} {'/ground':>8s} {'key':>8s} {'fill':>8s} {'bounce':>8s} "
-              f"{'glow+':>8s} {'sv':>5s} {'roof':>5s} {'shadow':>6s} {'ao':>5s} {'isOcc':>5s} {'ndl':>5s} {'n.y':>5s} {'alb':>5s}")
+              f"{'other':>8s} {'sv':>5s} {'roof':>5s} {'shadow':>6s} {'ao':>5s} {'isOcc':>5s} {'ndl':>5s} {'n.y':>5s} {'alb':>5s}")
         ground = None
         rows = []
         for rgb, name in CLASSES.items():

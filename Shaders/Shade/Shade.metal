@@ -262,7 +262,9 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         float top = ndlR * max(shRay, 0.3 * ROOF_SKY) * L.night * roofW - ndl * sh;
         if (top > 0.0) col += albK * L.keyCol * top * mix(1.0, 1.1, L.night) * mix(float3(1.0), float3(0.40, 0.42, 0.47), deep);
     }
-    // VR_PROFILE=bits(16384 * view): the shading's terms one at a time (tools/frames/lightsplit.py reads them).
+#ifdef LIGHTSPLIT
+    // VR_PROFILE=bits(16384 * view): the shading's terms one at a time. Compiled only by tools/frames/lightsplit.sh: in
+    // the shipped shader the branch alone shifts a few pixels' rounding.
     if (x.prof >= 16384) {
         int view = x.prof >> 14;
         float3 deepF = mix(float3(1.0), float3(0.19, 0.23, 0.38), deep);
@@ -284,6 +286,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         if (view == 7) return float3(ndl, 0.5 + 0.5 * nl.y, keep);
         if (view == 8) return alb;
     }
+#endif
     // Low sun: up-facing treads take a warm sky-dome tint instead of going to charcoal.
     col += albK * L.keyCol * 0.07 * (1.0 - smoothstep(0.05, 0.35, L.key.y)) * saturate(nl.y) * (1.0 - L.night);
     // Backlit leaves: a low sun glows through the canopy edges facing away from it.
