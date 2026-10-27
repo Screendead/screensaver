@@ -4,7 +4,7 @@
 Reads the renders tools/frames/lightsplit.sh writes for one pose: <stem>.png (as seen), <stem>_v1.png (class view) and
 <stem>_v2.png ... _v8.png (VR_PROFILE=bits(16384 * view), see Shaders/Shade/Shade.metal), plus <stem>.txt (the render's
 log line, for exposure and sunY). Prints one row per class: pixel count, as-seen luminance, the terms, and each class's
-ratio to the ground's as-seen luminance. 'other' is as seen less the three terms: glow, fog (the term views are fogless) and the small extras.
+ratio to the ground's as-seen luminance. 'other' is as seen less the three terms: glow, fog and island mist (the term views have neither) and the small extras.
 
 usage: lightsplit.py <stem> [<stem> ...]
 """

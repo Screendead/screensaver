@@ -1,5 +1,6 @@
 #!/bin/zsh
-# Renders one pose for tools/frames/lightsplit.py: as seen, then each VR_PROFILE term view (fog off), all undithered.
+# Renders one pose for tools/frames/lightsplit.py: as seen, then each VR_PROFILE term view (fog and island mist off: the
+# mist blends over an island's faces after shading), all undithered.
 # The term views need the shader built with -DLIGHTSPLIT: the app is copied to <app>-split.app beside it with this
 # checkout's Shaders/ compiled that way (rebuilt when the app's binary is newer than the copy).
 # usage: lightsplit.sh <app> <out stem> <seed> <phase> <VR_CAM> [size]
@@ -15,5 +16,5 @@ mkdir -p ${stem:h}
 common=(--size $size --scale 1 --seed $seed --times 10 --phase $phase --nodither)
 VR_CAM=$cam $here/../vrr $app --screenshot $stem.png $common | grep exposure= > $stem.txt
 for v in 1 2 3 4 5 6 7 8; do
-  VR_CAM=$cam VR_PROFILE=bits$((16384 * v)) $here/../vrr $split --screenshot ${stem}_v$v.png $common --debug 2 > /dev/null
+  VR_CAM=$cam VR_PROFILE=bits$((16384 * v + 128)) $here/../vrr $split --screenshot ${stem}_v$v.png $common --debug 2 > /dev/null
 done
