@@ -269,6 +269,9 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         float back = pow(saturate(dot(d, L.key)), 4.0) * (1.0 - smoothstep(0.08, 0.45, L.key.y)) * (1.0 - L.night);
         float graze = 1.0 - abs(dot(n, d));
         col += alb * mix(float3(0.9, 1.3, 0.3), float3(1.3, 0.9, 0.4), s.autumn) * L.keyCol * back * (1.0 - ndl) * (1.0 - abs(n.y)) * graze * graze * sh;
+        // Leaves pass light, so faces the sky is shut out from glow dimly green rather than going black. 0.25 is chosen by
+        // eye, above real leaf transmission.
+        col += alb * float3(0.9, 1.2, 0.5) * L.keyCol * L.sunAmt * (1.0 - sv) * 0.25 * (1.0 - L.night);
     }
     // The glowing band low over the sun's side of the sky warms the crowns' flanks that face it, the upper ones most,
     // even where the sun itself is hidden: leaves model warm against cool, and seen toward the sun only their rims catch it.
