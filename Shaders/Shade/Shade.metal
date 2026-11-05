@@ -59,10 +59,11 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // ledge, so they would shade unlike the rest of their plane. Toward 2 pixels per voxel the slope under the
     // stairs takes over, smooth across ledges. Side faces blend with their tread colour (wf), toward the column
     // normal until that slope takes over: a riser in tread colour lit as a wall reads as a veil over the hill
-    // behind it. Canopies keep their column normal blend.
+    // behind it.
     float wt = smoothstep(0.33, 0.6, fp);
-    // Structures keep their own planes: a column-difference normal would tilt a house's edge columns.
-    float wn = (built ? 0.0 : s.mat == 0 && h.normal.y != 0 ? wt : wf) * (1.0 - ov);
+    // Structures and leaves keep their own planes: a column-difference normal would tilt a house's edge columns, and a
+    // crown's is the ground's under the tree, which on a slope turns a far crown's every face from a low sun at once.
+    float wn = (built || s.mat == 1 ? 0.0 : s.mat == 0 && h.normal.y != 0 ? wt : wf) * (1.0 - ov);
     // An island's top sees the lowland past its rim no lower than a step down: that drop would turn every tread within
     // the smoothing's reach of the rim outward, a lit ring at one inset round the top.
     float gFloor = ISLE_SHAPE && s.gy >= 1e8 && h.normal.y > 0 ? s.H - 6.0 : -1e9;
