@@ -90,7 +90,6 @@ final class Renderer: NSObject, MTKViewDelegate {
     let world: World
     let clipmap: Clipmap
     let towers: Towers
-    // The giants' hanging strands: their slots of baked maps and the frame's table.
     let vines: Vines
     let camera: FlightCamera
     let wildlife: Wildlife
@@ -115,7 +114,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     let popLog: PopLog? = Knobs.current.popLog ? PopLog() : nil
     var aspect: Float = 16.0 / 10.0
     var exposure: Double = 1.5
-    // Holds the time of day fixed for snapshots, so exposure and the shot director see the rendered sun.
+    // Holds the time of day fixed (snapshots, the time-of-day preference), so exposure and the shot director see the rendered sun.
     var pinnedPhase: Double?
     var renderScale: Double
     let dither: Bool
@@ -191,8 +190,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         self.towers = towers
         self.vines = vines
         vinePipelines = vineStates
-        // Spec offset displays by 90 s of the same flight; steering reads GPU heights, so displays
-        // instead start at different places in the same world.
+        // Each display starts at its own place in the same world: steering reads this renderer's GPU heights, so displays
+        // cannot share one flight.
         camera = FlightCamera(seed: seed &+ UInt32(screenIndex) &* 7919, terrain: world.terrain, far: far)
         wildlife = Wildlife(seed: seed &+ UInt32(screenIndex) &* 7919)
         birdBuffers = (0..<3).compactMap { _ in device.makeBuffer(length: Wildlife.bufferLength, options: .storageModeShared) }
