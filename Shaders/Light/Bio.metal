@@ -5,7 +5,7 @@ static inline float bioRamp(float sunY) { return smoothstep(BIO_SUN, -0.12, sunY
 // The specks on the land's surfaces come in later than the bugs: against a still bright sky they look stuck on.
 static inline float bioLandRamp(float sunY) { return smoothstep(0.02, -0.12, sunY); }
 
-// The glow on land and vines is 40% lower within ~60 voxels of the camera, where it filled the frame, and untouched
+// The glow on land and vines is 40% lower within ~60 voxels of the camera, where it would fill the frame, and untouched
 // past ~220, so the far glow keeps its level.
 static inline float bioNear(float dist) { return mix(0.6, 1.0, smoothstep(60.0, 220.0, dist)); }
 

@@ -1,6 +1,6 @@
 // The flicker key of the lit room at w, stage j's loggia (j = 7: the portals), or 0 where the room is dark. A tower that
 // lights any lights one or two, a near the middle of a face, so the open rooms near by and the painted bays far off light
-// the same ones. (A share of every bay lit read as an inhabited block.)
+// the same ones. (A share of every bay lit would read as an inhabited block.)
 static inline uint towerLitRoom(Tower T, float2 w, int j) {
     TowerPlan P = towerPlan(T, w - (j < 7 ? towerStageAxis(T, j) : T.c));
     int bay = j < 7 ? int(floor(P.t / towerBayW(T.h, j, P.face, T.bw) + 0.5)) : 0;
@@ -56,7 +56,8 @@ static float3 towerWallPlane(Tower T, float2 wc, float3 n) {
     float fa = T.rot + seg * (float(Pm.face) + 0.5);
     float2 pn = float2(cos(fa), sin(fa));
     // At a corner a jog's face takes the plane its own centre lies nearer: by the column's centre, or by the plane it is
-    // nearer square to, a line of the corner's faces lit as the other face ran down it.
+    // nearer square to, a line of the corner's faces would take the other face's light all
+    // down it.
     float fb = fa + (Pm.am > 0.0 ? seg : -seg);
     float2 pb = float2(cos(fb), sin(fb)), q = wc + 0.5 * n.xz - ax;
     if (dot(q, pb) > dot(q, pn)) pn = pb;

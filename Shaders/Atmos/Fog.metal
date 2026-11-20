@@ -26,8 +26,8 @@ static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, 
     float dy = abs(d.y) < 1e-4 ? 1e-4 : d.y;
     float heightTerm = a * hf * k * (1.0 - exp(-dy * t / hf)) / dy;
     float mist = 0;
-    // Two samples at a per-pixel, per-frame offset along the ray: the temporal resolve integrates them into the four
-    // evenly spaced ones this replaced (the mist is smooth over tens of voxels).
+    // Two samples at a per-pixel, per-frame offset along the ray, which the temporal resolve integrates (the mist is
+    // smooth over tens of voxels).
     int samples = mistSamples >= 0 ? mistSamples : x.quality > 0.5 ? 2 : 1;
     float jit = mistSamples >= 0 ? 0.5 : x.dither;
     for (int i = 0; i < samples; i++) {
@@ -47,7 +47,7 @@ static float fogTransmittance(thread const Ctx& x, float3 o, float3 d, float t, 
     float clear = mix(1.0, 0.15, smoothstep(0.2, 0.45, x.L.sun.y));
     // Night air is crisp: moonlit ridges stay legible to the horizon.
     clear *= mix(1.0, 0.35, x.L.night);
-    // The tail eases in, leaving the haze within a few percent of the old quadratic out to ~600.
+    // The tail eases in: out to ~600 the haze stays within a few percent of the quadratic alone.
     float air = K * (1.0 - exp(-c2 * t * t / K)) + lambda * t * t / (t + 1500.0);
     // The haze thins aloft: a ray climbing to a summit or a tepui's rim leaves most of it below, so tall relief far
     // off stands solid over a hazy foot instead of hazing to a flat, cloudless cut-out of the sky. Taken at the

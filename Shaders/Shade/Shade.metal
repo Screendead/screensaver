@@ -1,3 +1,5 @@
+// shadows: 0 none, 1 traced near ray and maps, 2 maps only (reflections: ripples hide contact shadows).
+// L: the light (the bed under water takes it refracted); inWater: seen in rippled water.
 static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3 d, Hit h, int shadows, bool inWater = false) {
     float3 p = o + d * h.t;
     float3 n = float3(h.normal);
@@ -9,7 +11,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     float fpA = fp / max(abs(dot(n, d)), 0.15);
     float bio = shadows != 0 && !(x.prof & 4096) ? bioLandRamp(L.sun.y) : 0.0;
     Surface s = surfaceAt(x.tr, x.st, x.sites, x.lampState, k, h.voxel, h.normal, uv, fp, fpA, p, x.seed, x.time, inWater, bio > 0.0);
-    // Dressed here, not in surfaceAt: inlined there, among its many live values, it slowed every pixel.
+    // Dressed here, not in surfaceAt: inlined there, among its many live values, it slows every pixel.
     if (s.caveG >= 0.0) {
         int3 n3 = h.normal;
         float2 w = float2(h.voxel.xz * int(cs) + x.tr.origin);
@@ -34,17 +36,12 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // distant stairs read as contour bands, not moire.
     float wf = smoothstep(0.025, 0.20, fp);
     float3 nS = normalize(float3(s.nh.x - s.nh.y, 2.0 * cs, s.nh.z - s.nh.w));
-    // Below ~2 pixels per voxel step shadows and sky visibility alias into a hatch that crawls under motion;
-    // shade the continuous slope under the stairs instead.
-    // Taken just over half a column into the air in front of the face: on the face, or exactly half a column out, the
-    // footprint's split between rock and air turns on rounding.
-    // Floors are asked just above, undersides just below.
     float roofW = 0.0;
     // Only near the gaps' heights: a lip's top or the sheer wall under a shelter lies outside every gap around it.
     // Extra gaps lie under the principal ones, so below those only the floor of the map bounds them.
     if (s.mat == 0 && s.gapNear && p.y < s.gapSpan.y + 1.5 && (p.y > s.gapSpan.x - 1.5 || k == 0)) {
         // A wall is under a roof when the column in front of it is hollow at its height: every face of a jogging back
-        // wall then agrees, where a share sampled at the face fell part way at each jog and striped the wall.
+        // wall then agrees, where a share sampled at the face would fall part way at each jog and stripe the wall.
         if (h.normal.y == 0) roofW = hollowAtMorph(x.tr, k, h.voxel.xz + h.normal.xz, float(h.voxel.y) + 0.5) ? 1.0 : 0.0;
         else if (h.normal.y > 0) roofW = roofField(x.tr, k, p.xz, p.y + 0.5).x;
     }
@@ -53,6 +50,8 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // Faces under a roof, and undersides, are not stairs on a heightfield: no heightfield prefilter applies to them. A
     // lip's front and top are ordinary wall and ground.
     float ov = s.mat == 0 ? max(roofW, h.normal.y < 0 ? 1.0 : 0.0) : 0.0;
+    // Below ~2 pixels per voxel step shadows and sky visibility alias into a hatch that crawls under motion;
+    // shade the continuous slope under the stairs instead.
     float wf2 = s.mat == 0 ? smoothstep(0.2, 0.5, fp) * (1.0 - ov) : 0.0;
     bool built = s.mat >= 4;
     // Tops a few pixels wide keep their exact normal: a column's central difference tilts only the tops at a
@@ -219,7 +218,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     // Under a roof the sky comes only through the mouth, an even share well under open shade's: the visibility samples
     // only six voxels out, so in a shelter it reads the roof all round and varies column by column with the back wall's
     // jogs, striping it.
-    // By night a shelter's back wall takes open shade's share: at the roof's it fell below the open wall beside it, a
+    // By night a shelter's back wall takes open shade's share: at the roof's it would fall below the open wall beside it, a
     // black band under every lip. Toward the roof it keeps the roof's share, the lip's shadow along the top; the roof is
     // a level bedding plane, so its height reads alike for every jog of the wall.
     float roofSky = ROOF_SKY;
@@ -248,14 +247,14 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
     ao = mix(ao, 1.0, 0.25 * L.night);
     // Night: a cave mouth stays a dark hole.
     skyFill += float3(0.09, 0.12, 0.25) * L.night * mix(1.0, roofSky, roofW);
-    // Deep in the night, land sits below the sky so night reads as night (won night A/B): moonlight is graded
-    // to a cool silver and the fill to a deep blue well under it, so slopes facing the moon still model. In
-    // early night it is already dark and keeps its contours (darkening lost the dusk A/B).
     // Deep in a cave neither the sky nor the light bounced in at its mouth reaches.
     // A cave's floor sees the sky only level through the mouth, off the horizon and the ground before it: grey, not the
     // zenith's blue.
     if (s.cave > 0.0) skyFill = mix(skyFill, float3(dot(skyFill, float3(0.3, 0.55, 0.15))), 0.75 * saturate(nl.y)) * (1.0 - s.cave);
     bounce *= 1.0 - s.cave;
+    // Deep in the night land sits below the sky so night reads as night: moonlight is graded to a cool silver and the
+    // fill to a deep blue well under it, so slopes facing the moon still model. Early night is already dark and keeps
+    // its contours.
     float3 col = albK * L.keyCol * ndl * sh * mix(1.0, 1.1, L.night) * mix(float3(1.0), float3(0.40, 0.42, 0.47), deep)
                + alb * (skyFill * ao * riserShade + bounce) * mix(float3(1.0), float3(0.19, 0.23, 0.38), deep);
     // Where the ray finds the lip, the night lift's share of the moon at the roof's sky share.

@@ -1,5 +1,3 @@
-// shadows: 0 none, 1 traced near ray and maps, 2 maps only (reflections: ripples hide contact shadows).
-// L: the light (the bed under water takes it refracted); inWater: seen in rippled water.
 // The share of the sky the islands overhead hide from a point at map-local p: each a disc of its radius at its
 // underside's mean height (the view factor of a disc to a level patch), out to 2-3k from the camera and to where it hides
 // a five-hundredth of the sky.

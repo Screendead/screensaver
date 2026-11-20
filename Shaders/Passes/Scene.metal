@@ -241,8 +241,8 @@ fragment float4 sceneFragment(VOut in [[stage_in]], constant Frame& f [[buffer(0
             float fpv = tw * x.pixelAngle / max(-d.y, 0.1);
             float fine = perlin3(float3(ww * 1.6, x.time * 0.7), x.seed + 61u);
             // Crests face the moon's midnight bearing (opposite SkyClock.azimuth at phase 0.75), within about 80
-            // degrees of it while it shows. Facing the moon itself turned the axes with every step of its bearing about
-            // a world origin some 10^5 voxels off, so the swell under the path jumped frame to frame.
+            // degrees of it while it shows. Facing the moon itself would turn the axes with every step of its bearing about
+            // a world origin some 10^5 voxels off, and the swell under the path would jump frame to frame.
             constexpr float az0 = 1.5 * M_PI_F + 0.9;
             const float2 mz = -float2(sin(az0), cos(az0));
             float swell = perlin3(float3(dot(ww, mz) * 0.07, (ww.x * mz.y - ww.y * mz.x) * 0.02, x.time * 0.1), x.seed + 62u);

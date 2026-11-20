@@ -43,5 +43,3 @@ static inline Ctx makeCtx(thread const Terrain& tr, constant Frame& f, float2 po
                  f.misc2.z == 14 ? 2.0 : f.shadow.x, (int(f.shadow.y) & 1) != 0, int(f.shadow.y), slowTex,
                  f.slowCloud.w == f.camRight.w ? f.slowCloud : float4(0), 0u };
 }
-
-// Baked fine cloud field where it covers q, else evaluated.
