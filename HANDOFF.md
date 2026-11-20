@@ -6,7 +6,7 @@ STRATA is a generative macOS screensaver: an endless, slow flight over procedura
 
 ## Where things stand
 
-Statuses come from the commit history as of 2026-10-25 (master after PR #24; earlier rows as of 2026-10-24, master at 440f08b). "Merged" means the work is on master; it does not mean it has been soak-tested on real hardware unless the row says so.
+Statuses come from the commit history as of 2026-11-20 (master after PR #34; rows before PR #25 as of 2026-10-25; earlier rows as of 2026-10-24, master at 440f08b). "Merged" means the work is on master; it does not mean it has been soak-tested on real hardware unless the row says so.
 
 | Area | Status | Commits that prove it |
 | --- | --- | --- |
@@ -28,6 +28,11 @@ Statuses come from the commit history as of 2026-10-25 (master after PR #24; ear
 | Tools layout | PR #22, merged 2026-10-25: `tools/perf/` (bench, soak, powersoak), `tools/frames/`, `tools/sky/`; one-off scripts on local `archive/one-off-tools`; `bugclip.sh` under the GPU lock | f9fece0 |
 | Swift layout and unit tests | PR #23, merged 2026-10-25: three SwiftPM targets (`StrataCore` without Metal or AppKit, `Strata`, `voxelreverie`), one job per file, every VR_* switch in `Knobs`; `make test` runs 42 XCTest tests (`StrataTests` checks the CPU's ports, constants and record layouts against the shader's own; `StrataCoreTests` flies the camera and birds over a synthetic world) then `tools/golden.sh`; `tools/mutants.py` shows each test bites | 80f26c8 |
 | Cross-references | PR #24, merged 2026-10-25: comments name the new Swift and shader files, `Sight.sea` replaces the Swift copies of 19.85, `make lint` (`tools/lint.sh`) finds unused shader code (only `F_FLAT`, `M_ROOF`, kept) | 5bd0598 |
+| Moon handover | PR #28, merged 2026-10-25: moon shadows fade in over the second half of the handover instead of switching on in one frame (largest block step 10.5/255 to 0.2) | 8e5b99f |
+| Vine pass terrain bound | PR #27, merged 2026-10-25: the vine pass reads the coarse rings' top mips through `abs()`, as the scene pass does | ef9dd8c |
+| CI | PR #26, merged 2026-10-25: build and test on macOS (Xcode 26, Metal toolchain), coverage badge on the `badges` branch | 46e2228, e1a05b1 |
+| Canopy light | PRs #31 and #32, merged 2026-11-04 and 2026-11-05: 25% of the sun through leaves; leaves keep their own face normals at every distance (bug reports 11-03 18.32, 11-05 12.49) | 29180fa, f111a01 |
+| Constitution | PR #34, merged 2026-11-20: CONSTITUTION.md and the `constitution-audit` workflow | 6de986d |
 
 Branches with commits that master lacks (from `git branch --no-merged master`): `strata/islands2` (31 commits, floating islands), `strata/islands-fix`, `strata/islands-b`, `strata/islands`, `strata/giant-C3` and `strata/giant-C2-roots` (morph-band work from 2026-10-13, before PR #1), `strata/vines3`, `strata/waves`, `strata/tundra`, `strata/merge4`, and single-commit prototypes. None of them is described in a merge message, so whether any is still wanted is unknown.
 
@@ -42,10 +47,9 @@ The flight runs at twice its old speed (11-30 voxels/s by height, Jack's call 20
 ## Open questions for Jack
 
 1. **What is missing when you don't use it?** If there are days the saver isn't running, or you turn it off, say why (too hot, too slow on battery, a fault, a scene you tire of). Each answer becomes the next step.
-2. **Moon handover: shadows switch on in one frame.** Below the horizon, as the key light blends from the afterglow to the moon, terrain shadows switch on at once (`L.shadows = m > 0.5` in `makeLight`, `Shaders/Sky/Light.metal`): the same kind of step PR #19 removed at sunrise. A fade like #19's was offered; whether the step shows has not been measured.
-3. **Battery soak.** `tools/perf/powersoak` needs the laptop unplugged overnight; it is the only measure of watts, drain and heat on battery.
-4. **Vine pass terrain bound (possible bug, changes output).** The vine pass bounds its terrain trace with the coarse levels' top mips without `abs()` (`Shaders/Passes/Vines.metal`), where the scene pass takes `abs()` (`Shaders/Passes/Scene.metal`): a negative max flags an open band, so the vine pass may trace too low a ceiling over a crown or an island. Fixing it changes output; your call.
-5. **Overnight pitches (2026-10-25), merged as PR #17.** Each has its own branch, pushed, with media in `build/overnight/` and a report page for Jack. Recommended picks in brackets:
+2. **Battery soak.** `tools/perf/powersoak` needs the laptop unplugged overnight; it is the only measure of watts, drain and heat on battery.
+3. **Dark cliffs and island flanks at night: which lever, if any? (measured 2026-10-26, no fix; branch `fix/night-fill-review`, not merged.)** At night, rock faces turned away from the moon (escarpments, tepuis, karst, the flanks of floating islands) read near black, 8-10/255 on screen, beside glowing ground at about 42/255. It is not a lighting fault: split by light term, those faces get the same sky fill as the ground and nothing wrongly occludes them; the ground is only 1.3-2.6x brighter before glow, gentler than a real moonlit cliff (1:4 to 1:10). Two things make them read black: the ground's glow (73% of its light at the island hero shot) and the island rock's dark albedo (0.11-0.12, a third of the mesa's 0.30; by day an island flank is 23/255 against a mesa's 57/255 under the same light). Choose one or none: A leave it (dark cliffs are true to moonlight); B lift the night grade (`deep` in `shade`), which brightens every shadowed face at night; C lighten the island rock, which changes islands by day as well; D let ground glow light the rock faces above it. The branch holds the measuring tool (`tools/frames/lightsplit`, compiled only with -DLIGHTSPLIT) and can be merged with whichever lever you pick.
+4. **Overnight pitches (2026-10-25), merged as PR #17.** Each has its own branch, pushed, with media in `build/overnight/` and a report page for Jack. Recommended picks in brackets:
    - **All picks in one merge: `strata/overnight-picks`** holds every branch below at its bracketed pick (cloud sea included), conflicts resolved, one PR away from master.
    - **Jack's picks: `strata/overnight-picks2`** is that bundle (with the cloud-sea gate) at Jack's answers where they differ from the brackets, marked "Jack:" below.
    - Floating islands, `strata/islands3` (master merged in, conflicts reviewed): merge now [yes]; follow-ups: birds no longer circle islands at the doubled flight speed, island tops dark at night. Both were fixed on the branch before the merge (ff1774d circling raptors; 0a15650 and f94e8a0 the land glow on island tops). Rechecked on master 2026-10-25 (seed 303, phases 0.56 to 0.95): with the glow off an island top is as bright as open ground under the same moon, and with it on it glows like the lowland beneath it. The night hero still in the pitch media predates the fix.
