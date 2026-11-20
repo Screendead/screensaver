@@ -222,7 +222,6 @@ extension Wildlife {
             let top = max(fl.maxSpeed, f.speed)
             if s > top { b.vel *= top / s; s = top }
             if s < fl.minSpeed { b.vel = (s > 1e-3 ? b.vel / s : SIMD3(sin(f.heading), 0, cos(f.heading))) * fl.minSpeed; s = fl.minSpeed }
-            // Birds climb and dive at modest angles.
             let maxY = 0.45 * s
             b.vel.y = max(-maxY, min(maxY, b.vel.y))
             b.pos += b.vel * dt
@@ -242,7 +241,7 @@ extension Wildlife {
                 }
             }
 
-            // Wingbeats in bursts between glides; a climbing bird keeps flapping.
+            // A climbing bird keeps flapping.
             if b.beat > 0 {
                 b.flap += 2 * .pi * fl.flapHz * (0.9 + 0.2 * b.phase) * dt
                 b.beat -= dt
@@ -252,7 +251,6 @@ extension Wildlife {
                 b.beat += dt
                 if b.beat >= 0 { b.beat = rand(fl.flapFor) }
             }
-            // Bank into the turn by the sideways acceleration.
             let side = simd_normalize(simd_cross(SIMD3<Double>(0, 1, 0), vdir) + SIMD3(1e-6, 0, 0))
             let lat = simd_dot(acc, side)
             let bankT = max(-0.9, min(0.9, -atan(lat / 9.8) * 1.4))
