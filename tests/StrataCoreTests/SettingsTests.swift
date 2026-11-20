@@ -18,9 +18,10 @@ final class SettingsTests: XCTestCase {
         XCTAssertTrue(s.forceBattery)
     }
 
-    // Unset, the overrides stay nil so the saver's own choices hold.
+    // Unset, the overrides stay nil so the saver's own choices hold; a malformed size keeps the default, an unknown flag
+    // is skipped, and a flag missing its value at the end parses.
     func testDefaultsLeaveTheSaversChoices() {
-        let s = parse("")
+        let s = parse("--size 864 --frobnicate --nodither --seed")
         XCTAssertNil(s.screenshotPath)
         XCTAssertNil(s.phase)
         XCTAssertNil(s.pitch)
@@ -28,11 +29,6 @@ final class SettingsTests: XCTestCase {
         XCTAssertFalse(s.forceBattery)
         XCTAssertEqual(s.screenshotTimes, [8])
         XCTAssertEqual(s.timeScale, 1)
-    }
-
-    // A malformed size keeps the default, an unknown flag is skipped, and a flag missing its value at the end parses.
-    func testToleratesBadInput() {
-        let s = parse("--size 864 --frobnicate --nodither --seed")
         XCTAssertEqual(s.screenshotSize, CGSize(width: 1728, height: 1117))
         XCTAssertTrue(s.noDither)
         XCTAssertEqual(s.seed, 0)
