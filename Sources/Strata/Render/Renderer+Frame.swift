@@ -49,13 +49,9 @@ extension Renderer {
         let k = Int(frameIndex) % phases + 1
         func halton(_ i: Int, _ b: Int) -> Double { var f = 1.0, r = 0.0, i = i; while i > 0 { f /= Double(b); r += f * Double(i % b); i /= b }; return r }
         f.jitter = SIMD4(Float((halton(k, 2) - 0.5) * 2 / size.width), Float((halton(k, 3) - 0.5) * 2 / size.height), 0, 0)
-        // LOD rings. The 1-voxel map hands off at 880, inside the 1024 - 8 (neighbour reads) - 100 (recentre drift)
-        // - ~21 (drift while a regeneration is in flight: 41 pieces at 30 fps) it covers; nearer its edge only if the camera outran
-        // regeneration. Each level morphs toward the next over a band, reaching it 1.5 parent columns before the
-        // handoff circle.
-        let half = Double(MapLayout.size / 2)
-        let edge = half - 8 - max(abs(p.x - half), abs(p.z - half)) - abs(Double(Knobs.current.lodShift))
-        let b01 = min(880, edge)
+        // LOD rings. Each level morphs toward the next over a band, reaching it 1.5 parent columns before the handoff
+        // circle.
+        let b01 = floorHandoff(p)
         var lods = [SIMD4<Float>(Float(b01 - 140), Float(b01), Float(b01 - 3), 1)]
         // Levels drawn: those built, out to the edge. Past the battery edge the last level's band eases in with the
         // edge, so no ring pops when the level count changes.
@@ -76,5 +72,13 @@ extension Renderer {
         (f.lod0, f.lod1, f.lod2, f.lod3, f.lod4) = (lods[0], lods[1], lods[2], lods[3], lods[4])
         f.fade = SIMD4(Float(0.7 * rMax), Float(rMax), Float(levels + 1), Knobs.current.lodShift)
         return f
+    }
+
+    // The 1-voxel map's handoff for map-local position p: 880, inside the 1024 - 8 (neighbour reads) - 100 (recentre
+    // drift) - ~30 (drift while a regeneration is in flight: 60 pieces at 30 fps, 15 voxels/s) it covers; nearer its edge
+    // only if the camera outran regeneration.
+    func floorHandoff(_ p: SIMD3<Double>) -> Double {
+        let half = Double(MapLayout.size / 2)
+        return min(880, half - 8 - max(abs(p.x - half), abs(p.z - half)) - abs(Double(Knobs.current.lodShift)))
     }
 }

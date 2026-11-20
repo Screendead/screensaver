@@ -131,7 +131,7 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     var hazeCount = 0
 
-    init?(gpu: GPU, outputFormat: MTLPixelFormat, seed: UInt32, screenIndex: Int, battery: Bool, dither: Bool = true) {
+    init?(gpu: GPU, outputFormat: MTLPixelFormat, seed: UInt32, screenIndex: Int, battery: Bool, dither: Bool) {
         let device = gpu.device
         guard let queue = device.makeCommandQueue() else { return nil }
         let sceneStates = [false, true].map { s in
@@ -294,12 +294,11 @@ final class Renderer: NSObject, MTKViewDelegate {
     func sight() -> Sight {
         let b = camera.basis
         let tanV = Renderer.tanV
-        // As makeFrame's level-0 ring: its morph band starts 140 inside the handoff, less a cell for the floor's 4x4 grain.
-        let p = camera.position - SIMD3(Double(world.origin.x), 0, Double(world.origin.y)), half = Double(MapLayout.size / 2)
-        let edge = half - 8 - max(abs(p.x - half), abs(p.z - half)) - abs(Double(Knobs.current.lodShift))
+        // The level-0 ring's morph band starts 140 inside the handoff, less a cell for the floor's 4x4 grain.
+        let p = camera.position - SIMD3(Double(world.origin.x), 0, Double(world.origin.y))
         return Sight(pos: camera.position, fwd: b.fwd, right: b.right, up: b.up, tanV: tanV, aspect: Double(aspect),
                      pixelAngle: 2 * tanV / Double(max(sceneSize.height, 1)), sunY: clock.sunDirection.y,
-                     worldEdge: Clipmap.handoff(Clipmap.levels), floorReach: min(880, edge) - 140 - 6 - abs(Double(Knobs.current.lodShift)),
+                     worldEdge: Clipmap.handoff(Clipmap.levels), floorReach: floorHandoff(p) - 140 - 6 - abs(Double(Knobs.current.lodShift)),
                      terrain: world.terrain)
     }
 
