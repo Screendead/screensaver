@@ -67,6 +67,18 @@ Run every launch of the binary through the GPU lock, `tools/vrgpu -- <binary> ..
 | `VR_CAVE=distance,height,bearing[,rank[,which]]` | Hold the camera on the rank-th nearest cave (which: 1 lived-in, 2 big and seen clear, 3 grottoes) |
 | `VR_DOLLY=v` | Move a held camera v voxels a frame along its heading |
 | `VR_NOCAVES=1` | Leave the cave table empty (renders as before caves) |
+| `VR_START=x,z,yawDeg` | The flight starts there |
+| `VR_CAM=x,z,height,yawDeg,pitchDeg[,abs[,rollDeg]]` | Hold the camera at a point (`abs`: 1 for an absolute height) |
+| `VR_SHOW=kind,distance,height,bearing[,rank]` | Hold the camera on the rank-th nearest site of a kind |
+| `VR_SITES=1` / `3` | Log each new map's giants and sites (3: and each site's parts) |
+| `VR_TOWERS=n` / `VR_ISLES=n` | List the towers / the islands near the start |
+| `VR_ISLE_FIELD=1` / `2` | The test field in place of island country / no islands |
+| `VR_FLIGHT=min` (`VR_FTRACE=1`) | Fly the autopilot that long, logging it (every 0.25 s) |
+| `VR_POPLOG=1` / `VR_BIRDTRACE=1` | Log birds that appear or vanish in view / the flocks each second |
+| `VR_BIRDTEST=d` / `VR_MURMUR=d` | Replace the flocks with a test pattern / a murmuration d ahead |
+| `VR_BENCH=n` | Time n still frames (gpu= is their minimum) |
+| `VR_PIECES=1` | Regenerate a map one timed command buffer per piece |
+| `VR_PROFILE=name` | Turn off a render stage to bisect (names in `Knobs.swift`) |
 
 ## Proving a bug fix
 
