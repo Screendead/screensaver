@@ -260,7 +260,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     // The pan is dead level: lit by the smoothed heightfield, or with the lip and pool floor lit as walls and corners,
     // every pool would be outlined.
     s.level = crustW;
-    // Coarse levels carry no trees: the share of a column under canopy tints its ground with their leaves.
+    // Coarse columns hold no single trees: the share of a column under canopy tints its ground with their leaves.
     if (k > 0 && !vegVox) {
         float2 cd = cdK;
         float cov = saturate(cd.x * COVER_GAIN);
@@ -291,7 +291,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     bool snowy = float(int(Hc)) > snowline;
     // Snow risers prefilter to snow, except on the great walls, whose faces stay rock under snowy ledges.
     if (snowy && wallM < 0.5) s.riser = 0.0;
-    // Snow risers prefilter to snow; eased across the snowline, which far off is one straight contour.
+    // The tread eases into snow across the snowline, which far off is one straight contour.
     s.tread = mix(tread, snow, smoothstep(snowline - 6.0, snowline + 6.0, Hc));
     s.face = needStone ? (snowy ? mix(stone, snow, 0.45 * (1.0 - smoothstep(6.0, 30.0, slope))) : stone * 0.95) : s.tread;
     // Night glow: damp, mild, vegetated country, in groves, most in the woods and the damp lowlands; none on sand, salt,

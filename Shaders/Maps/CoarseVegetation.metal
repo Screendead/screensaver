@@ -66,7 +66,7 @@ static float2 coarseVeg(int2 cw, int k, float4 hs4, float H, uint seed, thread c
             sum += t;
             leaves += t > g ? 1.0 : 0.0;
         }
-    } else if (J < 0.15 && provinces(centre + so, seed).y >= 0.2) {
+    } else if (provinces(centre + so, seed).y >= 0.2) {
         float O = provinces(centre + so, seed).y;
         GRuns none;
         none.n = 0;
@@ -92,7 +92,7 @@ static float2 coarseVeg(int2 cw, int k, float4 hs4, float H, uint seed, thread c
             sum += t4[i];
             leaves += t4[i] > hs4[i] ? 1.0 : 0.0;
         }
-    } else if (J < 0.15) {
+    } else {
         float dens = groveDensity(centre, H, seed);
         if (dens <= 0.0) return float2(H, 0);
         Climate c = climate(centre, seed);

@@ -65,7 +65,6 @@ static inline Climate climate(float2 w, uint seed) {
     return c;
 }
 
-// Painted hills: the hot, semi-dry belt between grassland and desert.
 // Climate is smooth over hundreds of voxels but costs seven noise octaves, so each map bakes it per column.
 kernel void bakeClimate(texture2d<float, access::write> out [[texture(0)]],
                         constant int4& info [[buffer(0)]],
@@ -114,6 +113,7 @@ static inline Climate climateAt(texture2d<float> t, float2 p, texture2d<float> p
 // The share of a column in either forest province, where the other biomes give way.
 static inline float provinceAmount(Climate c) { return max(c.jungle, c.old); }
 
+// Painted hills: the hot, semi-dry belt between grassland and desert.
 static inline float paintedAmount(Climate c) {
     return smoothstep(0.45, 0.6, c.temp) * smoothstep(0.30, 0.42, c.moist) * smoothstep(0.66, 0.54, c.moist) * (1.0 - provinceAmount(c));
 }

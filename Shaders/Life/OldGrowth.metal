@@ -33,7 +33,7 @@ static bool oldSite(int2 c, thread const G& ground, uint seed, thread float& gt)
     return r <= OLD_GENTLE || (r <= OLD_CLIFF && wallClear(c, ground, seed));
 }
 
-// The intervals old-growth tree (trunk ground gt) adds to world column centre w; lod >= 1: crowns only, as a top.
+// The intervals old-growth tree (trunk ground gt) adds to world column centre w (into r only when add), and the top it reaches there.
 static float oldTreeIntervals(float2 w, float2 ctr, float gt, float Ht, float R, float tr, uint h, uint seed, bool add, thread GRuns& r) {
     float2 q = w - ctr;
     float d = length(q);

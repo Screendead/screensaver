@@ -66,7 +66,7 @@ static Surface giantSurface(thread const Terrain& tr, Surface s, int k, int3 v, 
         float tex = hashf(th) < 0.35 ? 0.72 : 1.0 + 0.12 * hashf(pcg(th));
         a *= mix(tex, 0.92, smoothstep(0.015, 0.04, fp));
         // Darker with depth under the run's top: a clump's side darkens down from its crest the way the dome turns
-        // from the sky, rather than by each column's own span (which striped the clumps column by column).
+        // from the sky, rather than by each column's own span (which would stripe the clumps column by column).
         a *= mix(1.15, 0.62, saturate((runHi - 1.0 - y) / 14.0));
         s.mat = 1;
         s.canopy = 1.0;

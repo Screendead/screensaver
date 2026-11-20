@@ -2,8 +2,8 @@
 // wc, top G), empty off the towers: low crowns standing well back on the broad treads, the court and the plinth. A crown
 // must have tread under the most of it: one hanging off a narrow ledge or a pier's top reads, from below, as a ball stuck
 // to a blank wall.
-// (The ivy on the faces is painted by towerSurface: hung as leaves in the column in front of a face, any mat broke up
-// into vertical bars on the faces' jogs.)
+// (The ivy on the faces is painted by towerSurface: hung as leaves in the column in front of a face, any mat would break
+// up into vertical bars on the faces' jogs.)
 static int2 towerOvergrowth(texture2d<float, access::read> src, int2 p, int2 wc, float G, uint seed) {
     float2 wf = float2(wc) + 0.5;
     Tower T;
@@ -75,6 +75,3 @@ static int2 towerOvergrowth(texture2d<float, access::read> src, int2 p, int2 wc,
     }
     return span;
 }
-
-// Runs after cleanupColumns, which would clamp one-column trunks away. Tree columns set w = first leaf
-// voxel; g then holds the ground height (b = g on trunks and buried canopies, b = w under a floating canopy).

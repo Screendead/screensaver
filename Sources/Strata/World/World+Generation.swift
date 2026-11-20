@@ -123,7 +123,6 @@ extension World {
                     var rows1 = UInt32(band * rows / 2)
                     enc.setComputePipelineState(reduceBasePipeline)
                     enc.setBytes(&info, length: MemoryLayout<SIMD4<Int32>>.stride, index: 0)
-                    enc.setBuffer(buf.giants, offset: 0, index: 1)
                     enc.setBytes(&rows1, length: MemoryLayout<UInt32>.stride, index: 2)
                     enc.setTexture(buf.levels[0], index: 0)
                     enc.setTexture(scratch, index: 1)

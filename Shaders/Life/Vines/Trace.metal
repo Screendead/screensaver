@@ -16,8 +16,8 @@ static inline float strandRamp(float y, float a, float b) { return saturate((y -
 // The strands along o + d t, t in [0, tMax): the first one hit, where they still span a pixel, and the cover they
 // are expected to give, where they do not; both across the hand-over. The ray walks the cells of 32; in one holding
 // strands at its heights, the cells of 8 that hold strands in its bands (vineBands) are tested against its run, and
-// the strands of those it crosses. A strand is its own voxel column (a box 2 wide), so near strands look as they did
-// in the column maps.
+// the strands of those it crosses. A strand is its own voxel column (a box 2 wide), so near strands read as the
+// column maps' voxels do.
 static StrandHit traceStrands(texture2d_array<float> fine, texture2d_array<uint> coarse, texture2d_array<uint> sup,
                               texture2d_array<uint> bands, constant VineTable* vt, int2 origin, float3 o, float3 d,
                               float tMax, float pixelAngle) {
@@ -185,7 +185,7 @@ static float3 shadeVine(thread const Ctx& x, thread const Light& L, float3 o, fl
         if (!mapOnly && mapLit > 0.0) {
             // Without the band skip (the strands' pass compiles it out) the ray needs the steps to clear the crown's air.
             Hit sHit = trace(x.tr, so, L.key, SHADOW_NEAR, 64, 0);
-            // A column's strand found its own column first, a contact shadow: the light the user saw on them.
+            // Blocked, or out of steps under the crown: the contact shadow a strand in the column maps would cast on itself.
             if (sHit.hit || sHit.iters >= 64) sh = 0.35;
         }
         sh = min(sh, mapLit);
@@ -204,8 +204,8 @@ static float3 shadeVine(thread const Ctx& x, thread const Light& L, float3 o, fl
     skyFill *= 1.0 - mix(0.55, 0.85, hiSun) * (1.0 - sv);
     if (dusk > 0.0) skyFill *= mix(float3(1.0), mix(float3(0.52, 0.58, 0.8), float3(1.12, 1.08, 1.0), saturate(sv * sv * 0.4)), dusk);
     skyFill *= 0.5 + 0.5 * saturate(nl.y);
-    // Under the crown: the ambient a column's vine kept by its depth under the crown's top, which stands some 30 over
-    // the strand's.
+    // Under the crown: the ambient a column's vine takes from its depth under the crown's top, which stands some 30
+    // over the strand's.
     float ao = mix(1.0, 0.75, smoothstep(6.0, 80.0, top + 30.0 - p.y));
     ao = mix(ao, 1.0, 0.25 * L.night);
     skyFill += float3(0.09, 0.12, 0.25) * L.night;
