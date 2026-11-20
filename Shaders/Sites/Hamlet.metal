@@ -170,7 +170,7 @@ static inline PropKind propFor(int style, uint pick) {
 }
 
 // Each dwelling's yard: up to two props by its gables, back or front corners (never before the door), then seats by
-// the hearth. Added after every other part, so nothing the hamlet had before moves.
+// the hearth. Added after every other part, so they take only the ground the rest leave.
 static void hamletProps(texture2d<float, access::read> hm, thread SiteGen& G, int2 c, float g, int style, uint hb, bool hearth) {
     int nh = G.np;
     for (int k = 0; k < nh; k++) {

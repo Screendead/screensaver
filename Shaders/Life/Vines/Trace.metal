@@ -169,7 +169,7 @@ static float3 shadeVine(thread const Ctx& x, thread const Light& L, float3 o, fl
     float dusk = leafDusk(L);
     float3 albK;
     alb = gradeAlbedo(L, alb, deep, true, 0.0, dusk, albK);
-    // As a column's strand shaded (shade): with the footprint its faces turn up to the sky (the risers' prefilter, from
+    // As shade() shades a vine column: with the footprint its faces turn up to the sky (the risers' prefilter, from
     // a strand's level neighbours) and its shadow lifts to the floor the far stairs keep; the cover is all footprint.
     float wf = cover ? 1.0 : smoothstep(0.025, 0.20, fp);
     float3 nl = normalize(mix(n, float3(0, 1, 0), wf));

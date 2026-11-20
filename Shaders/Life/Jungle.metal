@@ -86,7 +86,6 @@ struct JCan { float lo, hi; bool trunk; };
 static JCan jungleCanopy(float2 w, float gs, float J, uint seed, float keep) {
     JCan o;
     o.lo = 0.0; o.hi = 0.0; o.trunk = false;
-    if (J < 0.15) return o;
     float2 so = seedOffset(seed), p = w + so;
     // Clearings: about one part in eight deep in the province, most of the land at its edge. Crowns stand only where
     // the roof does: one of the forest's reaching over a clearing would stand there on its own.

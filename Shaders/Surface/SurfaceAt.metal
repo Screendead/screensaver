@@ -7,7 +7,6 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     if (lite) { fp = max(fp, 4.0); fpA = max(fpA, 4.0); }
     Surface s;
     s.up = 1.0;
-    s.vine = false;
     s.bio = 0;
     s.bioG = 0;
     s.bioY = 0;
@@ -223,7 +222,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         // so broad hillsides read as layered contour bands rather than one repeated stair.
         float bandK = fract(floor(H / 6.0) * 0.618034);
         tread *= mix(float3(1.12, 1.04, 0.90), float3(0.90, 0.98, 1.10), bandK);
-        if (painted > 0.0 && !vegVox) {
+        if (painted > 0.0) {
             float2 p = w + seedOffset(seed);
             // Alluvium on the valley floors: pale, dusty sage.
             float fl = paintedFloor(p, seed);

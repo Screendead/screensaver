@@ -1,4 +1,4 @@
-// The towers' own greenery, the hook stage-3 vegetation replaces: the leaf span [x, y) it adds to map column p (world
+// The towers' own greenery: the leaf span [x, y) it adds to map column p (world
 // wc, top G), empty off the towers: low crowns standing well back on the broad treads, the court and the plinth. A crown
 // must have tread under the most of it: one hanging off a narrow ledge or a pier's top reads, from below, as a ball stuck
 // to a blank wall.

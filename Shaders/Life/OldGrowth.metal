@@ -1,4 +1,4 @@
-// Old-growth conifers, redwood and Douglas fir: one to an OLD_CELL cell, straight trunks two or three voxels thick
+// Old-growth conifers, redwood and Douglas fir: one to an OLD_CELL cell, straight trunks a voxel thick (a veteran's three)
 // standing 34-62 tall (a veteran in thirty, 75-95), a clear bole for the lower half, then a narrow crown of drooping
 // whorls, each a skirt wider at its foot, ragged by branch, so the outer columns of a crown are a stack of shelves with
 // sky between them.
@@ -15,7 +15,7 @@ static inline bool oldTreeIn(int2 cc, uint seed, float O, thread float2& ctr, th
     // The forest rises toward the province's heart, so the flight meets it as a slope, not a wall.
     Ht *= mix(0.4, 1.0, smoothstep(0.2, 0.8, O));
     R = (vet ? 7.5 : 4.5) + 0.03 * Ht * hashf(pcg(h + 5u));
-    tr = vet ? 1.9 : Ht > 62.0 ? 1.2 : 0.8;
+    tr = vet ? 1.9 : 0.8;
     return true;
 }
 

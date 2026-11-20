@@ -73,7 +73,6 @@ static Surface giantSurface(thread const Terrain& tr, Surface s, int k, int3 v, 
     } else if (gm == GM_VINE) {
         a = float3(0.036, 0.050, 0.028) * (0.85 + 0.3 * hashf(hash2i(v.xz, seed + 602u)));
         s.mat = 1;
-        s.vine = true;
         s.canopy = mix(1.0, 0.75, smoothstep(6.0, 80.0, col.x - y));
     } else {
         // Bark in vertical ridges, mossed where it faces up and low down.
