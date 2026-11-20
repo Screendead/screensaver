@@ -2,6 +2,10 @@
 
 A generative macOS screensaver (Swift + one Metal shader). README.md describes behaviour, flags and layout; HANDOFF.md says where things stand and what comes next.
 
+## How work is done
+
+CONSTITUTION.md (Jack, 2026-11-20): one owner per piece, finished impeccably with no review rounds; the eye is the test, and tests guard only what it cannot see. `.claude/workflows/constitution-audit.js` brings the code back into line.
+
 ## Build
 
 ```sh
@@ -11,7 +15,7 @@ make test       # build, then the unit tests (swift test, under the GPU lock) an
 make lint       # unused shader code (tools/lint.sh); F_FLAT and M_ROOF are known and kept
 ```
 
-The unit tests are two targets in `tests/`: `StrataCoreTests` (the clock, autopilot, birds, settings and table decoders, flown over a synthetic world) and `StrataTests`, which builds `tests/StrataTests/Shader/ShaderProbes.metal` against `Shaders/` and checks the CPU's ports of shader functions, its constants and record layouts against the shader's own, and that `state.json` holds what `bugclip.sh` reads. A CPU mirror of the shader belongs in those tests; output changes belong in golden.
+The unit tests are two targets in `tests/`: `StrataCoreTests` (the clock, autopilot, birds, settings and table decoders, flown over a synthetic world) and `StrataTests`, which builds `tests/StrataTests/Shader/ShaderProbes.metal` against `Shaders/` and checks the CPU's ports of shader functions, its constants and record layouts against the shader's own, and that `state.json` holds what `bugclip.sh` reads. A CPU mirror of the shader belongs in those tests; whether the picture is right is judged by eye, and golden only proves a refactor left it unchanged (CONSTITUTION.md: tests guard only what the eye cannot see).
 
 The Swift sources are three SwiftPM targets: `StrataCore` (no Metal or AppKit), `Strata` (GPU and app) and the `voxelreverie` executable. What `Strata` reads from `StrataCore` is marked `package`.
 
