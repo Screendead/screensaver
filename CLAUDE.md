@@ -85,3 +85,12 @@ Update HANDOFF.md before the session ends: the status table, the open questions,
 ## Never
 
 Put personal details or paths containing user names in tracked files.
+
+## Push before you stop (Jack, 2026-11-20)
+
+- Before you end a turn, push every branch that has commits not on GitHub. A cloud task reads GitHub each morning to update Jack's Launchpad. It cannot see work that is only on the Mac.
+- This rule overrides any older line that says to keep commits local or to ask before you push a branch.
+- Push a topic branch with `git push -u origin <branch>`. Never force-push.
+- Do not push the default branch. Push commits on the default branch to a new branch: `git push origin HEAD:refs/heads/wip/<short-name>`.
+- If a branch has an open PR and its CI must not run yet, or a required check before a push fails, push the commits to `wip/<branch>` instead. A branch with no PR runs no CI.
+- `.claude/hooks/push-before-stop.sh` enforces this rule as a Stop hook (`.claude/settings.json`). It blocks the first stop and names each branch. If a push fails, tell Jack the error. Do not retry in a loop.
