@@ -139,7 +139,7 @@ static float shadowMapLit(thread const Ctx& x, float3 p, bool all) {
 // risers sit at contact level cr, as the traced shadow had them: its origin, kept inside the hit column, starts
 // a side face's ray inside the solid.
 // far: a pixel spans several columns, so the nearest column alone stands for them (TAA averages the rest).
-static float stairShadow(thread const Terrain& tr, int k, float2 p, float y, float3 L, float3 d, float ct, float cr, bool far = false) {
+static float stairShadow(thread const Terrain& tr, int k, float2 p, float y, float3 L, float3 d, float ct, float cr, bool far) {
     float cs = tr.lod[k].w;
     float2 q = p / cs - 0.5, f = fract(q);
     int2 c0 = int2(floor(q));

@@ -1,6 +1,6 @@
 // Converges on the actual sky colour as fog thickens (T -> 0), so fogged land meets the sky with no seam (less the
 // land's solid floor, which fades out toward the world's edge).
-static inline float3 fogColor(thread const Ctx& x, float3 d, float T, float solid = 0.0) {
+static inline float3 fogColor(thread const Ctx& x, float3 d, float T, float solid) {
     // At night the sky's horizon gradient is mirrored below it, so far land and sea dim smoothly downward.
     float y = max(d.y, -d.y * x.L.night);
     float3 c = skyColor(float3(d.x, mix(y, y * 0.5 + 0.12, T), d.z), x.L);

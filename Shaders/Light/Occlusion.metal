@@ -18,7 +18,7 @@ static float cornerAO(texture2d<float> hm, int size, int3 v, int3 n, float2 uv) 
 // Heights are filtered, so a c on a column centre reads exact columns.
 // Coarse levels sample their own slice at the same world radii.
 // mode 0: 8 directions at 2, 4 and 6; 1 (far: a pixel spans columns): 8 directions at 4; 2 (seen in water): 4 at 4.
-static float skyVisibility(thread const Terrain& tr, int k, float2 c, float y, int mode = 0) {
+static float skyVisibility(thread const Terrain& tr, int k, float2 c, float y, int mode) {
     constexpr sampler bl(filter::linear, address::clamp_to_edge);
     constexpr sampler blr(filter::linear, address::repeat);
     float2 inv = 1.0 / float2(tr.hm.get_width(), tr.hm.get_height());
