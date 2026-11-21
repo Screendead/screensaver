@@ -326,11 +326,9 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         float lift = rsqrt(max(fogTransmittance(x, o, d, h.t, 0), 0.16));
         col += bioLight(x, s, k, h.normal, p, alb, fp, sv) * bio * lift;
     } else if (bio > 0.0 && s.bio == 0.0 && s.mat == 0 && h.normal.y <= 0 && !planar) {
-        // Rock with no glow of its own takes the glowing ground's light on its faces that look down or out over it. The
-        // ground at the great walls' feet has none (surfaceAt), but an island's own rock rates among them by its height.
+        // Rock with no glow of its own takes the glowing ground's light on its faces that look down or out over it.
         float lift = rsqrt(max(fogTransmittance(x, o, d, h.t, 0), 0.16));
-        float wall = ISLE_SHAPE && s.gy >= 1e8 ? 0.0 : s.wall;
-        col += bioUplight(x, k, h.normal, p, nl, alb, cs, h.t) * bio * lift * (1.0 - s.cave) * (1.0 - wall);
+        col += bioUplight(x, k, h.normal, p, nl, alb, cs, h.t, ISLE_SHAPE && s.gy >= 1e8) * bio * lift * (1.0 - s.cave);
     }
     // An island's glow, from late dusk; gone before the 1-voxel ring's morph band, and not in rippled water.
     if (SCENE_NEAR && shadows == 1 && s.isle.x > 0.0 && L.sun.y < 0.04 && fp < 1.0) {

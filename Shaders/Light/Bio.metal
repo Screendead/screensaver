@@ -119,15 +119,16 @@ static float3 bioLight(thread const Ctx& x, thread const Surface& s, int k, int3
 // UPLIGHT_GAIN is chosen by eye: the physical bounce (rock's albedo times the view factor) is a twentieth of the
 // ground's glow, which leaves dark rock beside bright ground reading as a hole cut in the picture.
 constant float UPLIGHT_REACH = 120.0, UPLIGHT_GAIN = 3.0;
-static float3 bioUplight(thread const Ctx& x, int k, int3 n, float3 p, float3 nl, float3 alb, float cs, float dist) {
+// isle: the face is an island's own rock, whose ground is the lowland under it.
+static float3 bioUplight(thread const Ctx& x, int k, int3 n, float3 p, float3 nl, float3 alb, float cs, float dist, bool isle) {
     // A wall's ground is a few columns out in front of it; a keel's is straight below (the bed under an island).
     float2 q = p.xz + float2(n.xz) * max(4.0, 2.0 * cs);
     float Hg = groundSmoothL(x.tr, k, q);
     float hh = max(p.y - Hg, 0.0), R2 = UPLIGHT_REACH * UPLIGHT_REACH;
     float F = 0.5 * (1.0 - nl.y) * R2 / (R2 + hh * hh) * smoothstep(SEA + 1.2, SEA + 3.0, Hg);
     if (F < 0.005) return 0;
-    // The ground's glow density as surfaceAt gives it, less the terms only the ground's own column holds (salt rims, the
-    // great walls, cover at its mean).
+    // The ground's glow density as surfaceAt gives it, less the terms only the ground's own column holds (salt rims, cover
+    // at its mean).
     Climate c = climateL(x.tr, max(k, 1), q);
     float snow = snowlineAt(c.temp);
     float D = max(smoothstep(0.1, 0.5, provinceAmount(c)), smoothstep(0.25, 0.55, c.moist)) * smoothstep(0.18, 0.4, c.temp)
@@ -135,6 +136,10 @@ static float3 bioUplight(thread const Ctx& x, int k, int3 n, float3 p, float3 nl
             * (1.0 - smoothstep(SEA + 60.0, SEA + 150.0, Hg)) * (1.0 - smoothstep(snow - 8.0, snow, Hg));
     if (D <= 0.0) return 0;
     float2 wq = q + float2(x.origin);
+    // None at the great walls' feet (surfaceAt's wallM). Under an island the coarse relief counts the island's own height,
+    // which would rate the glowing lowland round it as wall: an island's rock skips the test.
+    if (!isle) D *= 1.0 - megaWall(x.tr, wq);
+    if (D <= 0.0) return 0;
     float g = bioNoise(wq / 170.0, x.seed + 710u) + 0.5 * bioNoise(wq / 47.0, x.seed + 711u);
     D *= smoothstep(-0.35, 0.05, g) * (1.0 + 0.7 * smoothstep(SEA + 28.0, SEA + 3.0, Hg)) * (1.0 - 0.45 * smoothstep(0.65, 0.9, c.jungle)) * 0.8;
     float3 hue = bioHue(wq, x.seed);
