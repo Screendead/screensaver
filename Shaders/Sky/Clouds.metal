@@ -4,8 +4,8 @@ struct CloudSample { float3 col; float a; float t; };
 // coverage; tops tower where it is dense, and each sample is self-shadowed toward the sun, so clouds have
 // lit crowns and shaded bases instead of reading as flat cut-outs.
 // tEnd clips the march at terrain that rises into the slab, so a peak disappears into the cloud base.
-// steps > 0 overrides the march's step count (a veil in front of land needs fewer).
-static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float tEnd = 1e9, int stepsOverride = 0) {
+// stepsOverride > 0 sets the march's step count (a veil in front of land needs fewer).
+static CloudSample cloudSheet(thread const Ctx& x, float3 o, float3 d, float tEnd, int stepsOverride = 0) {
     CloudSample c;
     c.col = 0; c.a = 0; c.t = 6e4;
     if (d.y < 0.01) return c;

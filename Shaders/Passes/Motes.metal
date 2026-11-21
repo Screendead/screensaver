@@ -21,7 +21,7 @@ vertex MoteOut bioVertex(uint vid [[vertex_id]], uint iid [[instance_id]], const
     float3 wo = f.camPos.xyz + float3(org.x, 0.0, org.y);
     int3 c = int3(floor((wo - MOTE_REACH) / MOTE_CELL)) + int3(int(iid) % MOTE_N, (int(iid) / MOTE_N) % MOTE_N, int(iid) / (MOTE_N * MOTE_N));
     uint hh = pcg(uint(c.x) * 1597334677u ^ uint(c.y) * 3812015801u ^ uint(c.z) * 2798796415u ^ (seed + 710u));
-    // 30% of cells hold a bug: at half, the near swarm was too bright.
+    // 30% of cells hold a bug: at half, the near swarm is too bright.
     if (hashf(hh) >= 0.3) return o;
     uint h1 = pcg(hh), h2 = pcg(h1), h3 = pcg(h2), h4 = pcg(h3), h5 = pcg(h4);
     float3 a = float3(c) * MOTE_CELL + 1.3 + (MOTE_CELL - 2.6) * float3(hashf(h1), hashf(h2), hashf(h3));

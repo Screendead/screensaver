@@ -22,8 +22,8 @@ constant bool ISLE_SHAPE = SCENE_NEAR || (is_function_constant_defined(SHAPE_FC)
 constant bool MIST_FC [[function_constant(5)]];
 constant bool SCENE_MIST = SCENE_NEAR && is_function_constant_defined(MIST_FC) && MIST_FC;
 
-// Compiled in only while the sea of cloud is out (SEA_FC, Renderer picks the pipeline): held off in the scene and vine
-// passes it costs every pixel about 0.3 ms (pin606n, dusk).
+// Compiled in only while the sea of cloud is out (SEA_FC, Renderer picks the pipeline): compiled in, even unused, it
+// costs every pixel of the scene and vine passes about 0.3 ms.
 constant bool SEA_FC [[function_constant(8)]];
 constant bool SCENE_SEA = is_function_constant_defined(SEA_FC) && SEA_FC;
 

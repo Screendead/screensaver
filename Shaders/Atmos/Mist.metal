@@ -32,10 +32,6 @@ static inline float mistLumps(thread const Ctx& x, float3 pm, float sz, float t)
     return saturate(0.55 + 0.9 * lump);
 }
 
-// Banks of mist round the islands' keels (a ring of flattened puffs on most bigger islands, laid out in the table) and the
-// plume a fall spills into: in-scatter in front of whatever the ray reaches by tEnd, drawn as opaque bodies with soft,
-// lumpy edges, never a thin veil over the land (which would read as terrain gone translucent). Lit as the cloud sheet
-// is, in the islands' shade. (colour, opacity); faded out (by the table) before the islands' pipeline variant turns off.
 // Whether o + d t meets the ellipsoid (centre c, radii r) before tEnd.
 static inline bool isleMistBound(float3 o, float3 d, float tEnd, float3 c, float3 r) {
     float3 A = (o - c) / r, B = d / r;
@@ -44,6 +40,10 @@ static inline bool isleMistBound(float3 o, float3 d, float tEnd, float3 c, float
     return disc > 0.0 && (cc < 0.0 || (b < 0.0 && (-b - sqrt(disc)) < tEnd * a));
 }
 
+// Banks of mist round the islands' keels (a ring of flattened puffs on most bigger islands, laid out in the table) and the
+// plume a fall spills into: in-scatter in front of whatever the ray reaches by tEnd, drawn as opaque bodies with soft,
+// lumpy edges, never a thin veil over the land (which would read as terrain gone translucent). Lit as the cloud sheet
+// is, in the islands' shade. (colour, opacity); faded out (by the table) before the islands' pipeline variant turns off.
 static float4 isleMist(thread const Ctx& x, float3 o, float3 d, float tEnd) {
     int n = min(x.isles->n.x, ISLE_TABLE);
     float3 og = float3(float(x.origin.x), 0.0, float(x.origin.y));

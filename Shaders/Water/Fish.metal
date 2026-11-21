@@ -39,7 +39,7 @@ constant float2 FISH_SPOTS[8] = { float2(0.0, 0.0), float2(0.62, 0.21), float2(-
 // it (unused when shadows is false); fpv: voxels per pixel there. wake (at night): the glowing track fast movement
 // leaves in the water (fin flicks, darts), about [0, 1]; else body: a fish's silhouette; shade: its shadow on the bed;
 // glint: a flank catching the light as it flicks. Kept lean in registers: inlined in the scene pass, a heavier body
-// slowed every pixel.
+// slows every pixel.
 static inline FishSample fishAt(thread const Ctx& x, float2 q, float2 bs, bool shadows, float fpv, bool wake) {
     FishSample r = { 0, 0, 0, 0 };
     int2 cell = int2(floor(q / FISH_CELL));
