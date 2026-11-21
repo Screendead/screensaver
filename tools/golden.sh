@@ -19,18 +19,19 @@ out=${GOLDEN_OUT:-build/golden}
 mkdir -p $out/stdout
 find $out -type f -delete
 
-# name|seed|times|phase|env|flags; "-" for none. Poses mostly from tools/perf/bench.sh, at short times: simulating minutes of
-# flight costs minutes. The sea of cloud (function constant 8) is compiled in only while the sky clock's cloudSea is above
-# 0: escarp (phase 0.005) and the path (phase -0.01) have it, the others don't. Seed 606 has an aurora on night 0 (day 0:
-# no scene runs the clock to its first wrap), looked at along its azimuth; 202 does not, and its night looks at the moon (opposite the sun, at most ~20 degrees up). The path fixture is a synthetic
-# drift off the escarp pose (lines "simTime x z y yawDeg pitchDeg rollDeg exposure phase day"); a VR_PATH run prints
-# nothing, so its stdout text is empty.
+# name|seed|times|phase|env|flags; "-" for none. A scene stays only while it covers a path no other does: tepui_noon the
+# plain pipeline (no towers, islands, sea of cloud or night motes), towers_noon the towers, stilt_dusk a site close up with
+# its lamps and a murmuration, aurora_night and moon_night the aurora and the moon, isle the islands' mist variant,
+# beach_battery battery mode, cave_noon a cave, jungle_debug1 the march's iteration count, motion the autopilot and
+# reprojection under the sea of cloud with the giants' strands, path the VR_PATH replay. Shortening --times saves nothing
+# (each scene costs its map build) and changes birds and exposure. The sea of cloud (function constant 8) is compiled in
+# only while the sky clock's cloudSea is above 0: motion and path have it. Seed 606 has an aurora on night 0 (day 0: no
+# scene runs the clock to its first wrap), looked at along its azimuth; 202 does not, and its night looks at the moon
+# (opposite the sun, at most ~20 degrees up). The path fixture is a synthetic drift (lines "simTime x z y yawDeg pitchDeg
+# rollDeg exposure phase day"); a VR_PATH run prints nothing, so its stdout text is empty.
 SCENES=(
-  "escarp_dawn|303|60|0.005|VR_CAM=-104,2255,40,-75,3|-"
-  "autopilot_dawn|101|60|0.005|-|-"
   "tepui_noon|404|30|0.25|VR_CAM=9500,4000,60,-75,3|-"
   "towers_noon|101|30|0.25|VR_CAM=4071.2,-3942.3,40,220,14,0|-"
-  "shelters_sunset|303|30|0.47|VR_CAM=300,2740,60,-90,4|-"
   "stilt_dusk|1|20|0.53|VR_SHOW=4,30,10,270,0|-"
   "aurora_night|606|30|0.75|VR_CAM=13016,5093,80,225.5,12,1|-"
   "moon_night|202|30|0.75|VR_CAM=3706,1705,320,141.6,16,1|-"
@@ -38,8 +39,7 @@ SCENES=(
   "beach_battery|303|20|0.3|VR_CAM=6324,-945,29,10,-27.2,1|--battery"
   "cave_noon|404|30|0.25|VR_CAVE=40,6,0,0,1|-"
   "jungle_debug1|101|30|0.25|VR_CAM=3400,300,40,20,-6|--debug 1"
-  "giant_debug3|101|30|0.25|VR_CAM=3658,-60,60,0,8|--debug 3"
-  "motion|202|30|-|VR_MOTION=1 VR_MOTION_FRAMES=12 VR_FRAMES=12|-"
+  "motion|202|30|-|VR_MOTION=1 VR_MOTION_FRAMES=12|-"
   "path|303|60|-|VR_PATH=tests/fixtures/golden_path.txt VR_CAM=-104,2255,40,-75,3|-"
 )
 
