@@ -18,7 +18,7 @@ constant float ROOF_SKY_NIGHT = 1.0;
 static inline bool hollowAtMorph(thread const Terrain& tr, int k, int2 c, float y) {
     float4 c4 = columnL(tr, k, c);
     if (c4.a != 0.0) return false;
-    float3 col = columnMorph(tr, k, c);
+    float3 col = columnMorphW(tr, k, c, morphAt(tr, k, (float2(c) + 0.5) * tr.lod[k].w)).xyz;
     if (col.z <= col.y) return false;
     if (y >= col.y && y < col.z) return !ISLE_SHAPE || (!isleGapL(tr, k, c, c4) && parentGapS(tr, k, c).x >= 0.0);
     if (k > 0 || y >= col.y) return false;

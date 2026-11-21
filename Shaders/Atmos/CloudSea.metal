@@ -15,7 +15,6 @@ constant float SEA_SOFT = 5.0;
 constant float SEA_LID = SEA + 14.0;
 static inline float seaG(float u) { return u <= 0.0 ? 0.0 : u < SEA_SOFT ? u * u / (2.0 * SEA_SOFT) : u - 0.5 * SEA_SOFT; }
 
-// Closed form along the ray, no march; one noise sample where the ray meets the top sets the billows and the gaps.
 // The low ground round frame-local xz p: the least of nine taps of the coarsest level's mean heights, 80 apart, so a
 // hill narrower than that stands out of its valley's level. Means over water are the seabed.
 static inline float seaFloorAt(thread const Ctx& x, float2 p) {
@@ -31,6 +30,7 @@ static inline float seaFloorAt(thread const Ctx& x, float2 p) {
     return max(lo, SEA);
 }
 
+// Closed form along the ray, no march; one noise sample where the ray meets the top sets the billows and the gaps.
 static SeaFog cloudSea(thread const Ctx& x, float amt, float3 o, float3 d, float t) {
     SeaFog s = { 1.0, float3(0) };
     float burn = smoothstep(0.08, 0.30, x.L.sun.y);

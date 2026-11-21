@@ -16,7 +16,7 @@ static inline float3 columnAt(texture2d<float> hm, int2 c, int size) {
 }
 
 // The principal gap only: the extra gaps below it (notches, tubes) read as rock to corner AO, which only darkens their
-// already dark corners a little more; decoding them in every AO tap cost a tenth of a millisecond.
+// already dark corners a little more; decoding them in every AO tap costs a tenth of a millisecond.
 static inline bool solid(texture2d<float> hm, int3 v, int size) {
     float3 col = columnAt(hm, v.xz, size);
     float y = float(v.y);
@@ -117,7 +117,6 @@ static inline float parentH(thread const Terrain& tr, int k, int2 c) {
     return tr.ch.read(uint2((w >> 1) & (COARSE_N - 1)), uint(k), 0).r;
 }
 
-// Gap (lo, hi) of the next level's column over level-k cell c.
 // The next level's second gap over level-k cell c (a giant crown's air under it; zero elsewhere).
 static inline float2 parentGap2(thread const Terrain& tr, int k, int2 c) {
     if (k + 1 > GAP2_LEVELS) return float2(0);
@@ -125,12 +124,13 @@ static inline float2 parentGap2(thread const Terrain& tr, int k, int2 c) {
     return tr.cg2.read(uint2((w >> 1) & (COARSE_N - 1)), uint(k)).rg;
 }
 
-// Its floor negative where it is an island's air.
+// Gap (lo, hi) of the next level's column over level-k cell c, its floor negative where it is an island's air.
 static inline float2 parentGapS(thread const Terrain& tr, int k, int2 c) {
     if (k + 1 > GAP_LEVELS) return float2(0);
     int2 w = c + (k == 0 ? tr.origin : tr.origin >> k);
     return tr.cg.read(uint2((w >> 1) & (COARSE_N - 1)), uint(k)).rg;
 }
+// parentGapS with its floor's sign dropped.
 static inline float2 parentGap(thread const Terrain& tr, int k, int2 c) {
     float2 g = parentGapS(tr, k, c);
     return float2(abs(g.x), g.y);
@@ -144,9 +144,6 @@ static inline float morphAt(thread const Terrain& tr, int k, float2 p) {
     return smoothstep(tr.lod[k].x, tr.lod[k].z, length(p - tr.cam));
 }
 
-// Whether world xz w lies on a tower's plinth.
-static inline bool towerWallAt(constant TowerTable* tt, float2 w) { return towerIndexAt(tt, w) >= 0; }
-
 // Whether level-k cell c (k <= GAP2_LEVELS) holds a giant crown's air as its second gap.
 static inline bool giantAirAt(thread const Terrain& tr, int k, int2 c) {
     float2 g = tr.cg2.read(uint2((c + levelOrigin(tr, k)) & (COARSE_N - 1)), uint(k - 1)).rg;
@@ -159,8 +156,9 @@ static inline bool giantAirAt(thread const Terrain& tr, int k, int2 c) {
 // parent has as many, its gap and the run over it each overlapping the parent's, slides to the parent: nothing in it
 // moves through the air. Any other steps whole, H with its gaps, to its parent at a point of the band of its own.
 // Opening or closing a gap there (a gap under a limb beside the crown's air over it, a trunk's edge, bare ground under a
-// crown's rim) hung a run in the air that slid across the band; sliding a run between two gaps toward the parent's broke
-// a limb into pieces at each column's height; and a jungle crown under a giant's rim rose through the air to its crown.
+// crown's rim) would hang a run in the air that slid across the band; sliding a run between two gaps toward the parent's
+// would break a limb into pieces at each column's height; and a jungle crown under a giant's rim would rise through the
+// air to its crown.
 struct BandCol { float4 col; float4 e; };
 
 static inline bool giantBandAt(thread const Terrain& tr, int k, int2 c, float4 cl) {
@@ -229,7 +227,7 @@ static inline float4 columnMorphE(thread const Terrain& tr, int k, int2 c, float
         // A column sliding up or down a tower's sheer wall stands part way up it as a sliver, and the band of them rules
         // the wall with stripes: there it steps at the middle of the band instead.
         float wh = w;
-        if (tr.towerN > 0 && abs(ph - col.x) > 12.0 && towerWallAt(tr.towers, (float2(c) + 0.5) * tr.lod[k].w + float2(tr.origin)))
+        if (tr.towerN > 0 && abs(ph - col.x) > 12.0 && towerIndexAt(tr.towers, (float2(c) + 0.5) * tr.lod[k].w + float2(tr.origin)) >= 0)
             wh = step(0.5, w);
         float2 pg = parentGapS(tr, k, c);
         bool cv = col.z > col.y;
@@ -270,10 +268,6 @@ static inline float2 secondGapW(thread const Terrain& tr, int k, int2 c, float w
     if (w <= 0.0) return g;
     if (k == GAP2_LEVELS && g.y > g.x) return giantBand(tr, k, c, columnL(tr, k, c), w).e.xy;
     return float2(g.x, mix(g.y, g.x, w));
-}
-
-static inline float3 columnMorph(thread const Terrain& tr, int k, int2 c) {
-    return columnMorphW(tr, k, c, morphAt(tr, k, (float2(c) + 0.5) * tr.lod[k].w)).xyz;
 }
 
 // The 1-voxel map's extra gaps (lo1, hi1, lo2, hi2) at frame-local column c, closing from the top across the morph band

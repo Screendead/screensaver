@@ -23,7 +23,7 @@ struct Light {
 // x the sun's angle around the moon as seen from here (pi is full), y the moon's lit share (exactly 1 at full).
 static inline float2 moonPhase(uint seed, float nightIndex) {
     // An 8-night cycle of phases with full moon at k = 4. It stops short of new moon (lit share 0.13), which would
-    // leave no moon at all. Full is pinned to 1 so full-moon nights render exactly as before phases.
+    // leave no moon at all. Full is pinned to exactly 1: skyDiscs draws no terminator at 1.
     uint k = (uint(int(nightIndex) + 8000) + pcg(seed + 5u)) & 7u;
     float th = 3.14159265 + 0.6 * (float(k) - 4.0);
     return float2(th, k == 4u ? 1.0 : 0.5 - 0.5 * cos(th));
@@ -58,7 +58,7 @@ static Light makeLight(float3 sunDir, uint seed, float nightIndex) {
     float e = sunDir.y;
     L.sun = sunDir;
     // The moon rides lower than the anti-sun (at most ~20 degrees), so a frame that holds it still has room
-    // for land below the horizon; a high moon left land a strip along the bottom.
+    // for land below the horizon; a high moon would leave land a strip along the bottom.
     L.moon = normalize(float3(-sunDir.x, max(-sunDir.y * 0.7, 0.08), -sunDir.z));
     L.zenith = key5(e, float3(0.018, 0.022, 0.045), float3(0.10, 0.10, 0.22), float3(0.13, 0.16, 0.32),
                     float3(0.10, 0.20, 0.48), float3(0.06, 0.20, 0.62));
@@ -74,9 +74,9 @@ static Light makeLight(float3 sunDir, uint seed, float nightIndex) {
     L.gold = goldAmount(e);
     L.moonAmt = 1.0 - (1.0 - MOON_FLOOR) * (1.0 - moonPhase(seed, nightIndex).y);
     if (e > -0.02) {
-        // Held at the afterglow's height until the sun clears it, and its shadows faded in: the key dropped from 0.05
-        // to the sun's -0.02 at the handover, shadows switched on there and again at 0 (the maps bake only for a light
-        // above the horizon), and sunlit faces darkened by a tenth in one frame each time. Must match SkyClock.keyLight (Sources/StrataCore/Sky/KeyLight.swift).
+        // Held at the afterglow's height until the sun clears it, and its shadows faded in from where they switch on
+        // (the maps bake only for a light above the horizon): a jump in the key's height, or shadows switched on at
+        // once, darkens sunlit faces by a tenth in one frame. Must match SkyClock.keyLight (Sources/StrataCore/Sky/KeyLight.swift).
         L.key = e >= 0.05 ? sunDir : normalize(float3(sunDir.x, 0.05, sunDir.z));
         L.keyCol = sunCol * L.sunAmt + float3(1.3, 0.5, 0.3) * 0.4 * (1.0 - L.sunAmt);
         L.shadows = true;
@@ -89,7 +89,7 @@ static Light makeLight(float3 sunDir, uint seed, float nightIndex) {
         L.key = normalize(mix(glowDir, L.moon, m));
         L.keyCol = mix(glowCol, float3(0.60, 0.66, 0.80) * L.night * L.moonAmt, m);
         // The moon's shadows switch on halfway through the blend (with the key near the zenith) and fade in over the rest:
-        // switched on at once they darkened every moonlit face by up to 10/255 in one frame. Must match SkyClock.keyLight.
+        // switched on at once they would darken every moonlit face by up to 10/255 in one frame. Must match SkyClock.keyLight.
         L.shadows = m > 0.5;
         L.shade = smoothstep(0.5, 1.0, m);
     }

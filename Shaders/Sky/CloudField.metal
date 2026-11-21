@@ -1,5 +1,5 @@
-// Cumulus base about 1100, over all but the alpine summits and the tepuis, which pierce it. The whole cloud field
-// is scaled by CLOUD_S from its original 240-high design, so from cruise height the sky looks as before.
+// Cumulus base about 1100, over all but the alpine summits and the tepuis, which pierce it. CLOUD_S scales the whole
+// cloud field (its slab, feature sizes and ranges) from a 240-high design.
 constant float CLOUD_Y = 1100.0;
 constant float CLOUD_S = 3.5;
 // Scene depth marking the evening star's core pixels, past any real depth (sky is 6e4).
@@ -11,8 +11,6 @@ constant float CLOUD_Y0 = CLOUD_Y - 10.0 * CLOUD_S, CLOUD_Y1 = CLOUD_Y + 34.0 * 
 constant float2 CLOUD_DRIFT = float2(0.825336, 0.564642) * 4.8; // (cos 0.6, sin 0.6) units per second
 
 static inline float cloudFineAt(float2 qd, uint seed) { return fbm2(qd / (300.0 * CLOUD_S), 3, seed + 40u); }
-
-static inline float cloudFine(float2 q, uint seed, float time) { return cloudFineAt(q - CLOUD_DRIFT * time, seed); }
 
 // The fine field in drifted coordinates, baked once into a texture around the camera.
 kernel void cloudField(texture2d<float, access::write> out [[texture(0)]],
@@ -36,11 +34,8 @@ kernel void cloudSlowField(texture2d<float, access::write> out [[texture(0)]],
     out.write(float4(cloudSlowRaw(info.xy + (float2(gid) + 0.5) * info.z, seed, info.w)), gid);
 }
 
-static inline float cloudSlow(float2 q, uint seed, float time, float cover) {
-    q -= float2(cos(0.6), sin(0.6)) * time * 4.8;
-    return perlin3(float3(q / (520.0 * CLOUD_S), time * 0.004), seed + 41u) * 0.35 + cover - 0.5;
-}
+static inline float cloudSlow(float2 q, uint seed, float time, float cover) { return cloudSlowRaw(q, seed, time) + cover - 0.5; }
 
 static inline float cloudDensity(float2 q, uint seed, float time, float cover) {
-    return cloudFine(q, seed, time) + cloudSlow(q, seed, time, cover);
+    return cloudFineAt(q - CLOUD_DRIFT * time, seed) + cloudSlow(q, seed, time, cover);
 }
