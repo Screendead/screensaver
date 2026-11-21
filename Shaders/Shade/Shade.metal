@@ -320,7 +320,7 @@ static float3 shade(thread const Ctx& x, thread const Light& L, float3 o, float3
         }
     }
     // From early twilight, out to the haze. Reflections shade with a wide footprint, so they take the means.
-    if (bio > 0.0 && s.bio != 0.0 && s.mat < 4 && !planar && s.pale < 0.5) {
+    if (bio > 0.0 && (s.bio != 0.0 || s.bioFoot.x > 0.0) && s.mat < 4 && !planar && s.pale < 0.5) {
         // Light given off loses less to the haze than light reflected: fogged as T^0.5 rather than T (the valley mist
         // left out), and as 2.5 T in thick haze, so it still fades into the haze at the very horizon.
         float lift = rsqrt(max(fogTransmittance(x, o, d, h.t, 0), 0.16));
