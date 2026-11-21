@@ -3,7 +3,7 @@ import simd
 
 extension Wildlife {
     // Birds inside a generous view frustum (terrain occlusion ignored) and the nearest; for the snapshot report.
-    private func visible(_ f: Flock, camera: FlightCamera, aspect: Double = 1.8, tanHalf: Double = 0.52) -> (count: Int, nearest: Double) {
+    private func visible(_ f: Flock, camera: FlightCamera, aspect: Double, tanHalf: Double) -> (count: Int, nearest: Double) {
         let b = camera.basis
         var n = 0, near = Double.infinity
         for bird in f.birds {

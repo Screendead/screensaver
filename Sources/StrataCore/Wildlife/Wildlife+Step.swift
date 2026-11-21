@@ -4,7 +4,7 @@ import simd
 extension Wildlife {
     // Which flocks the hour calls for, one per slot. Gull slots fall back to songbirds away from water.
     // Among floating islands raptors take a songbird's slot: they circle the islands.
-    private static func roster(sunY: Double, phase: Double, isles: Bool = false) -> [Kind] {
+    private static func roster(sunY: Double, phase: Double, isles: Bool) -> [Kind] {
         if sunY < -0.16 { return [.bat, .bat, .bat] }
         let dusk = phase > 0.25 && phase < 0.75
         // Flocks spend a while flying in out of sight, so the hour keeps more of them on the wing.

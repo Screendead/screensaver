@@ -93,7 +93,7 @@ extension FlightCamera {
     // height close ahead would fill the frame with a wall. Under a high sun close slopes read as blocks, so
     // the shot looks out: open sightlines and water count for more, and near land climbing into the lower
     // half of the frame (bottom edge 0.436 rad under the pitch) costs.
-    func shotScore(_ heading: Double, lightYaw: Double, lightW: Double, noon: Double, night: Double = 0) -> Double {
+    func shotScore(_ heading: Double, lightYaw: Double, lightW: Double, noon: Double, night: Double) -> Double {
         let p = xz
         var rise = -Double.infinity, nearAngle = -Double.infinity
         for dist in stride(from: 30.0, through: 100.0, by: 14.0) {
