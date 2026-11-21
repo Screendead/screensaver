@@ -46,12 +46,12 @@ The flight runs at twice its old speed (11-30 voxels/s by height, Jack's call 20
 
 ## Next step
 
-Run `constitution-audit` again (tag a2) after the next few waves merge, or once the suite or code has grown.
+Jack's call on the dark night cliffs, once the Mac's render (#47) is in (see The plan). Run `constitution-audit` again (tag a2) after the next few waves merge, or once the suite or code has grown.
 
 ## Open questions for Jack
 
-1. **What is missing when you don't use it?** If there are days the saver isn't running, or you turn it off, say why (too hot, too slow on battery, a fault, a scene you tire of). Each answer becomes the next step.
-2. **Battery soak.** `tools/perf/powersoak` needs the laptop unplugged overnight; it is the only measure of watts, drain and heat on battery.
+1. **What is missing when you don't use it?** Answered 2026-11-21. Jack's answer, verbatim: "A · It's good, keep it as it is". No change; new work comes from bug reports he files (B while the saver shows) and his notes.
+2. **Battery soak.** Answered 2026-11-21. Jack's answer, verbatim: "C · Skip it". The overnight unplugged run is not done; frame times (above) stand in for power on battery.
 3. **Dark cliffs and island flanks at night: which lever, if any? (measured 2026-10-26, no fix; branch `fix/night-fill-review`, not merged.)** At night, rock faces turned away from the moon (escarpments, tepuis, karst, the flanks of floating islands) read near black, 8-10/255 on screen, beside glowing ground at about 42/255. It is not a lighting fault: split by light term, those faces get the same sky fill as the ground and nothing wrongly occludes them; the ground is only 1.3-2.6x brighter before glow, gentler than a real moonlit cliff (1:4 to 1:10). Two things make them read black: the ground's glow (73% of its light at the island hero shot) and the island rock's dark albedo (0.11-0.12, a third of the mesa's 0.30; by day an island flank is 23/255 against a mesa's 57/255 under the same light). Choose one or none: A leave it (dark cliffs are true to moonlight); B lift the night grade (`deep` in `shade`), which brightens every shadowed face at night; C lighten the island rock, which changes islands by day as well; D let ground glow light the rock faces above it. The branch holds the measuring tool (`tools/frames/lightsplit`, compiled only with -DLIGHTSPLIT) and can be merged with whichever lever you pick.
 4. **Overnight pitches (2026-10-25), merged as PR #17.** Each has its own branch, pushed, with media in `build/overnight/` and a report page for Jack. Recommended picks in brackets:
    - **All picks in one merge: `strata/overnight-picks`** holds every branch below at its bracketed pick (cloud sea included), conflicts resolved, one PR away from master.
@@ -105,8 +105,8 @@ Taste questions for Jack, not faults: should moon glints roll off softly rather 
 
 - Every frame over 16.7 ms is the first after a simulated time jump (cold temporal history and freshly built maps); steady flight peaks at 12.3 ms. The live saver never jumps, so these do not show live.
 - GPU memory in snapshot runs climbed with simulated time (433 MB at 60 s, 2.9 GB at 7200 s). It was an undrained autorelease pool in the snapshot path, fixed in 43ac04a (411 MB throughout). The live saver drains its pool every frame, so it should not have had this; the power soak measures the live process's memory to confirm.
-- Not measured: watts, battery drain and heat. Frame times suggest the cost but do not prove it.
+- Not measured: watts, battery drain and heat. Frame times suggest the cost but do not prove it; Jack chose to skip the battery soak (2026-11-21).
 
 ## The plan
 
-**Next step: the battery soak** (`tools/perf/powersoak`, on the laptop unplugged overnight; needs Jack to unplug it). The overnight picks, the horizon fixes and the refactor are merged; what the saver costs on battery is the one goal still unmeasured.
+**Next step: Jack's call on the dark night cliffs** (open question 3), once the Mac has rendered the cliffs and island flanks at night for him to see (needs-mac issue #47). The battery soak is dropped at Jack's call; after that, work comes from his bug reports and notes, and `constitution-audit` (tag a2) runs after the next few waves merge.
