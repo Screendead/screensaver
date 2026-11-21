@@ -1,3 +1,4 @@
+// Runs after cleanupColumns, which would clamp one-column trunks away.
 kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
                        texture2d<float, access::write> dst [[texture(1)]],
                        texture2d<uint, access::read_write> gx [[texture(2)]],
@@ -60,7 +61,7 @@ kernel void plantTrees(texture2d<float, access::read> src [[texture(0)]],
                 float tr = max(max(max(t0, t1), max(t2, t3)), tc.r) - min(min(min(t0, t1), min(t2, t3)), tc.r);
                 if (tc.r < SEA + 10.0 || tc.b > tc.g || tc.a < 0.0 || abs(tc.r - gs) > 6.0 || tr >= EMERGENT_STEEP) continue;
                 eTrunk = eTrunk || length(w - ec) < (R > 9.0 ? 1.2 : 0.75);
-                emergentIntervals(w, ec, tc.r, y0, R, pads, eh, seed, 0, rr);
+                emergentIntervals(w, ec, tc.r, y0, R, pads, eh, seed, rr);
             }
         // A trunk column is bark through the roof (merged with it, its leaves would start at the roof's underside).
         // Steep ground steps the roof down to bushes on each column's own ground; a cliff carries none.

@@ -67,8 +67,8 @@ kernel void cleanupColumns(texture2d<float, access::read> src [[texture(0)]],
         gxDst.write(gx, gid);
         return;
     }
-    // Carved rock: its roofs are slabs the carving keeps whole (a test for a supporting neighbour cut a pillar wherever
-    // one ceiling stood a voxel above both its neighbours'); a gap a single column wide along either axis (rock on both
+    // Carved rock: its roofs are slabs the carving keeps whole (a test for a supporting neighbour would cut a pillar
+    // wherever one ceiling stands a voxel above both its neighbours'); a gap a single column wide along either axis (rock on both
     // sides at its middle) reads as a dash and is filled, and every roof keeps three voxels of rock over it.
     float4 x0 = extraGaps(gxSrc.read(a)), x1 = extraGaps(gxSrc.read(b)), x2 = extraGaps(gxSrc.read(e)), x3 = extraGaps(gxSrc.read(f));
     float4 ex = extraGaps(gx);

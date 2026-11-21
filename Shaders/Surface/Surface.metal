@@ -19,7 +19,6 @@ struct Surface {
     float cave;     // how much of the sky and bounce light a cave's depth keeps from this face (0 outside caves)
     float caveG;    // a face caveDress may dress (shade()): its green share, plus 2 under a gap; -1 none
     float up;       // leaves: height up the crown, 0 at its foot, 1 at its top
-    bool vine;      // a giant's hanging vines
     float2 isle;    // on the 1-voxel map an island's body: (1 root, 2 water, 4 rock under its lip, 8 any; its gap's top), for its glow
     bool isleUnder; // under an island: the sky it hides is isleSkyOcc's
     float gy;       // the height the ground round it is judged from (groundL): above any island for an island's own rock

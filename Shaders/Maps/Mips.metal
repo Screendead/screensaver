@@ -23,8 +23,7 @@ kernel void copyTop(texture2d<float, access::read> src [[texture(0)]],
 }
 
 // Band mips: per cell the height band [x, y) every column in it leaves open, so a ray under a giant's crown
-// skips cells as one over the tops does. A giant column offers its tallest gap, any other column the air above it.
-// The open band of one column: a canopy column's tallest gap (at least 4 tall), any other column the air above it.
+// skips cells as one over the tops does. The open band of one column: a canopy column's tallest gap (at least 4 tall), any other column the air above it.
 static inline float2 columnBand(texture2d<float, access::read> src, texture2d<uint, access::read> gx, uint2 c) {
     float4 col = src.read(c);
     float2 b = float2(col.r, 4096.0);
@@ -127,12 +126,11 @@ kernel void reduceMax(texture2d<float, access::read> src [[texture(0)]],
 }
 
 // Mip 1 of the 1-voxel map also bounds the level-1 column over it, which the morph band slides toward: the
-// four raw columns combined as coarseHeight combines them.
+// four raw columns combined as coarseColumn combines them (coarseCombine).
 kernel void reduceMaxBase(texture2d<float, access::read> src [[texture(0)]],
                           texture2d<float, access::read> raw [[texture(1)]],
                           texture2d<float, access::write> dst [[texture(2)]],
                           constant int4& info [[buffer(0)]],
-                          device const GiantRec* giants [[buffer(1)]],
                           constant uint& row0 [[buffer(2)]],
                           uint2 g [[thread_position_in_grid]]) {
     uint2 gid = g + uint2(0, row0);
@@ -146,7 +144,7 @@ kernel void reduceMaxBase(texture2d<float, access::read> src [[texture(0)]],
     RawGround rg { raw, info.xy, uint(info.w) };
     parent = max(parent, coarseVeg(cw, 1, r4, parent, uint(info.w), rg).x);
     // A giant's level-1 column needs nothing more: its samples are these four columns, and its top their tops' mean
-    // (coarseColumn), which m bounds (working it out cost several ms a band).
+    // (coarseColumn), which m bounds (working it out costs several ms a band).
     dst.write(float4(max(m, parent), 0, 0, 0), gid);
 }
 

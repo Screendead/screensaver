@@ -1,8 +1,7 @@
-// A giant's vines are no part of the column maps, whose rings and morph bands shortened and dropped them: each giant's
+// A giant's vines are no part of the column maps, whose rings and morph bands would shorten and drop them: each giant's
 // strands are baked once from its own rule (bakeVines) and traced analytically by a pass of their own over the scene
 // (traceStrands, vineFragment), so a strand's length and presence are the same at every distance. Near, a strand is
-// the 2x2 voxel column it always was; narrower than a pixel, the same set is drawn as its expected cover along the
-// ray. The maps and the trace know only strands over a window, so an island's roots could share them.
+// a 2x2 voxel column; narrower than a pixel, the same set is drawn as its expected cover along the ray.
 
 // A window of VINE_W voxels a side round a giant, 8-aligned on the world grid: strand cells 2 voxels square (the fine
 // map: bottom, top; top <= bottom holds none), cells of 8 (coarse) and of 32 (super) summing them.
@@ -39,7 +38,7 @@ static inline uint strandBands(float lo, float hi, float G) {
     return ((2u << uint(b)) - 1u) & ~((1u << uint(a)) - 1u);
 }
 
-// The fine map of one giant's window: giantIntervals' strand rule, over the crown's underside.
+// The fine map of one giant's window: its strands, hung from the crown's underside.
 kernel void bakeVines(texture2d_array<float, access::write> fine [[texture(0)]],
                       constant VineBake& b [[buffer(0)]],
                       uint2 gid [[thread_position_in_grid]]) {

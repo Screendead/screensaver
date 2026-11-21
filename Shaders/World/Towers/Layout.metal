@@ -227,7 +227,7 @@ static inline TowerPlan towerPlan(Tower T, float2 d) {
     return P;
 }
 
-// Stage k's apothem. (Corner piers drew a crisp vertical line down every corner: art deco, not a ruin.)
+// Stage k's apothem.
 static inline float tierR(Tower T, int k) {
     return T.R0 * towerTierScale(T, k);
 }
@@ -297,10 +297,6 @@ static inline float towerErosion(Tower T, TowerPlan P, float R, float y, uint se
     return e < 0.5 ? 0.0 : max(e, 6.0);
 }
 
-// The roots of the trees that took the tower, poured down its base onto the plinth: a few fans round the base, each
-// some ridges that leave the wall together high up and part as they run out over the plinth, thinning. The root mass's
-// height over the plinth's top at plan P (from the base's axis), 0 where there is none. towerSurface takes a column
-// outside the base and above the plinth's top for root.
 // The talus of fallen masonry heaped against the base at plan P (from the base's axis), world wf, deepest and widest on
 // the side the crown fell to, lumpy, gone by 0.4 R0 out: x its height over the slope from the outer plinth's top at the
 // wall down to the ground y out, y its share of the way to the wall.
@@ -317,6 +313,10 @@ static inline float2 towerTalus(Tower T, TowerPlan P, float2 wf, int s, uint see
     return float2(max(amp * f * sqrt(f) + lump * saturate(f * 3.0), 0.0), f);
 }
 
+// The roots of the trees that took the tower, poured down its base onto the plinth: a few fans round the base, each
+// some ridges that leave the wall together high up and part as they run out over the plinth, thinning. The root mass's
+// height over the plinth's top at plan P (from the base's axis), 0 where there is none. towerSurface takes a column
+// outside the base and above the plinth's top for root.
 static inline float towerRootH(Tower T, TowerPlan P, uint seed) {
     float e = P.reff - T.R0;
     if (e < 0.0 || e > 0.45 * T.R0) return 0.0;
