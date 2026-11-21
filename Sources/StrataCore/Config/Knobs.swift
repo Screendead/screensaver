@@ -15,7 +15,7 @@ package struct Knobs {
     package let sites: Bool, siteParts: Bool
     // VR_CAVES=r: list the caves within r of each new map's centre (not a number: 1500).
     package let caveList: Float?
-    // VR_NOCAVES: an empty cave table, which must render as before caves.
+    // VR_NOCAVES: an empty cave table.
     package let noCaves: Bool
     // VR_ISLE_FIELD=1: the test field round (-3500, -2500) in place of island country; 2: no islands.
     package let isleField: Int32
