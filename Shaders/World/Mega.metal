@@ -2,15 +2,14 @@
 // up to 2048, so land stops at 2000 and trees on the highest summit still fit.
 constant float TERRAIN_CEIL = 2000.0;
 
-// Lift over the lowland, and the signals a later wall/overhang pass needs. Provinces about 30% of the land, each
+// Lift over the lowland, and what terrainColumnBase cuts the lips and notches from. Provinces about 30% of the land, each
 // one landform across its extent, separated by lowland 6-12k wide: alpine ranges, tablelands with sheer
 // escarpments, karst pillar forests; a low-frequency river net cuts gorges through them, and a rare tepui stands
-// on its own. U is 0 outside them, so the lowland there is exactly as before. p is seed-offset world position.
-// lipU: the lift the column would have on the cap rock behind an escarpment's edge (0: no lip here); lipR: how far the
-// cap reaches out over the soft beds, lipU01: the column's place under it (0 at the wall line, 1 at the lip's edge).
+// on its own. U is 0 outside them, so the lowland there keeps its own relief. p is seed-offset world position.
+// lipU: the lift the column would have on the cap rock behind an escarpment's edge (0: no lip here).
 // notchFoot, notchH: a notch cut round a karst tower's foot, its floor that far above the lowland ground (-1: at the
 // water line) and its height at this column (0: none).
-struct Mega { float U; float wK; float lipU; float lipR; float lipU01; float notchFoot; float notchH; };
+struct Mega { float U; float wK; float lipU; float notchFoot; float notchH; };
 
 // The tableland field, also tapped beside a column to measure its distance to an escarpment in voxels.
 static inline float tableField(float2 p, float M, uint seed) {
@@ -53,7 +52,7 @@ static inline Mega megaLift(float2 p, float lagoon, uint seed) {
     Mega g;
     g.U = 0.0;
     g.wK = 0.0;
-    g.lipU = 0.0; g.lipR = 0.0; g.lipU01 = 0.0; g.notchFoot = 0.0; g.notchH = 0.0;
+    g.lipU = 0.0; g.notchFoot = 0.0; g.notchH = 0.0;
     float lipU = 0.0, uT = 0.0;
     float2 q;
     float m = megaField(p, seed, q);
@@ -97,8 +96,6 @@ static inline Mega megaLift(float2 p, float lagoon, uint seed) {
                 if (delta < R && R > 4.0) {
                     float c1 = thr < 0.5 ? 1.0 : s1, c2 = thr < 0.5 ? s2 : 1.0;
                     lipU = fT * (430.0 * c1 + 380.0 * c2 + roll * c1);
-                    g.lipR = R;
-                    g.lipU01 = delta / R;
                 }
             }
         }

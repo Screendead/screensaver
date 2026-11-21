@@ -1,5 +1,5 @@
-// Coarse level k (1...4) has columns s = 2^k voxels wide, built from the same terrainColumn field: the mean of
-// four point samples, one per child column, so no coarse level carries trees or arches.
+// Coarse level k (1...4) has columns s = 2^k voxels wide, built from the same terrainColumn field at four point
+// samples, one per child column.
 constant int COARSE_N = 2048;
 // Seen at a grazing angle, trees standing several voxels tall hide far more ground than their footprint covers.
 constant float COVER_GAIN = 2.5;
@@ -23,8 +23,8 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
     Col c2 = terrainColumnC(b + int2(0, hs), seed, s, caves, isles), c3 = terrainColumnC(b + int2(hs, hs), seed, s, caves, isles);
     float H = coarseCombine(c0.h, c1.h, c2.h, c3.h, float(s));
     // A giant: where at least two samples stand in it, the mean of their tops, and under it air where most of them have
-    // air at that height (a mean of their gaps paired a gap under a limb with the crown's air beside it and hung a slab
-    // between them). Air must be a hanging root's too, so each root keeps its length and stands in the column; a buttress
+    // air at that height (a mean of their gaps would pair a gap under a limb with the crown's air beside it and hang a
+    // slab between them). Air must be a hanging root's too, so each root keeps its length and stands in the column; a buttress
     // sample raises the air's floor. Of the gaps that leaves, the principal is the highest and the second the one below it;
     // past GAP2_LEVELS the one gap is the lowest, the crown's air.
     Giant gi;
@@ -101,14 +101,14 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
             }
             for (int i = 0; i < na; i++) air[i] = floor(air[i] + 0.5);
             // Air up to the top, or under less than a voxel of roof, leaves none: the column ends under it (dropped,
-            // it stood a pillar from the ground to the crown).
+            // it would stand a pillar from the ground to the crown).
             if (na > 0 && top - air[na - 1].y < 1.0) { top = max(air[na - 1].x, H); na--; }
             int m = 0;
             for (int i = 0; i < na; i++) if (air[i].y - air[i].x >= 2.0) air[m++] = air[i];
             if (m == 0) return float3(max(top, H), 0, 0);
             // More gaps than the level keeps: two over a run as thin as a limb's tip or an arching root join, so no run
             // is left standing in the air; past that the shortest gap over the crown's air fills, joining the runs
-            // round it (joined across a tier of the crown, they left a hole through it).
+            // round it (joined across a tier of the crown, they would leave a hole through it).
             for (int keep = k > GAP2_LEVELS ? 1 : 2; m > keep; m--) {
                 int j = 0;
                 for (int i = 1; i < m - 1; i++) if (air[i + 1].x - air[i].y < air[j + 1].x - air[j].y) j = i;
@@ -159,7 +159,6 @@ static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantR
     // An island's air is flagged by its floor's sign (columnL and parentGap read the magnitude).
     return float3(Hv, isl ? -lo : lo, hi);
 }
-static inline float3 coarseColumn(int2 cw, int k, uint seed, device const GiantRec* giants, device const IsleRec* isles) { float2 g2; float dp; return coarseColumn(cw, k, seed, giants, isles, g2, dp); }
 
 // Writes the world cells region.xy + [0, region.zw) of level info.x into its toroidal slice (texel = cell & 2047):
 // height and canopy cover, and every second cell also the half-resolution climate texel it starts.
@@ -215,7 +214,9 @@ kernel void reduceMaxParent(texture2d<float, access::read> src [[texture(0)]],
     int2 s = c * 2;
     float m = max(max(src.read(uint2(s & (COARSE_N - 1))).r, src.read(uint2((s + int2(1, 0)) & (COARSE_N - 1))).r),
                   max(src.read(uint2((s + int2(0, 1)) & (COARSE_N - 1))).r, src.read(uint2((s + int2(1, 1)) & (COARSE_N - 1))).r));
-    float3 pc = coarseColumn(c, info.x + 1, uint(info.y), giants, isles);
+    float2 pg2;
+    float pdp;
+    float3 pc = coarseColumn(c, info.x + 1, uint(info.y), giants, isles, pg2, pdp);
     dst.write(float4(max(m, pc.x)), uint2(c & (COARSE_N / 2 - 1)));
     bool pIsl = pc.y < 0.0;
     float2 pb = pc.z > abs(pc.y) ? float2(abs(pc.y), pc.z) : float2(pc.x, 4096.0);

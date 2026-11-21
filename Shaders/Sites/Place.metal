@@ -339,7 +339,7 @@ kernel void placeSites(texture2d<float, access::read> hm [[texture(0)]],
         sites[idx] = G.s;
         return;
     }
-    // Props come last, so nothing placed before them moves; tryProp keeps them off every arch column.
+    // Props come last, taking only the ground the other parts leave; tryProp keeps them off every arch column.
     if (type == T_HAMLET) hamletProps(hm, G, c, g, hamletStyle(L), hb, hearth);
     else if (type == T_CAMP) campProps(hm, G, c, g, campStyle(L), hb);
     G.s.head.z = type;

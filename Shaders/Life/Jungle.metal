@@ -83,10 +83,9 @@ struct JCan { float lo, hi; bool trunk; };
 // The roof over world column centre w, on ground gs (smoothed over a few columns); empty (hi <= lo) where open. Crowns
 // are cauliflower domes. Toward a clearing, the water or (keep < 1) steep ground the roof steps down through lower and
 // lower crowns to bushes standing on the ground: a margin, never a wall of leaves, and no roof on poles seen from the side.
-static JCan jungleCanopy(float2 w, float gs, float J, uint seed, float keep = 1.0) {
+static JCan jungleCanopy(float2 w, float gs, float J, uint seed, float keep) {
     JCan o;
     o.lo = 0.0; o.hi = 0.0; o.trunk = false;
-    if (J < 0.15) return o;
     float2 so = seedOffset(seed), p = w + so;
     // Clearings: about one part in eight deep in the province, most of the land at its edge. Crowns stand only where
     // the roof does: one of the forest's reaching over a clearing would stand there on its own.
@@ -173,8 +172,8 @@ static inline float emergentLumps(float2 p, uint seed) {
 }
 
 // The intervals emergent e (trunk ground gt) adds to world column centre w: its trunk, and its crown's noise-edged,
-// domed pads. lod >= 1 (coarse rings): no limbs.
-static void emergentIntervals(float2 w, float2 ctr, float gt, float y0, float R, int pads, uint h, uint seed, int lod, thread GRuns& r) {
+// domed pads, and a limb out to each side pad.
+static void emergentIntervals(float2 w, float2 ctr, float gt, float y0, float R, int pads, uint h, uint seed, thread GRuns& r) {
     float2 q = w - ctr;
     float d = length(q);
     float tr = R > 9.0 ? 1.2 : 0.75;
@@ -190,8 +189,7 @@ static void emergentIntervals(float2 w, float2 ctr, float gt, float y0, float R,
         float top = gt + P.y + T * 0.6 * sqrt(1.0 - u * u) + lumps * sqrt(1.0 - u * u);
         float bot = gt + P.y - T * 0.55 * pow(1.0 - u * u, 0.7) + 1.2 * perlin2(p / 4.5, seed + 334u);
         if (top > bot + 1.0) gAdd(r, floor(bot), floor(top) + 1.0, GM_LEAF);
-        // A limb out to each side pad.
-        if (j > 0 && lod == 0) {
+        if (j > 0) {
             float2 a = float2(0), b = P.xz;
             float t = saturate(dot(q - a, b - a) / max(dot(b - a, b - a), 1e-3));
             if (length(q - (a + (b - a) * t)) < 0.7) {

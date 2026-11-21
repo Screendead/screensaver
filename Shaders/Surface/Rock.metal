@@ -1,11 +1,9 @@
 // Sedimentary bedding by world height: broad formations, beds of uneven tone and fine laminae. Beds dip gently
 // with a slow horizontal warp, so a layer runs continuously across neighbouring columns and around canyon walls.
 // Bed edges widen and fine terms fade with the pixel footprint fp (voxels per pixel).
-// The bands' phase also wanders over ~55 voxels (tilting beds ~10 degrees typically, ~14 at the 90th percentile), so
-// rock bodies more than ~55 voxels apart carry different bands: with one phase for all, the bands on a near tower meet
-// those on the rock behind at the same screen rows near eye level and it reads as see-through. Bodies closer than that
-// still share bands; parting them needs a steeper tilt. Pure world space: a phase that moved with fp would slide the
-// bands as the camera approaches.
+// The bands' phase also wanders over ~55 voxels, so rock bodies more than ~55 voxels apart carry different bands: with
+// one phase for all, the bands on a near tower meet those on the rock behind at the same screen rows near eye level and
+// it reads as see-through. Pure world space: a phase that moved with fp would slide the bands as the camera approaches.
 // `wall` (0..1) marks the great walls of mega relief, whose rock reads as formations from foot to rim.
 // Formation tones (cap rock, wall rock, shale, buff) by index. Selects, not a local array: indexing one per pixel puts
 // it in scratch memory, which costs more than all the noise around it.
@@ -117,8 +115,8 @@ static inline float3 sandRipples(int2 v, float2 uv, float2 w, float fp, float ti
 // 0..1 where world xz w lies among mega relief, from the coarsest ring's max over ~128-voxel cells (lowland rarely rises
 // past ~190). Interpolated between cell corners, each the max of the four cells meeting there, so every column rates at
 // least its own cell's relief and the field stays continuous: interpolated between cell centres, a wall's foot columns
-// past a cell edge rated partly as lowland, and a jogging face crossfaded column by column between the formations and the
-// lowland's 16-voxel beds, which near eye level line up with the beds on every rock behind and read as see-through rock.
+// past a cell edge would rate partly as lowland, and a jogging face crossfade column by column between the formations and
+// the lowland's 16-voxel beds, which near eye level line up with the beds on every rock behind and read as see-through rock.
 // Wider cells would carry the walls' rock a whole cell out over the lowland at their feet.
 static inline float megaWall(thread const Terrain& tr, float2 w) {
     int kc = tr.levels - 1;

@@ -1,4 +1,4 @@
-// Old-growth conifers, redwood and Douglas fir: one to an OLD_CELL cell, straight trunks two or three voxels thick
+// Old-growth conifers, redwood and Douglas fir: one to an OLD_CELL cell, straight trunks a voxel thick (a veteran's three)
 // standing 34-62 tall (a veteran in thirty, 75-95), a clear bole for the lower half, then a narrow crown of drooping
 // whorls, each a skirt wider at its foot, ragged by branch, so the outer columns of a crown are a stack of shelves with
 // sky between them.
@@ -15,7 +15,7 @@ static inline bool oldTreeIn(int2 cc, uint seed, float O, thread float2& ctr, th
     // The forest rises toward the province's heart, so the flight meets it as a slope, not a wall.
     Ht *= mix(0.4, 1.0, smoothstep(0.2, 0.8, O));
     R = (vet ? 7.5 : 4.5) + 0.03 * Ht * hashf(pcg(h + 5u));
-    tr = vet ? 1.9 : Ht > 62.0 ? 1.2 : 0.8;
+    tr = vet ? 1.9 : 0.8;
     return true;
 }
 
@@ -33,7 +33,7 @@ static bool oldSite(int2 c, thread const G& ground, uint seed, thread float& gt)
     return r <= OLD_GENTLE || (r <= OLD_CLIFF && wallClear(c, ground, seed));
 }
 
-// The intervals old-growth tree (trunk ground gt) adds to world column centre w; lod >= 1: crowns only, as a top.
+// The intervals old-growth tree (trunk ground gt) adds to world column centre w (into r only when add), and the top it reaches there.
 static float oldTreeIntervals(float2 w, float2 ctr, float gt, float Ht, float R, float tr, uint h, uint seed, bool add, thread GRuns& r) {
     float2 q = w - ctr;
     float d = length(q);

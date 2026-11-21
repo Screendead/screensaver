@@ -15,7 +15,7 @@ static inline Col towerShape(Col col, Tower T, float2 wf, int s, uint seed) {
     // The plinth: two broad platforms, cut and filled level, the outer one broken up and gone in places.
     if (P0.reff >= T.R0 * 1.42) return col;
     float inner = T.R0 * (1.2 + 0.08 * perlin2(P0.dir * 3.7, seed + 520u));
-    // Where the ground falls away there is no plinth: built out over it, it stood on a sheer pedestal of ground.
+    // Where the ground falls away there is no plinth: built out over it, it would stand on a sheer pedestal of ground.
     float ground = col.h;
     if (ground > T.Hb - 12.0) col.h = P0.reff < inner ? T.Hb + 6.0 : perlin2(wf / 37.0, seed + 521u) > -0.15 ? T.Hb + 3.0 : col.h;
     col.gl = 0; col.gh = 0; col.lo1 = 0; col.hi1 = 0; col.lo2 = 0; col.hi2 = 0; col.carved = false;
@@ -43,12 +43,12 @@ static inline Col towerShape(Col col, Tower T, float2 wf, int s, uint seed) {
     float H = shell ? crownY(T, Pm, yS, T.Hb + T.Ht, seed) : tierY(T, Pm, m, seed);
     float wallIn = Rm - Pm.reff;
     // Whole sections of a stage's outer wall have fallen from the top, in broad bites, so no two stages share an outline;
-    // each bite a few dozen courses at most (cut down a whole stage, a bite's sides ran down the face as crisp lines).
+    // each bite a few dozen courses at most (cut down a whole stage, a bite's sides would run down the face as crisp lines).
     float bite = 30.0 * saturate(perlin2(Pm.dir * 2.6 + float(m) * 2.3, seed + 506u) * 1.7 - 0.2) * (m == 0 ? 0.6 : 1.0);
     if (!shell && bite > 4.0 && wallIn < bite * (0.7 + 0.5 * perlin2(wf / 9.0, seed + 533u)))
         H = max(y0 + 3.0, H - floor(min((H - y0) * (0.15 + 0.01 * bite), 25.0 + 2.0 * bite) / 5.0) * 5.0);
     // Chunks bitten out of the corners, part of a stage's height, their edges ragged. (Stepped down toward the corner,
-    // they drew more setbacks.)
+    // they would draw more setbacks.)
     float seg = TAU / float(T.N);
     uint ch = hash3i(int3((Pm.face + (Pm.am > 0.0 ? 1 : 0)) % T.N, m, int(T.h & 1023u)), seed + 515u);
     if (hashf(ch) < 0.65) {
@@ -78,7 +78,7 @@ static inline Col towerShape(Col col, Tower T, float2 wf, int s, uint seed) {
         }
     }
     // Weathering: the top crumbles back course by course where the worn skin has gone, a few courses at most: run down a
-    // whole stage, the worn skin cut grooves down the face, a crisp line each. (Pockets cut in the face read as dark
+    // whole stage, the worn skin would cut grooves down the face, a crisp line each. (Pockets cut in the face read as dark
     // bricks or windows punched in it, so none are.)
     if (wallIn < 16.0 && s < 8) {
         float yl = max(y0, H - 25.0);
