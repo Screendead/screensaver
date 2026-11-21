@@ -16,9 +16,10 @@ constant float BIO_FLOOR = 0.052, BIO_FLOOR_HALO = 0.68, BIO_CROWN = 0.038;
 constant float BIO_FAR0 = 48.0, BIO_FAR1 = 1400.0, BIO_FAR_GAIN = 4.5;
 // Rock over glowing ground (Surface.bioFoot) takes the glow it looks down on, fading to half at BIO_FOOT_H above a cliff's
 // foot. An island hangs over the whole glowing country, which its rock sees at any height (only the haze takes it, to
-// half at BIO_ISLE_H). Its dark rock (a third of a mesa's albedo) takes more, its keel, square to the ground and seeing
-// all of it, about twice a flank's half: by their albedo alone they read as holes cut in the glowing night.
-constant float BIO_FOOT_H = 160.0, BIO_ISLE_H = 600.0, BIO_ISLE_FLANK = 2.2, BIO_ISLE_KEEL = 4.5;
+// half at BIO_ISLE_H), and which its dark rock (a third of a mesa's albedo) takes as dim lit rock: a flank, seeing half
+// of it, at about 0.6 of the ground's brightness on screen, the keel, square to the ground and seeing all of it, between
+// that and the ground. Set from the Mac's renders of the seed 303 island at night (flank and keel boxes against the ground).
+constant float BIO_FOOT_H = 160.0, BIO_ISLE_H = 600.0, BIO_ISLE_FLANK = 0.8, BIO_ISLE_KEEL = 2.5;
 
 // The light the vegetation gives off at night: moss and undergrowth carpets on the ground, pooled round trunk feet,
 // ragged moss hanging from terrace lips, fungus collars hugging trunk bases, crowns lit from within (undersides and
@@ -122,7 +123,7 @@ static float3 bioLight(thread const Ctx& x, thread const Surface& s, int k, int3
     pulse = mix(pulse, 0.58, 0.5 * far);
     // Violet pockets gain half as much: far off they would crowd out the regional teal and blue.
     float gain = 1.0 + BIO_FAR_GAIN * far * (1.0 - 0.5 * saturate(3.0 * (hue.r - hue.g)));
-    // Well above the ground a face sees many glades at once.
-    float gladeF = mix(glade, 1.0, smoothstep(0.0, 0.25, hh));
+    // Well above the ground a face sees many glades at once; an island's rock, 60 voxels up and more, always does.
+    float gladeF = s.gy >= 1e8 ? 1.0 : mix(glade, 1.0, smoothstep(0.0, 0.25, hh));
     return hue * pulse * gain * bioNear(fp / x.pixelAngle) * (e * D * glade + alb * halo * 0.2 * (1.3 - 0.5 * sv) * max(D * glade, Df * gladeF));
 }
