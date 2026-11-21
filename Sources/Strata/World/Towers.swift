@@ -5,7 +5,7 @@ import simd
 
 // Rare ruined towers. Whether a group stands turns on the climate and the provinces at its centre, so placeTowers
 // decides it on the GPU for a square of world cells round the camera's; the list feeds the camera, and the records
-// nearest the camera are the shader's table (fragment buffer 9; stage 3's giants hold 8).
+// nearest the camera are the shader's table (fragment buffer 9; the giants hold 8).
 final class Towers {
     // Must match TOWER_CELL, TOWER_MEMBERS and TOWER_TABLE in Shaders/World/Towers/Layout.metal.
     static let cell = 9000.0, members = 4, tableSize = 16

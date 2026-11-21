@@ -95,7 +95,6 @@ final class Vines {
         }
         enc?.endEncoding()
         if !fresh.isEmpty {
-            // Until the bake lands the slab is the loose one below.
             cb.addCompletedHandler { _ in
                 self.bakedLock.lock()
                 for f in fresh where self.generation[f.slot] == f.generation { self.baked[f.slot] = true }

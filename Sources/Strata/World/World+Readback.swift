@@ -1,7 +1,6 @@
 import Foundation
 import Metal
 import StrataCore
-import simd
 
 extension World {
     // A map's CPU copy (Terrain's arrays), and the highest top on it.
