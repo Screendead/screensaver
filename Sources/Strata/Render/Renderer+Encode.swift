@@ -33,7 +33,6 @@ extension Renderer {
         if let bakes { bakeShadows(into: bakes, frame: &f) }
         if Knobs.current.profile != "nohorizon", let enc = bakes { encodeHorizon(into: enc, frame: &f) }
         bakes?.endEncoding()
-        // The giants within the world's edge: their strand maps (baked on arrival) and the frame's table of them.
         vines.update(giants: world.terrain.giants, eye: camera.xz, reach: Double(f.fade.y), origin: world.origin, seed: world.seed, into: cb)
         // Snapshots refresh the far heights synchronously as they simulate.
         if !world.synchronous { updateFar(into: cb) }
@@ -51,18 +50,15 @@ extension Renderer {
         let histIn = history[historyIndex], histOut = history[1 - historyIndex]
         historyIndex = 1 - historyIndex
         encodeScene(into: cb, target: sceneTex, frame: &f, birds: birdBuf, width: w, height: h)
-        // The giants' hanging strands over the scene (vineFragment): the scene's bindings less the birds and the lamp
-        // references, plus the strand maps. VR_PROFILE=bits2048 leaves them out.
         if vines.tableCount > 0 && Knobs.current.profileBits & 2048 == 0 {
             encodeVines(into: cb, target: sceneTex, frame: &f)
         }
-        // In its own pass: drawn after the scene in the scene's pass, even a draw doing nothing cost a twilight scene ~0.4 ms.
+        // In its own pass: in the scene's pass even a draw doing nothing costs a twilight scene ~0.4 ms.
         if f.sunDir.y < Renderer.bioSun { encodeBio(into: cb, target: sceneTex, frame: &f) }
         encodeResolve(into: cb, scene: sceneTex, history: histIn, into: histOut, frame: &f, cells: (ow, oh))
         encodePost(into: cb, history: histOut, output: output, frame: &f)
     }
 
-    // The province fields round the camera, rebaked whole once it has moved an eighth of their window.
     private func encodeProvinces(into cb: MTLCommandBuffer) {
         let cam2 = camera.xz
         guard provCentre.map({ simd_length($0 - cam2) > Double(Renderer.provN) * Renderer.provCell / 8 }) ?? true,
@@ -77,7 +73,6 @@ extension Renderer {
         enc.endEncoding()
     }
 
-    // The terrain horizon round the camera and the islands' tangents (bakeHorizon).
     private func encodeHorizon(into enc: MTLComputeCommandEncoder, frame f: inout Frame) {
         f.shadow.z = 1
         enc.setComputePipelineState(horizonPipeline)
@@ -92,7 +87,7 @@ extension Renderer {
         enc.setTexture(world.bandTex, index: 6)
         enc.setTexture(clipmap.band, index: 7)
         enc.setBuffer(world.giantBuffer, offset: 0, index: 2)
-        // HORIZON_SEGS (64) threads per bin, one threadgroup each.
+        // Must match Shaders/Sky/Horizon.metal: HORIZON_SEGS (64) threads per bin, one threadgroup each, HORIZON_BINS (1024) bins.
         enc.dispatchThreads(MTLSize(width: 64, height: 1024, depth: 1), threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
     }
 

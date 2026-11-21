@@ -3,7 +3,7 @@ import MetalKit
 import StrataCore
 
 extension Renderer {
-    convenience init?(view: MTKView, gpu: GPU, screen: NSScreen, seed: UInt32, screenIndex: Int, battery: Bool, dither: Bool = true) {
+    convenience init?(view: MTKView, gpu: GPU, screen: NSScreen, seed: UInt32, screenIndex: Int, battery: Bool, dither: Bool) {
         let backingScale = screen.backingScaleFactor
         let edr = screen.maximumPotentialExtendedDynamicRangeColorComponentValue > 1
         if edr {

@@ -9,9 +9,11 @@ extension Renderer {
     func bakeShadows(into enc: MTLComputeCommandEncoder, frame f: inout Frame) {
         let (key, casts) = SkyClock.keyLight(clock.sunDirection)
         let levels = (1...Clipmap.levels).prefix { clipmap.ready($0) }.count
-        // VR_PROFILE (tests): "noshadow" drops terrain shadows, "nobake" keeps the maps but skips their rebaking.
-        // "bitsN" sets profiling flags directly: 8 reflections unshaded, 16 no sky visibility, 32 no cloud shadow or veil,
-        // 64 primary hits unshaded, 4096 no glow on the land, 8192 the land's glow at its far means only.
+        // VR_PROFILE: "noshadow" drops terrain shadows, "oldshadow" traces shadow rays without the maps, "nobake" keeps
+        // the maps but skips their rebaking. "bitsN" passes N to the shader as its profiling flags (x.prof): 8 reflections
+        // unshaded, 16 no sky visibility, 32 no cloud shadow or veil, 64 primary hits unshaded, 128 no island mist or sea
+        // glow, 256 no fish, 512 no reef, 4096 no glow on the land, 8192 the land's glow at its far means only; 2048
+        // (Renderer.encode) leaves out the giants' strands.
         f.shadow.y = Knobs.current.profile == "nearclouds" ? 1 : Knobs.current.profile == "lowmax" ? 2 : Knobs.current.profile == "norefl" ? 4 : Float(Knobs.current.profileBits)
         if Knobs.current.profile == "noshadow" { f.shadow.x = 3; return }
         if Knobs.current.profile == "oldshadow" { f.shadow.x = 0; return }
