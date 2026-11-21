@@ -52,7 +52,6 @@ final class SaverController {
         let front = NSWorkspace.shared.frontmostApplication
         previousApp = front?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : front
         battery = settings.forceBattery || SystemState.onBattery()
-        // A different seed per session keeps the world non-repeating across activations.
         shownBiome = settings.biome ?? Prefs.biome
         let sessionSeed = Biome.seed(settings.seed != 0 ? settings.seed : UInt32.random(in: 1...Biome.maxSeed), biome: shownBiome)
         let gpu = MTLCreateSystemDefaultDevice().flatMap { GPU(device: $0) }

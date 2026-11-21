@@ -3,7 +3,6 @@ import Metal
 import StrataCore
 import simd
 
-// Offscreen render to PNG, for checking visuals without a display.
 enum Snapshot {
     // False if the renderer could not start or a PNG could not be written.
     static func run(settings: Settings, path: String, gpu shared: GPU? = nil) -> Bool {
