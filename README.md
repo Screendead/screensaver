@@ -41,20 +41,31 @@ It replaces the system screensaver. If you like, set System Settings › Lock Sc
 | `--seed N` | Fixed world seed (default: random per activation) |
 | `--speed X` | Time multiplier (soak testing). Snapshots honour it too: `--times 60 --speed 20` simulates 1200 s |
 | `--battery` | Force the battery-quality path |
+| `--biome N` | Pin the biome, by number (1 to 9) or name; 0 or unset: the seed's own |
+| `--headroom X` | Snapshots: EDR headroom to render with (default 0, none) |
+| `--serve path` | Serve `--screenshot` jobs on a Unix socket (what `tools/vrr` starts) |
 | `--screenshot out.png --times 10,60 --size WxH --scale S` | Render offscreen PNGs after simulating to each time |
 | `--phase P`, `--pitch R`, `--debug M` | Snapshot overrides: day phase (0 = sunrise), camera pitch, debug view |
 
 Environment: `VR_TIMING=1` logs GPU frame times and world regeneration, and `VR_DEBUG=1` logs idle and activation decisions.
 Snapshot test switches: `VR_MOTION=1` (with `VR_MOTION_FRAMES=n`, `VR_FRAMES=n`) advances the camera between frames and dumps them,
 `VR_CHUNKED=1` updates the LOD rings a piece per frame as live, `VR_COARSE_FULL=1` rebuilds them whole every frame,
-`VR_LODSHIFT=v` moves the rings' centre v voxels ahead of the camera, and `VR_POWER_FLIP=i` switches power source at frame i.
+`VR_LODSHIFT=v` moves the rings' centre v voxels ahead of the camera, `VR_POWER_FLIP=i` switches power source at frame i,
+and `VR_PIECES=1` regenerates a map one timed command buffer per piece.
 `VR_EXPOSURE=e` holds a bug report's recorded exposure, and `VR_BUGTEST=s` flies s seconds recording as the saver does, then
 writes a report into `<screenshot>_reports/`. `VR_PATH=file` renders a recorded camera path frame by frame, and
 `./bugclip.sh "<bug report folder>" [app] [out.mp4]` uses it to prove a fix: the report's clip over the same camera path
 through the build, in one video.
+Poses: `VR_START=x,z,yawDeg` starts the flight there, `VR_CAM=x,z,height,yawDeg,pitchDeg[,abs[,rollDeg]]` holds the camera at a
+point (`abs`: 1 for an absolute height), `VR_SHOW=kind,distance,height,bearing[,rank]` holds it on the rank-th nearest site of a kind.
 Caves: `VR_CAVES=r` lists the caves within r of each new map's centre (and counts the lowland ones), `VR_CAVE=distance,height,bearing[,rank[,which]]` holds the
 camera on the rank-th nearest cave (which: 1 lived-in, 2 big and seen clear, 3 grottoes), `VR_DOLLY=v` moves a held camera v voxels
 a frame along its heading (approaches across the rings), and `VR_NOCAVES=1` leaves the cave table empty (renders as before caves).
+Listings and soaks: `VR_SITES=1` logs each new map's giants and sites (`3`: and each site's parts), `VR_TOWERS=n` and `VR_ISLES=n` list the
+towers and the islands near the start, `VR_ISLE_FIELD=1` swaps island country for the test field (`2`: no islands), `VR_FLIGHT=min` flies the
+autopilot that long logging it (`VR_FTRACE=1`: every 0.25 s), `VR_POPLOG=1` logs birds that appear or vanish in view, `VR_BIRDTRACE=1` logs
+the flocks each second, `VR_BIRDTEST=d` and `VR_MURMUR=d` replace the flocks with a test pattern or a murmuration d ahead,
+`VR_BENCH=n` times n still frames, and `VR_PROFILE=<name>` turns off a render stage for bisecting (names in `Knobs.swift`).
 Live frame times are measured at `--size 3456x2234 --scale 1`: the scene renders on the 864-cell dither grid, so scale 1 is the AC live size.
 
 ## Layout
