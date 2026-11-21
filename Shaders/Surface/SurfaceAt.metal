@@ -1,3 +1,72 @@
+// Night glow share of open ground at height H in climate c: damp, mild, vegetated country, in groves, most in the woods and
+// the damp lowlands; none on sand, salt, desert, snow, the great walls or the bare uplands. Cover comes from the 2-voxel map
+// on the 1-voxel one too, so both sides of their handoff see the same woods. g takes the groves' noise and jw the jungle
+// weight where any glows. groves: false for rock high over the country, which sees so many at once that it takes their
+// mean (BIO_GROVE_MEAN, the share of open ground smoothstep(-0.35, 0.05, g) lights).
+constant float BIO_GROVE_MEAN = 0.71;
+static float bioShare(thread const Terrain& tr, int k, Climate c, float desert, float rimW, float painted, float wallM,
+                      float snowline, float H, float3 p, float2 wp, uint seed, bool groves, thread float& g, thread float& jw) {
+    float d = max(smoothstep(0.1, 0.5, provinceAmount(c)), smoothstep(0.25, 0.55, c.moist)) * smoothstep(0.18, 0.4, c.temp)
+            * (1.0 - smoothstep(0.1, 0.4, desert)) * (1.0 - rimW) * (1.0 - 0.5 * painted) * (1.0 - wallM)
+            * (1.0 - smoothstep(SEA + 60.0, SEA + 150.0, H)) * (1.0 - smoothstep(snowline - 8.0, snowline, H));
+    if (d <= 0.0) return 0.0;
+    g = bioNoise(wp / 170.0, seed + 710u) + 0.5 * bioNoise(wp / 47.0, seed + 711u);
+    jw = smoothstep(0.65, 0.9, c.jungle);
+    d *= (groves ? smoothstep(-0.35, 0.05, g) : BIO_GROVE_MEAN) * (1.0 + 0.7 * smoothstep(SEA + 28.0, SEA + 3.0, H)) * (1.0 - 0.45 * jw);
+    int kc = max(k, 1);
+    constexpr sampler cb(filter::linear, address::repeat);
+    float cov = tr.cv.sample(cb, (p.xz / tr.lod[kc].w + float2(levelOrigin(tr, kc))) / float(COARSE_N), uint(kc - 1), level(0)).r;
+    return d * (0.6 + 0.4 * saturate(cov * COVER_GAIN));
+}
+
+// The glow share of the open ground at level k's column vc, at height H: its own climate and walls, as surfaceAt gives
+// that ground. wall: whether the great walls' cut applies (not under an island, whose own top would raise it).
+static float bioShareAt(thread const Terrain& tr, int k, int2 vc, float cs, float H, int2 mapOrigin, uint seed, bool wall,
+                        thread float& g, thread float& jw) {
+    float2 pc = (float2(vc) + 0.5) * cs;
+    Climate c = climateL(tr, k, pc);
+    float snowline = snowlineAt(c.temp);
+    float wallM = wall ? megaWall(tr, float2(vc * int(cs) + mapOrigin)) : 0.0;
+    float painted = smoothstep(0.0, 0.6, paintedAmount(c)) * (1.0 - wallM);
+    float desert = desertAmount(c), rimW = smoothstep(0.05, 0.4, saltAmount(c));
+    c.temp = altitudeTemp(c.temp, H);
+    return bioShare(tr, k, c, desert, rimW, painted, wallM, snowline, H, float3(pc.x, H, pc.y), pc + float2(mapOrigin), seed,
+                    true, g, jw);
+}
+
+// The glow share of the country an island hangs over, as its rock sees it from 60 to 500 voxels up: the groves at their
+// mean, the rest bilinear between the points of a fixed world lattice BIO_REGION voxels apart, each in its own climate at
+// its own ground (under an island, the ground below it). Continuous across the rock, and the same at every level and map
+// origin (a multiple of 64): no column's own ground, cover or grove shows as a step or stripe down a flank. H: the
+// country's ground, interpolated the same way; g: the groves' noise, for the pulse.
+constant float BIO_REGION = 256.0;
+static float bioShareRegion(thread const Terrain& tr, int k, float2 w, int2 mapOrigin, uint seed, thread float& H,
+                            thread float& g) {
+    int kS = max(k, 2);
+    float cs = tr.lod[kS].w;
+    float2 q = w / BIO_REGION, i0 = floor(q), f = q - i0;
+    float d = 0.0;
+    H = 0.0;
+    g = 0.0;
+    for (int j = 0; j < 4; j++) {
+        float2 o = float2(float(j & 1), float(j >> 1));
+        float wt = mix(1.0 - f.x, f.x, o.x) * mix(1.0 - f.y, f.y, o.y);
+        float2 pc = (i0 + o) * BIO_REGION - float2(mapOrigin);
+        float h = groundL(tr, kS, int2(floor(pc / cs)), SEA);
+        Climate c = climateL(tr, kS, pc);
+        float snowline = snowlineAt(c.temp);
+        float painted = smoothstep(0.0, 0.6, paintedAmount(c));
+        float desert = desertAmount(c), rimW = smoothstep(0.05, 0.4, saltAmount(c));
+        c.temp = altitudeTemp(c.temp, h);
+        float gj = 0.0, jw = 0.0;
+        d += wt * bioShare(tr, kS, c, desert, rimW, painted, 0.0, snowline, h, float3(pc.x, h, pc.y), pc + float2(mapOrigin),
+                           seed, false, gj, jw);
+        H += wt * h;
+        g += wt * gj;
+    }
+    return d;
+}
+
 // Surface of level k's column v (xz in level cells) on face n; uv is the face position in [0, 1) of the column.
 // Coarse columns are s voxels wide but still unit voxels tall, and carry no structures.
 // lite: seen in rippled water, so detail finer than the ripples' blur is shaded at its mean.
@@ -12,6 +81,7 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     s.bioY = 0;
     s.bioJ = 0;
     s.bioNb = 0u;
+    s.bioFoot = 0;
     s.slope = 0;
     s.mat = 0;
     s.level = 0;
@@ -293,26 +363,39 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
     // The tread eases into snow across the snowline, which far off is one straight contour.
     s.tread = mix(tread, snow, smoothstep(snowline - 6.0, snowline + 6.0, Hc));
     s.face = needStone ? (snowy ? mix(stone, snow, 0.45 * (1.0 - smoothstep(6.0, 30.0, slope))) : stone * 0.95) : s.tread;
-    // Night glow: damp, mild, vegetated country, in groves, most in the woods and the damp lowlands; none on sand, salt,
-    // desert, snow, the great walls or the bare uplands. Cover comes from the 2-voxel map on the 1-voxel one too, so
-    // both sides of their handoff see the same woods.
-    if (bio && !underGap && !built && !(isleBody && n.y <= 0 && float(v.y) < isleLo - 6.0)) {
-        float d = max(smoothstep(0.1, 0.5, provinceAmount(c)), smoothstep(0.25, 0.55, c.moist)) * smoothstep(0.18, 0.4, c.temp)
-                * (1.0 - smoothstep(0.1, 0.4, desert)) * (1.0 - rimW) * (1.0 - 0.5 * painted) * (1.0 - wallM)
-                * (1.0 - smoothstep(SEA + 60.0, SEA + 150.0, Hc)) * (1.0 - smoothstep(snowline - 8.0, snowline, Hc));
-        if (d > 0.0) {
-            float2 wp = p.xz + float2(mapOrigin);
-            float g = bioNoise(wp / 170.0, seed + 710u) + 0.5 * bioNoise(wp / 47.0, seed + 711u);
-            s.bioG = g;
-            s.bioJ = smoothstep(0.65, 0.9, c.jungle);
-            d *= smoothstep(-0.35, 0.05, g) * (1.0 + 0.7 * smoothstep(SEA + 28.0, SEA + 3.0, Hc)) * (1.0 - 0.45 * s.bioJ);
-            int kc = max(k, 1);
-            constexpr sampler cb(filter::linear, address::repeat);
-            float cov = tr.cv.sample(cb, (p.xz / tr.lod[kc].w + float2(levelOrigin(tr, kc))) / float(COARSE_N), uint(kc - 1), level(0)).r;
-            d *= 0.6 + 0.4 * saturate(cov * COVER_GAIN);
+    // Night glow (bioShare). An island's rock below its top's soil holds none of its own.
+    if (bio && !underGap && !built) {
+        float2 wp = p.xz + float2(mapOrigin);
+        bool keel = isleBody && n.y <= 0 && float(v.y) < isleLo - 6.0;
+        if (!keel) {
+            s.bio = bioShare(tr, k, c, desert, rimW, painted, wallM, snowline, Hc, p, wp, seed, true, s.bioG, s.bioJ);
+            if (tree) s.bioY = col.y;
         }
-        s.bio = d;
-        if (tree) s.bioY = col.y;
+        // Rock that looks down on glowing ground takes its light (bioLight), the ground's share in its own climate and
+        // walls: an island's flanks and keel the country's under it (bioShareRegion; an island's own climate is kept
+        // green to its rim, which would light keels over desert), up to its rim so the soil's own glow meets it; a cliff's
+        // face the ground before it, which glows where the cliff's top is too high to. A low step in glowing country
+        // glows as the ground at its foot does already. A stepped wall's foot is the lowest ground out to 32 voxels before
+        // it, not the next step's top; higher up, a face sees the country further out, past the great walls' bare skirts.
+        bool isle = isleBody && n.y <= 0;
+        if (!vegVox && (isle || (n.y == 0 && (s.bio == 0.0 || s.riser > 3.0)))) {
+            float hf, gF = 0.0, jF = 0.0, dF;
+            if (isle) {
+                dF = bioShareRegion(tr, k, wp, mapOrigin, seed, hf, gF);
+            } else {
+                float vy = min(float(v.y), s.gy);
+                int2 v32 = v.xz + n.xz * max(1, int(32.0 / cs)), v160 = v.xz + n.xz * max(1, int(160.0 / cs));
+                hf = min(min(s.H - s.riser, groundL(tr, k, v.xz + n.xz * max(1, int(8.0 / cs)), vy)), groundL(tr, k, v32, vy));
+                dF = bioShareAt(tr, k, v32, cs, hf, mapOrigin, seed, true, gF, jF);
+                float gX = 0.0, jX = 0.0;
+                float dX = bioShareAt(tr, k, v160, cs, groundL(tr, k, v160, vy), mapOrigin, seed, true, gX, jX)
+                         * 0.6 * smoothstep(0.0, 160.0, p.y - hf);
+                if (dX > dF) { dF = dX; gF = gX; }
+            }
+            s.bioFoot = float2(dF, p.y - hf);
+            // The pulse travels across the rock as across the ground below it.
+            if (s.bio == 0.0) s.bioG = gF;
+        }
     }
 
     if (n.y > 0 && !underGap) {

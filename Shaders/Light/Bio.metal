@@ -14,6 +14,12 @@ static inline float bioNear(float dist) { return mix(0.6, 1.0, smoothstep(60.0, 
 constant float BIO_FLOOR = 0.052, BIO_FLOOR_HALO = 0.68, BIO_CROWN = 0.038;
 // Distant glow: x(1 + gain) reached at FAR1 voxels from the camera, none within FAR0.
 constant float BIO_FAR0 = 48.0, BIO_FAR1 = 1400.0, BIO_FAR_GAIN = 4.5;
+// Rock over glowing ground (Surface.bioFoot) takes the glow it looks down on, fading to half at BIO_FOOT_H above a cliff's
+// foot. An island hangs over the whole glowing country, which its rock sees at any height (only the haze takes it, to
+// half at BIO_ISLE_H), and which its dark rock (a third of a mesa's albedo) takes as dim lit rock: a flank, seeing half
+// of it, at about 0.6 of the ground's brightness on screen, the keel, square to the ground and seeing all of it, between
+// that and the ground. Set from the Mac's renders of the seed 303 island at night (flank and keel boxes against the ground).
+constant float BIO_FOOT_H = 160.0, BIO_ISLE_H = 600.0, BIO_ISLE_FLANK = 0.8, BIO_ISLE_KEEL = 2.5;
 
 // The light the vegetation gives off at night: moss and undergrowth carpets on the ground, pooled round trunk feet,
 // ragged moss hanging from terrace lips, fungus collars hugging trunk bases, crowns lit from within (undersides and
@@ -29,7 +35,15 @@ static float3 bioLight(thread const Ctx& x, thread const Surface& s, int k, int3
         D = 0.6 * smoothstep(-0.35, 0.05, g) * (1.0 - 0.5 * smoothstep(0.65, 0.9, c.jungle));
     }
     float jw = s.bioJ;
-    if (D <= 0.0) return 0;
+    // The light that rock takes from the glowing ground below it: no more than a face glowing at that ground's share would.
+    float Df = 0.0, hh = 0.0;
+    if (s.bioFoot.x > 0.0) {
+        bool isle = s.gy >= 1e8;
+        hh = max(s.bioFoot.y, 0.0) / (isle ? BIO_ISLE_H : BIO_FOOT_H);
+        Df = s.bioFoot.x / (1.0 + hh * hh) * (isle ? (n.y < 0 ? BIO_ISLE_KEEL : BIO_ISLE_FLANK) : 1.0);
+    }
+    if (D <= 0.0 && Df <= 0.0) return 0;
+    D = max(D, 0.0);
     float3 hue = bioHue(wp.xz, x.seed);
     float pulse = bioPulse(wp.xz, x.time, x.seed, g);
     // Pattern to mean as the footprint grows, before any of it nears a pixel, and across the 1-voxel map's morph band:
@@ -109,5 +123,7 @@ static float3 bioLight(thread const Ctx& x, thread const Surface& s, int k, int3
     pulse = mix(pulse, 0.58, 0.5 * far);
     // Violet pockets gain half as much: far off they would crowd out the regional teal and blue.
     float gain = 1.0 + BIO_FAR_GAIN * far * (1.0 - 0.5 * saturate(3.0 * (hue.r - hue.g)));
-    return hue * D * pulse * glade * gain * bioNear(fp / x.pixelAngle) * (e + alb * halo * 0.2 * (1.3 - 0.5 * sv));
+    // Well above the ground a face sees many glades at once; an island's rock, 60 voxels up and more, always does.
+    float gladeF = s.gy >= 1e8 ? 1.0 : mix(glade, 1.0, smoothstep(0.0, 0.25, hh));
+    return hue * pulse * gain * bioNear(fp / x.pixelAngle) * (e * D * glade + alb * halo * 0.2 * (1.3 - 0.5 * sv) * max(D * glade, Df * gladeF));
 }

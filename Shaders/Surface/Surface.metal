@@ -27,4 +27,6 @@ struct Surface {
     float bioY;     // a trunk's foot
     float bioJ;     // jungle weight, which gathers the glow into clusters
     uint bioNb;     // ground beside a tree column: -x, +x, -z, +z bits
+    float2 bioFoot; // rock over glowing ground (an island's flanks and keel, a cliff's face): that ground's glow share, and the
+                    // height above it
 };
