@@ -1,20 +1,16 @@
 @testable import StrataCore
 import simd
 
-// Rolling hills with valleys under the sea (relief scales the hills about a mean of 45), standing in for the GPU's map: the loaded map's CPU copy and the far heights,
+// Rolling hills with valleys under the sea, standing in for the GPU's map: the loaded map's CPU copy and the far heights,
 // re-centred on the camera as World and Renderer keep them.
 final class SyntheticWorld {
     let terrain = Terrain(), far = FarHeights()
-    let relief: Double
 
     func ground(_ x: Double, _ z: Double) -> Double {
-        45 + relief * (70 * sin(x / 310) * sin(z / 270) + 35 * sin((x - 2 * z) / 530) + 20 * cos(z / 150 + x / 900))
+        45 + 70 * sin(x / 310) * sin(z / 270) + 35 * sin((x - 2 * z) / 530) + 20 * cos(z / 150 + x / 900)
     }
 
-    init(around p: SIMD2<Double>, relief: Double) {
-        self.relief = relief
-        fill(p)
-    }
+    init(around p: SIMD2<Double>) { fill(p) }
 
     // Moves the map once the camera is a quarter of it from its centre.
     func follow(_ p: SIMD2<Double>) {
@@ -47,31 +43,43 @@ final class SyntheticWorld {
     }
 }
 
-// The camera flown over a SyntheticWorld through the sky clock, as Renderer.simulate steps it; each step's pose.
+// The camera and the birds flown over a SyntheticWorld through the sky clock, stepped as Renderer.simulate steps them
+// (the birds after the camera, with an 864x558 frame's Sight); each step's pose.
 final class Flight {
     struct Pose: Equatable { var position: SIMD3<Double>; var yaw: Double, pitch: Double, roll: Double }
     let world: SyntheticWorld
     let camera: FlightCamera
+    let wildlife: Wildlife
     var clock = SkyClock()
     private(set) var poses: [Pose] = []
 
-    init(seed: UInt32, phase: Double, relief: Double = 1) {
+    init(seed: UInt32, phase: Double) {
         let probe = FlightCamera(seed: seed, terrain: Terrain(), far: FarHeights())
-        world = SyntheticWorld(around: probe.xz, relief: relief)
+        world = SyntheticWorld(around: probe.xz)
         camera = FlightCamera(seed: seed, terrain: world.terrain, far: world.far)
         camera.moveToOpenGround()
         world.follow(camera.xz)
         camera.liftOverGround()
         clock.phase = phase
+        wildlife = Wildlife(seed: seed)
+        let terrain = world.terrain
+        wildlife.heightAt = { terrain.height(x: $0, z: $1) }
+        wildlife.columnAt = { terrain.column(x: $0, z: $1) }
     }
 
-    func fly(seconds: Double, dt: Double = 1.0 / 30, each: (FlightCamera, Double) -> Void = { _, _ in }) {
+    private func sight() -> Sight {
+        let b = camera.basis, tanV = tan(25.0 * .pi / 180)
+        return Sight(pos: camera.position, fwd: b.fwd, right: b.right, up: b.up, tanV: tanV, aspect: 864.0 / 558, pixelAngle: 2 * tanV / 558,
+                     sunY: clock.sunDirection.y, worldEdge: 860 * 16, floorReach: 880 - 146, terrain: world.terrain)
+    }
+
+    func fly(seconds: Double, dt: Double = 1.0 / 30) {
         for _ in 0..<Int(seconds / dt) {
             camera.sun = clock.sunDirection
             camera.nightIndex = clock.nightIndex
             camera.cloudSea = clock.cloudSea
             camera.step(dt: dt)
-            each(camera, dt)
+            wildlife.step(dt: dt, camera: camera, sight: sight(), sunY: clock.sunDirection.y, phase: clock.phase)
             clock.advance(dt)
             world.follow(camera.xz)
             poses.append(Pose(position: camera.position, yaw: camera.yaw, pitch: camera.pitch, roll: camera.roll))

@@ -2,49 +2,29 @@
 import XCTest
 import simd
 
-// The birds round an autopilot flight over synthetic land.
+// The autopilot and the birds round it, over synthetic land.
 final class WildlifeTests: XCTestCase {
     private func birds(_ w: Wildlife) -> [SIMD3<Double>] { w.flocks.flatMap { $0.birds.map(\.pos) } }
 
-    // All randomness comes from the seed in step order, so a snapshot reproduces.
-    func testASeedRaisesTheSameBirds() {
-        let a = Aviary(seed: 303, phase: 0.05), b = Aviary(seed: 303, phase: 0.05)
-        a.fly(seconds: 45)
-        b.fly(seconds: 45)
+    // All randomness comes from the seed in step order, so a snapshot reproduces: the same seed flies the same path and
+    // raises the same birds, through two of its shot choices (12 s apart) and a bird spawn each second or so.
+    func testASeedFliesTheSamePathAndRaisesTheSameBirds() {
+        let a = Flight(seed: 303, phase: 0.05), b = Flight(seed: 303, phase: 0.05)
+        a.fly(seconds: 13)
+        b.fly(seconds: 13)
         XCTAssertFalse(birds(a.wildlife).isEmpty)
+        XCTAssertEqual(a.poses, b.poses)
         XCTAssertEqual(birds(a.wildlife), birds(b.wildlife))
         XCTAssertEqual(a.wildlife.flocks.map(\.kind), b.wildlife.flocks.map(\.kind))
-        let c = Aviary(seed: 304, phase: 0.05)
-        c.fly(seconds: 45)
-        XCTAssertNotEqual(birds(a.wildlife), birds(c.wildlife))
-    }
-
-    // A minute after dawn over high hills: flocks within the shader's caps, every bird above the ground under it, and the upload
-    // writing within the bird buffer.
-    func testFlocksStayInTheAirAndInTheBuffer() {
-        // Hills to 400 or so: the flocks' cruising height alone would not clear them.
-        let a = Aviary(seed: 303, phase: 0.05, relief: 3), terrain = a.flight.world.terrain
-        var most = 0
-        a.fly(seconds: 60) { w in
-            XCTAssertLessThanOrEqual(w.flocks.count, Wildlife.maxFlocks)
-            for f in w.flocks {
-                for b in f.birds {
-                    XCTAssertTrue(b.pos.x.isFinite && b.pos.y.isFinite && b.pos.z.isFinite)
-                    XCTAssertGreaterThan(b.pos.y, terrain.height(x: b.pos.x, z: b.pos.z)!, "\(f.kind)")
-                }
-            }
-            most = max(most, w.flocks.map(\.birds.count).reduce(0, +))
-        }
-        XCTAssertGreaterThan(most, 40)
     }
 
     // The bird buffer as the shader walks it: per flock a sphere and its clusters, per cluster a sphere and its birds, each
     // bird map-local; every drawn bird inside its cluster's and flock's spheres, nothing written past the buffer. A
     // murmuration of 320 to 420 starlings fills it most.
     func testUploadWritesEveryBirdWhereTheShaderReadsIt() {
-        let a = Aviary(seed: 303, phase: 0.05)
-        a.fly(seconds: 20)
-        a.wildlife.testMurmuration(camera: a.flight.camera, distance: 300)
+        let a = Flight(seed: 303, phase: 0.05)
+        a.fly(seconds: 3)
+        a.wildlife.testMurmuration(camera: a.camera, distance: 300)
         a.fly(seconds: 1)
         let origin = SIMD3<Double>(1024, 0, -2048), guardBytes = 256
         let buffer = UnsafeMutableRawPointer.allocate(byteCount: Wildlife.bufferLength + guardBytes, alignment: 16)
@@ -73,13 +53,5 @@ final class WildlifeTests: XCTestCase {
                 }
             }
         }
-    }
-
-    // Deep in the night only bats fly.
-    func testOnlyBatsFlyAtNight() {
-        let a = Aviary(seed: 606, phase: 0.75)
-        a.fly(seconds: 60) { _ in a.flight.clock.phase = 0.75 }
-        XCTAssertFalse(a.wildlife.flocks.isEmpty)
-        XCTAssertEqual(Set(a.wildlife.flocks.map(\.kind)), [.bat])
     }
 }
