@@ -17,6 +17,20 @@ static float bioShare(thread const Terrain& tr, int k, Climate c, float desert, 
     return d * (0.6 + 0.4 * saturate(cov * COVER_GAIN));
 }
 
+// The glow share of the open ground at level k's column vc, at height H: its own climate and walls, as surfaceAt gives
+// that ground. wall: whether the great walls' cut applies (not under an island, whose own top would raise it).
+static float bioShareAt(thread const Terrain& tr, int k, int2 vc, float cs, float H, int2 mapOrigin, uint seed, bool wall,
+                        thread float& g, thread float& jw) {
+    float2 pc = (float2(vc) + 0.5) * cs;
+    Climate c = climateL(tr, k, pc);
+    float snowline = snowlineAt(c.temp);
+    float wallM = wall ? megaWall(tr, float2(vc * int(cs) + mapOrigin)) : 0.0;
+    float painted = smoothstep(0.0, 0.6, paintedAmount(c)) * (1.0 - wallM);
+    float desert = desertAmount(c), rimW = smoothstep(0.05, 0.4, saltAmount(c));
+    c.temp = altitudeTemp(c.temp, H);
+    return bioShare(tr, k, c, desert, rimW, painted, wallM, snowline, H, float3(pc.x, H, pc.y), pc + float2(mapOrigin), seed, g, jw);
+}
+
 // Surface of level k's column v (xz in level cells) on face n; uv is the face position in [0, 1) of the column.
 // Coarse columns are s voxels wide but still unit voxels tall, and carry no structures.
 // lite: seen in rippled water, so detail finer than the ripples' blur is shaded at its mean.
@@ -163,8 +177,6 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
         return giantSurface(tr, s, k, v, n, uv, fp, wq, wy, col, gsb, gLoc, gi, cs, mapOrigin, seed);
     }
     Climate c = climateL(tr, k, (float2(v.xz) + 0.5) * cs);
-    // The lowland's own climate, for the glow of the ground under an island.
-    Climate c0 = c;
     // An island is green to its rim, wherever its edge reaches out over drier land.
     if (Hc != H) { c.temp = clamp(c.temp, 0.48, 0.6); c.moist = max(c.moist, 0.66); c.fall = 0.0; }
     float desert = desertAmount(c);
@@ -323,26 +335,27 @@ static Surface surfaceAt(thread const Terrain& tr, texture2d<uint> st, device co
             s.bio = bioShare(tr, k, c, desert, rimW, painted, wallM, snowline, Hc, p, wp, seed, s.bioG, s.bioJ);
             if (tree) s.bioY = col.y;
         }
-        // Rock that looks down on glowing ground takes its light (bioLight): an island's flanks and keel the lowland's
-        // under it, in the lowland's own climate (an island's is kept green to its rim), up to its rim so the soil's own
-        // glow meets it without a seam; a cliff's face the ground at its foot, which glows where the cliff's top is too
-        // high to. A low step in glowing country glows as the ground at its foot does already. A stepped wall's foot is
-        // the lowest ground out to 32 voxels before it, not the next step's top.
+        // Rock that looks down on glowing ground takes its light (bioLight), the ground's share in its own climate and
+        // walls: an island's flanks and keel the lowland's under it (an island's own climate is kept green to its rim,
+        // which would light keels over desert), up to its rim so the soil's own glow meets it without a seam; a cliff's
+        // face the ground before it, which glows where the cliff's top is too high to. A low step in glowing country
+        // glows as the ground at its foot does already. A stepped wall's foot is the lowest ground out to 32 voxels before
+        // it, not the next step's top; higher up, a face sees the country further out, past the great walls' bare skirts.
         bool isle = isleBody && n.y <= 0;
         if (!vegVox && (isle || (n.y == 0 && (s.bio == 0.0 || s.riser > 3.0)))) {
             float hf, gF = 0.0, jF = 0.0, dF;
             if (isle) {
                 hf = col.y;
-                Climate cg = c0;
-                cg.temp = altitudeTemp(c0.temp, hf + 4.0);
-                float pg = smoothstep(0.0, 0.6, paintedAmount(c0)) * (1.0 - wallM);
-                dF = bioShare(tr, k, cg, desertAmount(c0), smoothstep(0.05, 0.4, saltAmount(c0)), pg, wallM, snowline, hf, p, wp,
-                              seed, gF, jF);
+                dF = bioShareAt(tr, k, v.xz, cs, hf, mapOrigin, seed, false, gF, jF);
             } else {
                 float vy = min(float(v.y), s.gy);
-                hf = min(min(s.H - s.riser, groundL(tr, k, v.xz + n.xz * max(1, int(8.0 / cs)), vy)),
-                         groundL(tr, k, v.xz + n.xz * max(1, int(32.0 / cs)), vy));
-                dF = bioShare(tr, k, c, desert, rimW, painted, wallM, snowline, hf, p, wp, seed, gF, jF);
+                int2 v32 = v.xz + n.xz * max(1, int(32.0 / cs)), v160 = v.xz + n.xz * max(1, int(160.0 / cs));
+                hf = min(min(s.H - s.riser, groundL(tr, k, v.xz + n.xz * max(1, int(8.0 / cs)), vy)), groundL(tr, k, v32, vy));
+                dF = bioShareAt(tr, k, v32, cs, hf, mapOrigin, seed, true, gF, jF);
+                float gX = 0.0, jX = 0.0;
+                float dX = bioShareAt(tr, k, v160, cs, groundL(tr, k, v160, vy), mapOrigin, seed, true, gX, jX)
+                         * 0.6 * smoothstep(0.0, 160.0, p.y - hf);
+                if (dX > dF) { dF = dX; gF = gX; }
             }
             s.bioFoot = float2(dF, p.y - hf);
             // The pulse travels across the rock as across the ground below it.

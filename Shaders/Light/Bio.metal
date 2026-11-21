@@ -14,10 +14,11 @@ static inline float bioNear(float dist) { return mix(0.6, 1.0, smoothstep(60.0, 
 constant float BIO_FLOOR = 0.052, BIO_FLOOR_HALO = 0.68, BIO_CROWN = 0.038;
 // Distant glow: x(1 + gain) reached at FAR1 voxels from the camera, none within FAR0.
 constant float BIO_FAR0 = 48.0, BIO_FAR1 = 1400.0, BIO_FAR_GAIN = 4.5;
-// Rock over glowing ground (Surface.bioFoot) takes the glow it looks down on, fading to half at BIO_FOOT_H above it. An
-// island's dark rock (a third of a mesa's albedo) takes more, its keel, square to the ground, most: by their albedo alone
-// they read as holes cut in the glowing night.
-constant float BIO_FOOT_H = 160.0, BIO_ISLE_FLANK = 2.5, BIO_ISLE_KEEL = 3.75;
+// Rock over glowing ground (Surface.bioFoot) takes the glow it looks down on, fading to half at BIO_FOOT_H above a cliff's
+// foot. An island hangs over the whole glowing country, which its rock sees at any height (only the haze takes it, to
+// half at BIO_ISLE_H). Its dark rock (a third of a mesa's albedo) takes more, its keel, square to the ground and seeing
+// all of it, about twice a flank's half: by their albedo alone they read as holes cut in the glowing night.
+constant float BIO_FOOT_H = 160.0, BIO_ISLE_H = 600.0, BIO_ISLE_FLANK = 2.2, BIO_ISLE_KEEL = 4.5;
 
 // The light the vegetation gives off at night: moss and undergrowth carpets on the ground, pooled round trunk feet,
 // ragged moss hanging from terrace lips, fungus collars hugging trunk bases, crowns lit from within (undersides and
@@ -36,8 +37,9 @@ static float3 bioLight(thread const Ctx& x, thread const Surface& s, int k, int3
     // The light that rock takes from the glowing ground below it: no more than a face glowing at that ground's share would.
     float Df = 0.0, hh = 0.0;
     if (s.bioFoot.x > 0.0) {
-        hh = max(s.bioFoot.y, 0.0) / BIO_FOOT_H;
-        Df = s.bioFoot.x / (1.0 + hh * hh) * (s.gy >= 1e8 ? (n.y < 0 ? BIO_ISLE_KEEL : BIO_ISLE_FLANK) : 1.0);
+        bool isle = s.gy >= 1e8;
+        hh = max(s.bioFoot.y, 0.0) / (isle ? BIO_ISLE_H : BIO_FOOT_H);
+        Df = s.bioFoot.x / (1.0 + hh * hh) * (isle ? (n.y < 0 ? BIO_ISLE_KEEL : BIO_ISLE_FLANK) : 1.0);
     }
     if (D <= 0.0 && Df <= 0.0) return 0;
     D = max(D, 0.0);
