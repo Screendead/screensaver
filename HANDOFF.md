@@ -32,7 +32,7 @@ Statuses come from the commit history as of 2026-11-20 (master after PR #34; row
 | Vine pass terrain bound | PR #27, merged 2026-10-25: the vine pass reads the coarse rings' top mips through `abs()`, as the scene pass does | ef9dd8c |
 | CI | PR #26, merged 2026-10-25: build and test on macOS (Xcode 26, Metal toolchain), coverage badge on the `badges` branch | 46e2228, e1a05b1 |
 | Canopy light | PRs #31 and #32, merged 2026-11-04 and 2026-11-05: 25% of the sun through leaves; leaves keep their own face normals at every distance (bug reports 11-03 18.32, 11-05 12.49) | 29180fa, f111a01 |
-| Constitution | PR #34, merged 2026-11-20: CONSTITUTION.md and the `constitution-audit` workflow | 6de986d |
+| Constitution and audit a1 | PR #34, merged 2026-11-20: CONSTITUTION.md (Jack's rules: one owner per piece, finished impeccably, no review rounds; the eye is the test, tests only for what it cannot see) and `.claude/workflows/constitution-audit.js` (eight owners, one area each). Audit a1, PRs #36 to #43, 2026-11-21: unit tests 43 to 24 (44 s to 8 s), golden 15 scenes / 51 hashes to 11 / 24 (42 s to 27 s), comment and dead-code pass over Swift and shaders, output byte-identical | 2ba5b06 |
 
 Branches with commits that master lacks (from `git branch --no-merged master`): `strata/islands2` (31 commits, floating islands), `strata/islands-fix`, `strata/islands-b`, `strata/islands`, `strata/giant-C3` and `strata/giant-C2-roots` (morph-band work from 2026-10-13, before PR #1), `strata/vines3`, `strata/waves`, `strata/tundra`, `strata/merge4`, and single-commit prototypes. None of them is described in a merge message, so whether any is still wanted is unknown.
 
@@ -43,6 +43,10 @@ STRATA has no finish line: it evolves for as long as it is used. The goal is a s
 Auto-start was off until 2026-10-24, so the saver never came on by itself. It is now on with a 15 s idle delay; the saver still holds off while a video or other app keeps the display awake. Watch whether that changes how often Jack sees it.
 
 The flight runs at twice its old speed (11-30 voxels/s by height, Jack's call 2026-10-25). 15-minute flights on seeds 1, 303 and 808 kept their clearance and never dropped low; frame times held (no frame over 16.7 ms on mains or battery).
+
+## Next step
+
+Run `constitution-audit` again (tag a2) after the next few waves merge, or once the suite or code has grown.
 
 ## Open questions for Jack
 
